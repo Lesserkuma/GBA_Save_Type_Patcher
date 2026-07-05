@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GBA Save Type Patcher</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <h1>GBA Save Type Patcher</h1>
+      <p class="hero-copy">This tool can patch GBA ROM files to work on different save hardware.<br>This is offered as a proof of concept and does not guarantee all games are patchable successfully.</p>
+    </header>
+
+    <main>
+      <section class="drop-panel" aria-labelledby="drop-title">
+        <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-describedby="drop-help">
+          <div class="drop-icon" aria-hidden="true">📥</div>
+          <div>
+            <h2 id="drop-title">📦 Drop ROMs and save files here</h2>
+            <p id="drop-help">or click to select .gba, .bin, .srl and .sav files</p>
+          </div>
+        </div>
+        <input id="file-input" type="file" multiple accept=".gba,.bin,.srl,.sav" hidden>
+      </section>
+
+      <form id="patch-options" class="settings-grid">
+        <section id="save-options-panel" class="panel options-panel" aria-labelledby="options-title">
+          <div class="panel-heading compact"><h2 id="options-title">⚙️ Save Type Patch</h2></div>
+          <fieldset aria-label="Save type patch mode">
+            <label class="option-line"><input type="radio" name="patchMode" value="none"> <span>None</span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked> <span>SRAM <em class="mode-credit">– based on GBATA</em></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"> <span>Batteryless SRAM <span class="muted">(experimental)</span> <em class="mode-credit">– based on <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">metroid-maniac’s patcher</a></em></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"> <span>Custom 512K/1M FLASH <em class="mode-credit">– by Lesserkuma</em></span></label>
+          </fieldset>
+
+          <fieldset id="batteryless-options" class="sub-options" hidden><legend>🔋 Batteryless SRAM options</legend>
+            <div class="inline-group"><span>Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Auto</label><label><input type="radio" name="batterylessMode" value="keypad"> Hotkey</label></div>
+            <label id="countdown-field" class="field-label">Delay Value <input type="number" name="countdownFrames" min="0" max="255" step="1" value="102" inputmode="numeric"></label>
+            <div class="inline-group stacked-mobile"><span>Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
+          </fieldset>
+
+          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>💾 Custom FLASH options</legend><div class="choice-stack"><span>Save Flash Chip:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
+        </section>
+
+        <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
+          <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
+          <fieldset class="waitstate-toggle"><label class="option-line"><input type="checkbox" name="waitstateEnabled"> Waitstate <span class="muted">(experimental)</span></label></fieldset>
+          <fieldset id="waitstate-options" class="sub-options" hidden><legend>Waitstate Options</legend><label class="field-label">Target value <input type="text" name="targetValue" value="0x4003" spellcheck="false"></label><label class="field-label">Scan limit <input type="text" name="scanLimit" value="0x20000" spellcheck="false"></label></fieldset>
+        </section>
+      </form>
+
+      <section class="panel rom-panel" aria-labelledby="roms-title">
+        <div class="panel-heading"><h2 id="roms-title">🎮 Game ROMs</h2><button id="clear-button" class="ghost-button" type="button">Clear list</button></div>
+        <p id="save-summary" class="small-copy" hidden></p>
+        <p id="empty-state" class="empty-state">No ROMs added yet.</p>
+        <ul id="rom-list" class="rom-list" aria-live="polite"></ul>
+      </section>
+
+      <section class="action-bar" aria-label="Patch and download"><button id="patch-button" type="button" class="primary-button">Patch ROMs</button><div id="status-region" class="status-region" aria-live="polite"></div></section>
+    </main>
+
+    <footer>Version 1.0</footer>
+  </div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
