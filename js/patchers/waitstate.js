@@ -1,327 +1,465 @@
-import { copyBytes, findBytes, readU16, readU32, writeU32 } from "../core/binary.js";
-import { PatchError } from "../core/errors.js";
-import { SRAM_CONSTANTS as C } from "./sram-data.js";
-import { applyPatchHeaderMarker, hasWaitstatePatch, makePatchHeaderFlags, readPatchFlags } from "./patch-state.js";
+/*
+ * SuperCard-style GBA WAITCNT patcher.
+ *
+ * Intentional SuperCard-compatible behavior:
+ *   - scan at most the first seven 1 MiB chunks;
+ *   - inspect only 32-bit-aligned words in the outer scan;
+ *   - use the same backward ARM/Thumb literal-pool scan;
+ *   - handle only the SuperCard WAITCNT constants/patterns;
+ *   - apply the same byte edits:
+ *       0x04000204 literal pool entry -> 00000000
+ *       pattern-derived patch offset   -> 46C0 (Thumb NOP)
+ */
+
+const WAITCNT = 0x04000204;
+const WAITCNT_MINUS_4 = 0x04000200;
+const WAITCNT_PLUS_4 = 0x04000208;
+const SCAN_CHUNKS = 7;
+const CHUNK_SIZE = 0x100000;
+const THUMB_MODE = 0x10;
+const ARM_MODE = 0x20;
 
 function addOperation(operations, name, offset, size, details = {}) {
   const operation = { name, offset, size };
   if (details.codeName !== undefined) operation.code_name = details.codeName;
   if (details.value !== undefined) operation.value = details.value;
+  if (details.oldBytes !== undefined) operation.old_bytes = details.oldBytes;
+  if (details.newBytes !== undefined) operation.new_bytes = details.newBytes;
   operations.push(operation);
 }
 
-function alignDown(value, alignment) {
-  return value - (value % alignment);
+function hexBytes(bytes) {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(" ");
 }
 
-function isFreeByte(value) {
-  return value === 0x00 || value === 0xff;
+function readU16Halfword(bytes, halfwordIndex) {
+  const offset = halfwordIndex * 2;
+  if (offset < 0 || offset + 2 > bytes.length) return null;
+  return (bytes[offset] | (bytes[offset + 1] << 8)) & 0xffff;
 }
 
-function isFreeRegion(bytes, start, size) {
-  if (start < 0 || size < 0 || start + size > bytes.length) return false;
-  for (let offset = start; offset < start + size; offset += 1) {
-    if (!isFreeByte(bytes[offset])) return false;
+function readU32Byte(bytes, offset) {
+  if (offset < 0 || offset + 4 > bytes.length) return null;
+  return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+}
+
+function patchOffset(chunkIndex, halfwordIndex) {
+  return (chunkIndex << 20) + halfwordIndex * 2;
+}
+
+function isThumbTrackedRegClobberOrStop(halfword, register) {
+  const hw = halfword & 0xffff;
+  const reg = register & 7;
+
+  for (const top of [0x3000, 0xa000, 0xa800]) {
+    if ((hw & 0xf800) === top) return (hw & 0xff00) === (top + (reg << 8));
   }
-  return true;
+
+  if ((hw & 0xff80) === 0xb000) return false;
+  if ((hw & 0xf800) === 0xe000) return false;
+  if ((hw & 0xf000) === 0xd000) return false;
+  if ((hw & 0xff00) === 0xbe00) return false;
+  if ((hw & 0xe000) === 0xe000) return false;
+  if ((hw & 0xff80) === 0x4780) return false;
+  if ((hw & 0xff80) === 0x4700) return false;
+  if ((hw & 0xf800) === 0x2800) return false;
+  if ((hw & 0xff00) === 0x4500) return false;
+
+  if ((hw & 0xf800) === 0xc000) return true;
+
+  if ((hw & 0xf800) === 0x4800) return (hw & 0xff00) === (0x4800 + (reg << 8));
+  if ((hw & 0xf800) === 0x9800) return (hw & 0xff00) === (0x9800 + (reg << 8));
+  if ((hw & 0xf800) === 0x2000) return (hw & 0xff00) === (0x2000 + (reg << 8));
+
+  if ((hw & 0xfe00) === 0xbc00) return true;
+  if ((hw & 0xfe00) === 0xb400) return true;
+
+  // This mirrors the original helper even though the earlier C000 branch makes
+  // this specific test unreachable for C000 opcodes.
+  if ((hw & 0xf800) === 0xc000) return (hw & 0xff00) === (0xc000 + (reg << 8));
+
+  if ((hw & 0xf800) === 0x9000) return false;
+  if ((hw & 0xf800) === 0x3800) return (hw & 0xff00) === (0x3800 + (reg << 8));
+  if ((hw & 0xff80) === 0xb080) return false;
+  if ((hw & 0xff00) === 0xdf00) return true;
+
+  return (hw & 0x0007) === reg;
 }
 
-function rangesOverlap(start, end, ranges) {
-  return ranges.some(([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart);
+function findLiteralLoadsSc(chunk, literalHalfword) {
+  const refs = [];
+  let mode = 0;
+  let start = literalHalfword - 0x1004;
+  if (start < 0) start = 0;
+
+  for (let i = start; i < literalHalfword; i += 1) {
+    const wi = readU16Halfword(chunk, i);
+    if (wi === null) continue;
+
+    if ((i & 1) === 0) {
+      const wi1 = readU16Halfword(chunk, i + 1);
+      if (wi1 === 0xe59f && mode !== THUMB_MODE) {
+        const target = (wi & 0x0fff) + i * 2 + 8;
+        if (target === literalHalfword * 2) {
+          refs.push({ halfword: i, reg: (wi >>> 12) & 0xf, mode: ARM_MODE });
+          mode = ARM_MODE;
+        }
+        // SuperCard jumps to the loop tail for any ARM LDR-literal candidate
+        // with high halfword E59F, even when the target does not match.
+        continue;
+      }
+    }
+
+    const target = ((wi & 0x00ff) << 2) + ((i * 2) & 0xfffffffc) + 4;
+    if (target !== literalHalfword * 2) continue;
+    if ((wi & 0xf800) !== 0x4800) continue;
+    const wi1 = readU16Halfword(chunk, i + 1);
+    if (wi1 !== null && (wi1 & 0xf000) === 0xe000) continue;
+    if (mode === ARM_MODE) continue;
+    refs.push({ halfword: i, reg: (wi >>> 8) & 0x7, mode: THUMB_MODE });
+    mode = THUMB_MODE;
+  }
+
+  return refs;
 }
 
-function offsetInRanges(offset, ranges) {
-  return ranges.some(([start, end]) => start <= offset && offset < end);
+function finderWaitcntFrom04000208(ref, chunk, chunkIndex) {
+  const out = [];
+  let fc = ref.halfword;
+  const reg = ref.reg;
+
+  if (ref.mode === THUMB_MODE) {
+    const subPat = ((reg << 8) + 0x3804) & 0xffff;
+    let f8 = 0;
+    while (f8 < 0x14) {
+      fc += 1;
+      const hw = readU16Halfword(chunk, fc);
+      if (hw === null) break;
+      if (hw === subPat) {
+        let f4 = 0;
+        while (f4 < 5) {
+          fc += 1;
+          const hw2 = readU16Halfword(chunk, fc);
+          if (hw2 === null) return out;
+          if (isThumbTrackedRegClobberOrStop(hw2, reg)) return out;
+          const strhPat = ((reg << 3) + 0x8000) & 0xffff;
+          if ((hw2 & 0xfff8) === strhPat) {
+            out.push(patchOffset(chunkIndex, fc));
+            return out;
+          }
+          f4 += 1;
+        }
+        return out;
+      }
+      if (isThumbTrackedRegClobberOrStop(hw, reg)) return out;
+      f8 += 1;
+    }
+    return out;
+  }
+
+  const subLow = ((reg << 12) + 4) & 0xffff;
+  const subHigh = (0xe240 + reg) & 0xffff;
+  let f8 = 0;
+  while (f8 < 0x14) {
+    fc += 2;
+    const low = readU16Halfword(chunk, fc);
+    const high = readU16Halfword(chunk, fc + 1);
+    if (low === null || high === null) break;
+    if (low === subLow && high === subHigh) {
+      let f4 = 0;
+      while (f4 < 5) {
+        fc += 2;
+        const low2 = readU16Halfword(chunk, fc);
+        const high2 = readU16Halfword(chunk, fc + 1);
+        if (low2 === null || high2 === null) return out;
+        if (high2 === ((0x0e1c + reg) & 0xffff) && (low2 & 0x0fff) === 0x00b0) {
+          out.push(patchOffset(chunkIndex, fc));
+          return out;
+        }
+        f4 += 1;
+      }
+      return out;
+    }
+    if (((low & 0xf000) >>> 12) === reg) return out;
+    f8 += 1;
+  }
+  return out;
 }
 
-function resizeRom(rom, newSize, fillValue = 0xff) {
-  if (newSize <= rom.bytes.length) return;
-  const expanded = new Uint8Array(newSize);
-  expanded.fill(fillValue);
-  expanded.set(rom.bytes);
-  rom.bytes = expanded;
+function finderWaitcntFrom04000200(ref, chunk, chunkIndex) {
+  const out = [];
+  let fc = ref.halfword;
+  const reg = ref.reg;
+
+  if (ref.mode === THUMB_MODE) {
+    const pat = ((reg << 3) + 0x8080) & 0xffff;
+    let f8 = 0;
+    while (f8 < 0x28) {
+      fc += 1;
+      const hw = readU16Halfword(chunk, fc);
+      if (hw === null) break;
+      if (isThumbTrackedRegClobberOrStop(hw, reg)) return out;
+      if ((hw & 0xfff8) === pat) out.push(patchOffset(chunkIndex, fc));
+      f8 += 1;
+    }
+    return out;
+  }
+
+  const lowPat = 0x00b4;
+  const highPat = (0xe1c0 + reg) & 0xffff;
+  let f8 = 0;
+  while (f8 < 0x14) {
+    fc += 2;
+    const low = readU16Halfword(chunk, fc);
+    const high = readU16Halfword(chunk, fc + 1);
+    if (low === null || high === null) break;
+    if (((low & 0xf000) >>> 12) === reg) return out;
+    if (high === highPat && (low & 0x0fff) === lowPat) out.push(patchOffset(chunkIndex, fc));
+    f8 += 1;
+  }
+  return out;
 }
 
-function findTailFreeRegion(bytes, size, alignment = 16, end = bytes.length, excludedRanges = []) {
-  let runEnd = null;
-  const limit = Math.min(end, bytes.length);
-  for (let pos = limit - 1; pos >= -1; pos -= 1) {
-    const free = pos >= 0 && isFreeByte(bytes[pos]) && !offsetInRanges(pos, excludedRanges);
-    if (free) {
-      if (runEnd === null) runEnd = pos;
+function finderWaitcntFromArm04000000(seedHalfword, seedReg, chunk, chunkIndex) {
+  const out = [];
+  let fc = seedHalfword;
+  const baseReg = seedReg & 0xf;
+
+  let directBaseValue = 0x04000000;
+  let tempBaseValue = 0;
+  let tempBaseReg = 0;
+  let imm204Value = 0;
+  let imm204Reg = 0;
+
+  for (let n = 0; n < 0x14; n += 1) {
+    fc += 2;
+    const low = readU16Halfword(chunk, fc);
+    const high = readU16Halfword(chunk, fc + 1);
+    if (low === null || high === null) return out;
+
+    if (high === ((0xe280 + baseReg) & 0xffff) && (low & 0x0fff) === 0x0c02) {
+      const dst = (low >>> 12) & 0xf;
+      if (dst === baseReg) directBaseValue += 0x200;
+      else {
+        tempBaseValue = 0x04000200;
+        tempBaseReg = dst;
+      }
       continue;
     }
-    if (runEnd !== null) {
-      const runStart = pos + 1;
-      const alignedStart = alignDown(runEnd - size + 1, alignment);
-      if (alignedStart >= runStart && !rangesOverlap(alignedStart, alignedStart + size, excludedRanges)) return alignedStart;
-      runEnd = null;
-    }
-  }
-  return null;
-}
 
-function rangePairOverlaps(startA, endA, startB, endB) {
-  return startA < endB && startB < endA;
-}
-
-function overlapsBatterylessPowerBoundaryGuard(start, end) {
-  let boundary = C.BATTERYLESS_REGION_ALIGNMENT * 2;
-  while (boundary <= C.GBA_MAX_ROM_SIZE) {
-    const guardStart = boundary - C.BATTERYLESS_RESERVED_SIZE;
-    if (rangePairOverlaps(start, end, guardStart, boundary)) return true;
-    boundary <<= 1;
-  }
-  return false;
-}
-
-export function batterylessPowerBoundaryGuardRanges(limit) {
-  const ranges = [];
-  let boundary = C.BATTERYLESS_REGION_ALIGNMENT * 2;
-  while (boundary <= Math.min(limit, C.GBA_MAX_ROM_SIZE)) {
-    ranges.push([boundary - C.BATTERYLESS_RESERVED_SIZE, boundary]);
-    boundary <<= 1;
-  }
-  return ranges;
-}
-
-function lastNonEmptyBatterylessBlockStart(bytes) {
-  let blockStart = alignDown(Math.max(0, bytes.length - 1), C.BATTERYLESS_REGION_ALIGNMENT);
-  while (blockStart >= 0) {
-    const blockEnd = Math.min(blockStart + C.BATTERYLESS_REGION_ALIGNMENT, bytes.length);
-    let hasData = false;
-    for (let offset = blockStart; offset < blockEnd; offset += 1) {
-      if (!isFreeByte(bytes[offset])) {
-        hasData = true;
-        break;
+    if ((high & 0xfff0) === 0xe1c0 && (low & 0x0fff) === 0x00b4) {
+      const rn = high & 0xf;
+      if (rn === baseReg && directBaseValue === 0x04000200) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
       }
+      if (rn === tempBaseReg && tempBaseValue === 0x04000200) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
+      }
+      continue;
     }
-    if (hasData) return blockStart;
-    blockStart -= C.BATTERYLESS_REGION_ALIGNMENT;
-  }
-  return null;
-}
 
-function waitstatePayloadFitsAtBlockEnd(bytes, blockStart, size) {
-  const blockEnd = blockStart + C.BATTERYLESS_REGION_ALIGNMENT;
-  const payloadBase = blockEnd - size;
-  if (payloadBase < 0 || blockEnd > bytes.length) return null;
-  if (overlapsBatterylessPowerBoundaryGuard(payloadBase, blockEnd)) return null;
-  if (!isFreeRegion(bytes, payloadBase, size)) return null;
-  return payloadBase;
-}
-
-function findWaitstateBatterylessPosition(bytes, size) {
-  const lastContentBlock = lastNonEmptyBatterylessBlockStart(bytes);
-  if (lastContentBlock === null) return null;
-
-  let blockStart = lastContentBlock;
-  while (blockStart + C.BATTERYLESS_REGION_ALIGNMENT <= bytes.length) {
-    const payloadBase = waitstatePayloadFitsAtBlockEnd(bytes, blockStart, size);
-    if (payloadBase !== null) return payloadBase;
-    blockStart += C.BATTERYLESS_REGION_ALIGNMENT;
-  }
-  return null;
-}
-
-export function ensureWaitstateBatterylessPosition(rom, operations, warnings, size) {
-  while (true) {
-    if (rom.bytes.length > C.GBA_MAX_ROM_SIZE) {
-      warnings.push("Waitstate: ROM is larger than 32 MiB");
-      return null;
+    if (high === ((0xe580 + baseReg) & 0xffff) && (low & 0x0fff) === 0x0204) {
+      const rn = high & 0xf;
+      if (rn === baseReg && directBaseValue === 0x04000000) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
+      }
+      continue;
     }
-    const payloadBase = findWaitstateBatterylessPosition(rom.bytes, size);
-    if (payloadBase !== null) return payloadBase;
-    if (rom.bytes.length >= C.GBA_MAX_ROM_SIZE) {
-      warnings.push("Waitstate: no free Batteryless code block and ROM is already 32 MiB");
-      return null;
+
+    if (high === ((0xe280 + baseReg) & 0xffff) && (low & 0x0fff) === 0x0f81) {
+      const dst = (low >>> 12) & 0xf;
+      if (dst === baseReg) directBaseValue += 0x204;
+      else {
+        tempBaseValue = WAITCNT;
+        tempBaseReg = dst;
+      }
+      continue;
     }
-    const oldSize = rom.bytes.length;
-    const newSize = Math.min(oldSize + C.BATTERYLESS_REGION_ALIGNMENT, C.GBA_MAX_ROM_SIZE);
-    if (newSize <= oldSize) {
-      warnings.push("Waitstate: ROM could not be expanded");
-      return null;
+
+    if ((high & 0xfff0) === 0xe1c0 && (low & 0x0fff) === 0x00b0) {
+      const rn = high & 0xf;
+      if (rn === baseReg && directBaseValue === WAITCNT) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
+      }
+      if (rn === tempBaseReg && tempBaseValue === WAITCNT) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
+      }
+      continue;
     }
-    resizeRom(rom, newSize, 0xff);
-    addOperation(operations, "Waitstate ROM expansion", oldSize, newSize - oldSize, { value: newSize });
+
+    if (high === 0xe3a0 && (low & 0x0fff) === 0x0f81) {
+      imm204Value = 0x204;
+      imm204Reg = (low >>> 12) & 0xf;
+      continue;
+    }
+
+    if ((high & 0xfff0) === 0xe180 && (low & 0x0ff0) === 0x00b0) {
+      const rn = high & 0xf;
+      const lowNonzero = low === 0 ? 0 : 1;
+      if (rn === baseReg && directBaseValue === 0x04000000 && lowNonzero === imm204Reg && imm204Value === 0x204) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
+      }
+      if (rn === imm204Reg && directBaseValue === 0x04000000 && lowNonzero === baseReg && imm204Value === 0x204) {
+        out.push(patchOffset(chunkIndex, fc));
+        return out;
+      }
+      continue;
+    }
+
+    if (((low & 0xf000) >>> 12) === baseReg) return out;
   }
+
+  return out;
 }
 
-function decodeEntrypointAddress(out) {
-  if (out.length < 4 || out[3] !== 0xea) throw new PatchError("Unexpected entrypoint instruction");
-  const branchWord = readU32(out, 0);
-  let branchOffset = branchWord & 0x00ffffff;
-  if (branchOffset & 0x00800000) branchOffset -= 0x01000000;
-  return C.GBA_ROM_BASE + 8 + (branchOffset << 2);
-}
+function scanSupercardWaitcnt(data) {
+  const literalZeroOffsets = [];
+  const waitcntNopOffsets = [];
+  let missedCandidates = 0;
 
-function encodeArmBranch(sourceAddress, targetAddress) {
-  const branchOffset = (targetAddress - sourceAddress - 8) >> 2;
-  if (branchOffset < -0x800000 || branchOffset > 0x7fffff) throw new PatchError("Entrypoint target is outside ARM branch range");
-  return (0xea000000 | (branchOffset & 0x00ffffff)) >>> 0;
-}
+  for (let chunkIndex = 0; chunkIndex < SCAN_CHUNKS; chunkIndex += 1) {
+    const start = chunkIndex * CHUNK_SIZE;
+    if (start >= data.length) break;
+    const chunk = data.subarray(start, Math.min(start + CHUNK_SIZE, data.length));
+    const dwordCount = Math.floor(chunk.length / 4);
 
-function makeWaitstatePayload(waitstateValue, nextEntrypoint) {
-  const payload = new Uint8Array(C.WAITSTATE_PAYLOAD_SIZE);
-  [0xe59f0008, 0xe59f1008, 0xe1c010b0, 0xe59ff004, C.WAITSTATE_REGISTER, waitstateValue & 0xffff, nextEntrypoint >>> 0]
-    .forEach((word, index) => writeU32(payload, index * 4, word));
-  return payload;
-}
+    for (let dwordIndex = 0; dwordIndex < dwordCount; dwordIndex += 1) {
+      const pos = dwordIndex * 4;
+      const val = readU32Byte(chunk, pos);
+      if (val === null) continue;
+      const literalHalfword = dwordIndex * 2;
 
-function armLdrLiteralTarget(instruction, instructionAddress) {
-  if ((instruction & 0x0c100000) !== 0x04100000) return null;
-  if (((instruction >>> 16) & 0xf) !== 15) return null;
-  const immediate = instruction & 0xfff;
-  const pc = instructionAddress + 8;
-  return instruction & (1 << 23) ? pc + immediate : pc - immediate;
-}
+      if (val === WAITCNT) {
+        const refs = findLiteralLoadsSc(chunk, literalHalfword);
+        if (refs.length) literalZeroOffsets.push(start + pos);
+        else missedCandidates += 1;
+        continue;
+      }
 
-function thumbLdrLiteralTarget(instruction, instructionAddress) {
-  if ((instruction & 0xf800) !== 0x4800) return null;
-  const immediate = (instruction & 0xff) << 2;
-  return ((instructionAddress + 4) & ~3) + immediate;
-}
-
-function waitstateLiteralIsReferenced(bytes, targetOffset, searchStart, searchEnd) {
-  const targetAddress = C.GBA_ROM_BASE + targetOffset;
-  const start = Math.max(0, searchStart);
-  const end = Math.min(bytes.length, searchEnd);
-  for (let offset = start & ~1; offset < end - 1; offset += 2) {
-    if (thumbLdrLiteralTarget(readU16(bytes, offset), C.GBA_ROM_BASE + offset) === targetAddress) return true;
-  }
-  for (let offset = start & ~3; offset < end - 3; offset += 4) {
-    if (armLdrLiteralTarget(readU32(bytes, offset), C.GBA_ROM_BASE + offset) === targetAddress) return true;
-  }
-  return false;
-}
-
-function patchWaitstateStartupLiterals(out, waitstateValue, operations, excludedRanges, scanLimit) {
-  const marker = new Uint8Array(4);
-  writeU32(marker, 0, C.WAITSTATE_REGISTER);
-  const oldValues = new Set(C.WAITSTATE_DIRECT_OLD_VALUES.map((value) => value & 0xffff).filter((value) => value !== (waitstateValue & 0xffff)));
-  const limit = Math.min(out.length, scanLimit || C.WAITSTATE_DIRECT_SCAN_LIMIT);
-  let patched = 0;
-  let offset = findBytes(out, marker, 0, limit);
-  while (offset >= 0) {
-    if (offset % 4 === 0 && !rangesOverlap(offset, offset + 4, excludedRanges)) {
-      const valueOffset = offset + 4;
-      if (valueOffset + 4 <= out.length && !rangesOverlap(valueOffset, valueOffset + 4, excludedRanges) && waitstateLiteralIsReferenced(out, offset, offset - 0x1000, offset)) {
-        const oldValue = readU32(out, valueOffset) & 0xffff;
-        if (oldValues.has(oldValue)) {
-          writeU32(out, valueOffset, waitstateValue & 0xffff);
-          addOperation(operations, "Waitstate startup WAITCNT value", valueOffset, 4, { codeName: "waitstate_startup_literal", value: waitstateValue & 0xffff });
-          patched += 1;
+      if (val === WAITCNT_PLUS_4) {
+        const refs = findLiteralLoadsSc(chunk, literalHalfword);
+        if (!refs.length) {
+          missedCandidates += 1;
+          continue;
         }
+        for (const ref of refs) waitcntNopOffsets.push(...finderWaitcntFrom04000208(ref, chunk, chunkIndex));
+        continue;
+      }
+
+      if (val === WAITCNT_MINUS_4) {
+        const refs = findLiteralLoadsSc(chunk, literalHalfword);
+        if (!refs.length) {
+          missedCandidates += 1;
+          continue;
+        }
+        for (const ref of refs) waitcntNopOffsets.push(...finderWaitcntFrom04000200(ref, chunk, chunkIndex));
+        continue;
+      }
+
+      const masked = (val & 0xffff0fff) >>> 0;
+      if (masked === 0xe3a00301 || masked === 0xe3a00640) {
+        const seedReg = (val >>> 12) & 0xf;
+        const found = finderWaitcntFromArm04000000(literalHalfword, seedReg, chunk, chunkIndex);
+        if (found.length) waitcntNopOffsets.push(...found);
+        else missedCandidates += 1;
       }
     }
-    offset = findBytes(out, marker, offset + 1, limit);
   }
-  return patched;
+
+  return { literalZeroOffsets, waitcntNopOffsets, missedCandidates };
 }
 
-export function applyWaitstatePatch(rom, operations, warnings, waitstateValue, options = {}) {
-  if (hasWaitstatePatch(readPatchFlags(rom.bytes))) {
-    return { requested: true, status: "already_patched", value: waitstateValue, direct_writes: 0 };
+function buildPatches(data, result) {
+  const patches = [];
+
+  for (const offset of result.literalZeroOffsets) {
+    patches.push({
+      offset,
+      old: data.slice(offset, offset + 4),
+      newBytes: new Uint8Array([0x00, 0x00, 0x00, 0x00]),
+      kind: "literal-zero",
+      reason: "0x04000204 literal referenced by SuperCard literal-load scan",
+    });
   }
 
-  const excludedRanges = [...(options.excludedRanges || []), [0, Math.min(C.GBA_HEADER_SIZE, rom.bytes.length)]];
-  const localOperations = [];
-  const localWarnings = [];
-  const work = new Uint8Array(rom.bytes);
-  let payloadOffset = options.payloadOffset ?? null;
-  let nextEntrypoint = null;
-  let directWrites = 0;
-
-  try {
-    nextEntrypoint = decodeEntrypointAddress(work);
-    directWrites = patchWaitstateStartupLiterals(work, waitstateValue, localOperations, excludedRanges, options.scanLimit);
-    const payload = makeWaitstatePayload(waitstateValue, nextEntrypoint);
-    if (payloadOffset === null && options.payloadOffsetRequired) {
-      localWarnings.push("Waitstate: no free code block for entrypoint payload found");
-      warnings.push(...localWarnings);
-      return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
-    }
-    if (payloadOffset === null) {
-      payloadOffset = findTailFreeRegion(work, payload.length, C.WAITSTATE_PAYLOAD_ALIGNMENT, work.length, excludedRanges);
-    } else if (payloadOffset < 0 || payloadOffset % C.WAITSTATE_PAYLOAD_ALIGNMENT || !isFreeRegion(work, payloadOffset, payload.length)) {
-      payloadOffset = null;
-    }
-    if (payloadOffset === null) {
-      localWarnings.push("Waitstate: no free tail area for entrypoint payload found");
-      warnings.push(...localWarnings);
-      return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
-    }
-
-    const entrypointBranch = encodeArmBranch(C.GBA_ROM_BASE, C.GBA_ROM_BASE + payloadOffset);
-    writeU32(work, 0, entrypointBranch);
-    addOperation(localOperations, "Waitstate Entrypoint", 0, 4, { codeName: "waitstate_entrypoint", value: entrypointBranch });
-    copyBytes(work, payloadOffset, payload);
-    addOperation(localOperations, "Waitstate Payload", payloadOffset, payload.length, { codeName: "waitstate_payload", value: waitstateValue & 0xffff });
-  } catch (error) {
-    localWarnings.push(`Waitstate: ${error.message}`);
-    warnings.push(...localWarnings);
-    return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
+  for (const offset of result.waitcntNopOffsets) {
+    patches.push({
+      offset,
+      old: data.slice(offset, offset + 2),
+      newBytes: new Uint8Array([0xc0, 0x46]),
+      kind: "store-nop-46c0",
+      reason: "fixed SuperCard WAITCNT pattern list entry",
+    });
   }
 
-  rom.bytes = work;
-  operations.push(...localOperations);
-  warnings.push(...localWarnings);
-  return { requested: true, status: "patched", value: waitstateValue, payload_offset: payloadOffset, next_entrypoint: nextEntrypoint, direct_writes: directWrites };
+  return patches;
 }
 
+function applyPatches(data, patches, operations) {
+  const out = new Uint8Array(data);
+  for (const patch of patches) {
+    if (patch.offset < 0 || patch.offset + patch.newBytes.length > out.length) {
+      throw new Error(`Waitstate patch offset outside ROM: 0x${patch.offset.toString(16)}`);
+    }
+    out.set(patch.newBytes, patch.offset);
+    addOperation(operations, "SuperCard WAITCNT patch", patch.offset, patch.newBytes.length, {
+      codeName: patch.kind,
+      oldBytes: hexBytes(patch.old),
+      newBytes: hexBytes(patch.newBytes),
+    });
+  }
+  return out;
+}
 
-export function waitstatePrefixSizeForBatteryless(waitstateOptions, existingFlags) {
-  return waitstateOptions?.enabled && !hasWaitstatePatch(existingFlags) ? C.WAITSTATE_PAYLOAD_SIZE : 0;
+function runSupercardWaitstatePatch(inputBytes, operations, warnings) {
+  const original = new Uint8Array(inputBytes);
+  const scan = scanSupercardWaitcnt(original);
+  const patches = buildPatches(original, scan);
+  const out = applyPatches(original, patches, operations);
+
+  // Preserve this diagnostic for callers that want to expose advanced details;
+  // do not warn on missed candidates because SuperCard also silently ignores
+  // unreferenced constants and unmatched fixed patterns.
+  const status = patches.length ? "patched" : "already_patched";
+  return {
+    bytes: out,
+    waitstate: {
+      requested: true,
+      status,
+      patches: patches.length,
+      literal_zeroes: scan.literalZeroOffsets.length,
+      store_nops: scan.waitcntNopOffsets.length,
+      missed_candidates: scan.missedCandidates,
+    },
+  };
+}
+
+export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = null, options = {}) {
+  const result = runSupercardWaitstatePatch(rom.bytes, operations, warnings);
+  rom.bytes = result.bytes;
+  return result.waitstate;
 }
 
 export function applyWaitstateForPipeline(rom, operations, warnings, waitstateOptions = {}, context = {}) {
-  if (!waitstateOptions.enabled) return null;
-
-  const value = waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE;
-  if (hasWaitstatePatch(readPatchFlags(rom.bytes))) {
-    return { requested: true, status: "already_patched", value, direct_writes: 0 };
-  }
-
-  let payloadOffset = null;
-  let payloadOffsetRequired = false;
-  const excludedRanges = [...(context.excludedRanges || [])];
-
-  if (context.batterylessPayloadOffset !== null && context.batterylessPayloadOffset !== undefined && context.batterylessJustPatched) {
-    payloadOffset = context.batterylessPayloadOffset - C.WAITSTATE_PAYLOAD_SIZE;
-    payloadOffsetRequired = true;
-  }
-
-  if (payloadOffset === null) {
-    payloadOffset = ensureWaitstateBatterylessPosition(rom, operations, warnings, C.WAITSTATE_PAYLOAD_SIZE);
-    payloadOffsetRequired = true;
-  }
-
-  if (excludedRanges.length) excludedRanges.push(...batterylessPowerBoundaryGuardRanges(rom.bytes.length));
-  return applyWaitstatePatch(rom, operations, warnings, value, {
-    excludedRanges,
-    payloadOffset,
-    payloadOffsetRequired,
-    scanLimit: waitstateOptions.scanLimit ?? C.WAITSTATE_DIRECT_SCAN_LIMIT,
-  });
+  if (!waitstateOptions?.enabled) return null;
+  return applyWaitstatePatch(rom, operations, warnings);
 }
 
 export function applyWaitstateToBytes(inputBytes, waitstateOptions = {}) {
   const rom = { bytes: new Uint8Array(inputBytes) };
   const operations = [];
   const warnings = [];
-  let waitstate;
 
-  if (hasWaitstatePatch(readPatchFlags(rom.bytes))) {
-    waitstate = { requested: true, status: "already_patched", value: waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE, direct_writes: 0 };
-  } else {
-    const payloadOffset = ensureWaitstateBatterylessPosition(rom, operations, warnings, C.WAITSTATE_PAYLOAD_SIZE);
-    waitstate = applyWaitstatePatch(rom, operations, warnings, waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE, {
-      payloadOffset,
-      payloadOffsetRequired: true,
-      scanLimit: waitstateOptions.scanLimit ?? C.WAITSTATE_DIRECT_SCAN_LIMIT,
-    });
+  if (waitstateOptions?.enabled === false) {
+    return { bytes: rom.bytes, result: { waitstate: null, operations, warnings, status: "unchanged" } };
   }
 
-  applyPatchHeaderMarker(rom.bytes, operations, makePatchHeaderFlags(rom.bytes, { waitstateResult: waitstate }));
+  const waitstate = applyWaitstatePatch(rom, operations, warnings);
   return { bytes: rom.bytes, result: { waitstate, operations, warnings, status: operations.length ? "patched" : waitstate.status } };
 }

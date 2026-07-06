@@ -3,7 +3,7 @@ import { state, clearZipUrl } from "./state.js";
 import { makeOutputName } from "./core/rom.js";
 import { createZipBlob } from "./zip-writer.js";
 import { patchRomInWorker } from "./worker-client.js";
-import { bindElements, getElements, markPatching, readValidatedOptions, renderOptions, renderRomList, setStatus, syncOptionsFromForm } from "./ui.js";
+import { bindElements, getElements, hideImportProgress, markPatching, readValidatedOptions, renderOptions, renderRomList, setImportProgress, setStatus, syncOptionsFromForm } from "./ui.js";
 function triggerDownload(blob, fileName) {
   clearZipUrl();
   state.lastZipUrl = URL.createObjectURL(blob);
@@ -15,8 +15,33 @@ function triggerDownload(blob, fileName) {
   link.remove();
 }
 async function handleFiles(files) {
-  const result = await addFilesToState([...files], state);
+  const fileList = [...files];
+  if (!fileList.length || state.isImporting) return;
+
+  state.isImporting = true;
+  renderRomList(state);
+  setStatus("Adding files...", "neutral");
+
+  let result = null;
+  let importError = null;
+  try {
+    result = await addFilesToState(fileList, state, { onProgress: setImportProgress });
+  } catch (error) {
+    importError = error;
+  } finally {
+    state.isImporting = false;
+  }
+
+  if (importError) {
+    hideImportProgress();
+    renderRomList(state);
+    setStatus(importError.message || String(importError), "error");
+    return;
+  }
+
   renderRomList(state, { addedIds: new Set(result.addedRomIds) });
+  setImportProgress({ current: fileList.length, total: fileList.length });
+  hideImportProgress(600);
   if (result.ignored.length) setStatus(`Ignored unsupported files: ${result.ignored.join(", ")}`, "warning");
   else if (result.addedRoms) setStatus(`${result.addedRoms} ROM file(s) added.`, "success");
   else setStatus("Save file(s) cached for Batteryless SRAM mode.", "success");

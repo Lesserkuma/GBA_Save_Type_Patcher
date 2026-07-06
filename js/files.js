@@ -1,6 +1,13 @@
 import { parseRomMetadata, ROM_EXTENSIONS, SAVE_EXTENSION, splitFileName } from "./core/rom.js";
 import { findSaveType } from "./patchers/sram.js";
 
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+
 function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
 
@@ -18,11 +25,15 @@ function createId() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
 }
 
-export async function addFilesToState(files, state) {
+export async function addFilesToState(files, state, options = {}) {
   const ignored = [];
   const additions = [];
+  const total = files.length;
 
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
+    options.onProgress?.({ current: index, total, fileName: file.name });
+    await yieldToBrowser();
+
     const { baseName, extension } = splitFileName(file.name);
 
     if (ROM_EXTENSIONS.has(extension)) {
@@ -49,6 +60,9 @@ export async function addFilesToState(files, state) {
     } else {
       ignored.push(file.name);
     }
+
+    options.onProgress?.({ current: index + 1, total, fileName: file.name });
+    await yieldToBrowser();
   }
 
   state.roms.push(...additions);

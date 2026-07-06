@@ -1,9 +1,14 @@
 const elements = {};
+let importProgressHideTimer = null;
 
 export function bindElements() {
   Object.assign(elements, {
     dropZone: document.querySelector("#drop-zone"),
     fileInput: document.querySelector("#file-input"),
+    importProgress: document.querySelector("#import-progress"),
+    importProgressBar: document.querySelector("#import-progress-bar"),
+    importProgressText: document.querySelector("#import-progress-text"),
+    importProgressCount: document.querySelector("#import-progress-count"),
     romList: document.querySelector("#rom-list"),
     emptyState: document.querySelector("#empty-state"),
     saveSummary: document.querySelector("#save-summary"),
@@ -29,11 +34,53 @@ export function setStatus(message, tone = "neutral") {
   elements.statusRegion.dataset.tone = tone;
 }
 
+function setImportProgressHidden(hidden) {
+  if (!elements.importProgress) return;
+  elements.importProgress.hidden = hidden;
+  elements.importProgress.setAttribute("aria-hidden", hidden ? "true" : "false");
+  elements.dropZone.dataset.importing = hidden ? "false" : "true";
+  if (hidden) {
+    elements.dropZone.removeAttribute("aria-busy");
+    elements.fileInput.disabled = false;
+  } else {
+    elements.dropZone.setAttribute("aria-busy", "true");
+    elements.fileInput.disabled = true;
+  }
+}
+
+export function setImportProgress({ current, total, fileName } = {}) {
+  if (!elements.importProgress || !Number.isFinite(total) || total <= 0) return;
+  if (importProgressHideTimer) {
+    window.clearTimeout(importProgressHideTimer);
+    importProgressHideTimer = null;
+  }
+
+  const safeCurrent = Math.max(0, Math.min(total, Number.isFinite(current) ? current : 0));
+  setImportProgressHidden(false);
+  elements.importProgressBar.max = total;
+  elements.importProgressBar.value = safeCurrent;
+  elements.importProgressText.textContent = fileName ? `Adding ${fileName}` : "Adding files...";
+  elements.importProgressCount.textContent = `${safeCurrent} / ${total}`;
+}
+
+export function hideImportProgress(delayMs = 0) {
+  if (importProgressHideTimer) window.clearTimeout(importProgressHideTimer);
+  const hide = () => {
+    importProgressHideTimer = null;
+    setImportProgressHidden(true);
+    if (elements.importProgressBar) elements.importProgressBar.value = 0;
+    if (elements.importProgressCount) elements.importProgressCount.textContent = "0 / 0";
+    if (elements.importProgressText) elements.importProgressText.textContent = "Adding files...";
+  };
+  if (delayMs > 0) importProgressHideTimer = window.setTimeout(hide, delayMs);
+  else hide();
+}
+
 export function renderOptions(state) {
   const isBatteryless = state.options.patchMode === "batteryless-sram";
   elements.batterylessOptions.hidden = !isBatteryless;
   elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
-  elements.waitstateOptions.hidden = !state.options.waitstate.enabled;
+  if (elements.waitstateOptions) elements.waitstateOptions.hidden = !state.options.waitstate.enabled;
   elements.countdownField.hidden = !isBatteryless || state.options.batteryless.mode !== "auto";
   elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "sram" || state.options.patchMode === "none");
 }
@@ -41,8 +88,8 @@ export function renderOptions(state) {
 export function renderRomList(state, options = {}) {
   elements.romList.innerHTML = "";
   elements.emptyState.hidden = state.roms.length > 0;
-  elements.clearButton.disabled = state.isPatching || state.roms.length === 0;
-  elements.patchButton.disabled = state.isPatching || state.roms.length === 0;
+  elements.clearButton.disabled = state.isPatching || state.isImporting || state.roms.length === 0;
+  elements.patchButton.disabled = state.isPatching || state.isImporting || state.roms.length === 0;
   if (elements.saveSummary) {
     elements.saveSummary.hidden = true;
     elements.saveSummary.textContent = "";
@@ -128,16 +175,7 @@ export function syncOptionsFromForm(state) {
   state.options.batteryless.indicator = f.elements.indicator.value;
   state.options.customFlash.saveChipType = f.elements.saveChipType.value;
   state.options.waitstate.enabled = f.elements.waitstateEnabled.checked;
-  state.options.waitstate.targetValueText = f.elements.targetValue.value.trim();
-  state.options.waitstate.scanLimitText = f.elements.scanLimit.value.trim();
-  state.options.waitstate.mode = "standard";
-}
-
-function parseInteger(text, fieldName) {
-  if (!text) throw new Error(`${fieldName} is required.`);
-  const value = Number.parseInt(text, text.toLowerCase().startsWith("0x") ? 16 : 10);
-  if (!Number.isFinite(value) || Number.isNaN(value)) throw new Error(`${fieldName} is not a valid number.`);
-  return value;
+  state.options.waitstate.mode = "supercard_exact";
 }
 
 export function readValidatedOptions(state) {
@@ -151,18 +189,9 @@ export function readValidatedOptions(state) {
     options.batteryless.countdownFrames = 102;
   }
 
-  if (options.waitstate.enabled) {
-    options.waitstate = {
-      enabled: true,
-      value: parseInteger(options.waitstate.targetValueText, "Target value"),
-      scanLimit: parseInteger(options.waitstate.scanLimitText, "Scan limit"),
-      mode: "standard",
-    };
-    if (options.waitstate.value < 0 || options.waitstate.value > 0xffff) throw new Error("Target value must be between 0x0000 and 0xFFFF.");
-    if (options.waitstate.scanLimit <= 0) throw new Error("Scan limit must be greater than 0.");
-  } else {
-    options.waitstate = { enabled: false, value: 0x4003, scanLimit: 0x20000, mode: "standard" };
-  }
+  options.waitstate = options.waitstate.enabled
+    ? { enabled: true, mode: "supercard_exact" }
+    : { enabled: false, mode: "supercard_exact" };
 
   if (options.patchMode === "none" && !options.waitstate.enabled) {
     throw new Error("Select Waitstate or choose a save type patch mode.");

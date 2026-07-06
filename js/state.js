@@ -1,2 +1,2 @@
-export const state = { roms: [], saveFilesByBaseName: new Map(), isPatching: false, lastZipUrl: null, options: { patchMode: "sram", batteryless: { mode: "auto", countdownFrames: 102, indicator: "save" }, customFlash: { saveChipType: "1" }, waitstate: { enabled: false, targetValueText: "0x4003", scanLimitText: "0x20000" } } };
+export const state = { roms: [], saveFilesByBaseName: new Map(), isPatching: false, isImporting: false, lastZipUrl: null, options: { patchMode: "sram", batteryless: { mode: "auto", countdownFrames: 102, indicator: "save" }, customFlash: { saveChipType: "1" }, waitstate: { enabled: false } } };
 export function clearZipUrl() { if (state.lastZipUrl) URL.revokeObjectURL(state.lastZipUrl); state.lastZipUrl = null; }

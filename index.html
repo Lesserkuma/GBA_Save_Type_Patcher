@@ -22,32 +22,42 @@
             <p id="drop-help">ROM files (.gba, .bin, .srl) · Save Data files (.sav)</p>
           </div>
         </div>
+        <div id="import-progress" class="import-progress" role="status" aria-live="polite" aria-hidden="true" hidden>
+          <div class="import-progress-row">
+            <span id="import-progress-text">Adding files...</span>
+            <span id="import-progress-count">0 / 0</span>
+          </div>
+          <progress id="import-progress-bar" value="0" max="1"></progress>
+        </div>
         <input id="file-input" type="file" multiple accept=".gba,.bin,.srl,.sav" hidden>
       </section>
 
       <form id="patch-options" class="settings-grid">
         <section id="save-options-panel" class="panel options-panel no-extra-options" aria-labelledby="options-title">
-          <div class="panel-heading compact"><h2 id="options-title">⚙️ Save Type Patch</h2></div>
+          <div class="panel-heading compact"><h2 id="options-title">💾 Save Type Patch</h2></div>
           <fieldset aria-label="Save type patch mode">
-            <label class="option-line"><input type="radio" name="patchMode" value="none"> <span>None</span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked> <span>SRAM <em class="mode-credit">– partly based on GBATA’s SRAM patcher</em></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"> <span>Batteryless SRAM <span class="muted">(experimental)</span> <em class="mode-credit">– based on <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">metroid-maniac’s Auto Batteryless Patcher</a></em></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"> <span>Custom 512K/1M FLASH <em class="mode-credit">– based on <a href="https://github.com/lesserkuma/Custom_1M_FLASH_Patcher" target="_blank" rel="noopener noreferrer">Lesserkuma’s Custom 1M FLASH Patcher</a></em></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="none"> None</label>
+            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked> SRAM <span class="option-hint">– partly based on GBATA’s SRAM Patcher</span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"> Batteryless SRAM <span class="option-hint">– based on <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">metroid-maniac’s Auto Batteryless Patcher</a> (experimental)</span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"> Custom 512K/1M FLASH <span class="option-hint">– based on <a href="https://github.com/lesserkuma/Custom_1M_FLASH_Patcher" target="_blank" rel="noopener noreferrer">Lesserkuma’s Custom 1M FLASH Patcher</a></span></label>
           </fieldset>
 
-          <fieldset id="batteryless-options" class="sub-options" hidden><legend>🔋 Batteryless SRAM options</legend>
+          <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
             <div class="inline-group"><span>Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Auto</label><label><input type="radio" name="batterylessMode" value="keypad"> Hotkey (L+R+START+SELECT)</label></div>
-            <label id="countdown-field" class="field-label">Delay Value <input type="number" name="countdownFrames" min="0" max="255" step="1" value="102" inputmode="numeric"></label>
+            <label id="countdown-field" class="field-label">Delay Value <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
             <div class="inline-group stacked-mobile"><span>Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
           </fieldset>
 
-          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>💾 Custom FLASH options</legend><div class="choice-stack"><span>Save Flash Chip:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
+          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Save Flash Chip:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
         </section>
 
         <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
           <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
-          <fieldset class="waitstate-toggle"><label class="option-line"><input type="checkbox" name="waitstateEnabled"> Waitstate <span class="muted">(experimental)</span></label></fieldset>
-          <fieldset id="waitstate-options" class="sub-options" hidden><legend>Waitstate Options</legend><label class="field-label">Target value <input type="text" name="targetValue" value="0x4003" spellcheck="false"></label><label class="field-label">Scan limit <input type="text" name="scanLimit" value="0x20000" spellcheck="false"></label></fieldset>
+          <fieldset class="waitstate-toggle">
+            <label class="option-line">
+              <input type="checkbox" name="waitstateEnabled"> Waitstate <span class="option-hint">– based on the SuperCard Patcher (experimental)</span>
+            </label>
+            </fieldset>
         </section>
       </form>
 
@@ -58,10 +68,10 @@
         <ul id="rom-list" class="rom-list" aria-live="polite"></ul>
       </section>
 
-      <section class="action-bar" aria-label="Patch and download"><button id="patch-button" type="button" class="primary-button">Patch ROMs</button><div id="status-region" class="status-region" aria-live="polite"></div></section>
+      <section class="action-bar" aria-label="Patch and download"><button id="patch-button" type="button" class="primary-button">Patch ROMs</button><div id="status-region" class="status-region" aria-live="polite">&nbsp;</div></section>
     </main>
 
-    <footer>Version 1.0</footer>
+    <footer>Version 1.1</footer>
   </div>
   <script type="module" src="js/app.js"></script>
 </body>

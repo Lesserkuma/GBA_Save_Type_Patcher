@@ -9,7 +9,7 @@ import {
   writeU32,
 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
-import { applyWaitstateForPipeline, waitstatePrefixSizeForBatteryless } from "./waitstate.js";
+import { applyWaitstateForPipeline } from "./waitstate.js";
 import { applyPatchHeaderMarker, hasBatterylessPatch, hasSaveTypePatch, makePatchHeaderFlags, readPatchFlags } from "./patch-state.js";
 import {
   BATTERYLESS_ARM_BRANCH_THUNK_HEX,
@@ -707,7 +707,6 @@ export function patchSramBytes(inputBytes, options = {}) {
   const batterylessMode = options.batterylessMode || "auto";
   const batterylessCountdown = options.batterylessCountdown ?? C.BATTERYLESS_DEFAULT_COUNTDOWN;
   const batterylessIndicatorMode = options.batterylessIndicatorMode || "off";
-  const batterylessWaitstatePrefixSize = batteryless ? waitstatePrefixSizeForBatteryless(options.waitstate, existingFlags) : 0;
 
   if (batteryless && batterylessAlreadyApplied) {
     batterylessResult = { requested: true, mode: batterylessMode, status: "already_patched", countdown: batterylessCountdown, indicator_mode: batterylessIndicatorMode };
@@ -718,7 +717,7 @@ export function patchSramBytes(inputBytes, options = {}) {
       batterylessResult.save_offset = batterylessSaveOffset(batterylessPayloadBase);
       batterylessResult.reserved_size = C.BATTERYLESS_RESERVED_SIZE;
       batterylessResult.save_size = readU32(rom.bytes, batterylessPayloadBase + C.BATTERYLESS_SAVE_SIZE_OFFSET) || inferredBatterylessSaveSize(saveType);
-      batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase, batterylessWaitstatePrefixSize)];
+      batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase)];
     }
     skipSavePatch = true;
   } else if (savePatchAlreadyApplied) {
@@ -749,11 +748,11 @@ export function patchSramBytes(inputBytes, options = {}) {
   }
 
   if (batteryless && batterylessResult === null) {
-    batterylessPayloadOffset = ensureBatterylessRegion(rom, operations, warnings, batterylessWaitstatePrefixSize);
+    batterylessPayloadOffset = ensureBatterylessRegion(rom, operations, warnings);
     if (batterylessPayloadOffset === null) {
       batterylessResult = { requested: true, mode: batterylessMode, status: "failed", countdown: batterylessCountdown, indicator_mode: batterylessIndicatorMode };
     } else {
-      batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadOffset, batterylessWaitstatePrefixSize)];
+      batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadOffset)];
     }
   }
 

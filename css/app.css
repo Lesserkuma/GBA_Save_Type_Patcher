@@ -216,6 +216,72 @@ h2 {
   font-size: .8rem
 }
 
+.import-progress {
+  display: grid;
+  gap: .45rem;
+  margin-top: .7rem;
+  padding: .7rem .85rem;
+  border: 1px solid rgba(94, 140, 252, .22);
+  border-radius: var(--radius-sm);
+  background: rgba(21, 24, 41, .84);
+  color: var(--text2);
+  font-size: .76rem
+}
+
+.import-progress[hidden] {
+  display: none !important
+}
+
+.import-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem
+}
+
+#import-progress-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
+#import-progress-count {
+  flex: 0 0 auto;
+  color: var(--accent2);
+  font-weight: 800;
+  letter-spacing: .03em
+}
+
+.import-progress progress {
+  width: 100%;
+  height: .55rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg3);
+  accent-color: var(--accent2)
+}
+
+.import-progress progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--bg3)
+}
+
+.import-progress progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2))
+}
+
+.import-progress progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2))
+}
+
+.drop-zone[data-importing=true] {
+  border-color: rgba(94, 140, 252, .7)
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 1fr);
@@ -261,6 +327,19 @@ h2 {
 .small-copy {
   margin-bottom: .75rem;
   font-size: .75rem
+}
+
+.option-hint {
+  color: var(--text2)
+}
+
+.option-hint a {
+  color: inherit;
+  text-decoration: none
+}
+
+.option-hint a:hover {
+  text-decoration: underline
 }
 
 .empty-state {
