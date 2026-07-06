@@ -407,6 +407,139 @@ function inferredBatterylessSaveSize(saveType) {
   return null;
 }
 
+function batterylessTargetOffset(target) {
+  if (target === "sram") return C.BATTERYLESS_WRITE_SRAM_PATCHED;
+  if (target === "eeprom") return C.BATTERYLESS_WRITE_EEPROM_PATCHED;
+  if (target === "flash") return C.BATTERYLESS_WRITE_FLASH_PATCHED;
+  if (target === "eeprom_v111_posthook") return C.BATTERYLESS_WRITE_EEPROM_V111_POSTHOOK;
+  throw new PatchError(`Unknown Batteryless hook target: ${target}`);
+}
+
+function writeBatterylessThumbHook(out, offset, targetAddress, operations, name) {
+  if (offset < 0 || offset + 8 > out.length) throw new PatchError(`Batteryless hook is outside the ROM: 0x${offset.toString(16)}`);
+  copyBytes(out, offset, BATTERYLESS_THUMB_BRANCH_THUNK);
+  writeU32(out, offset + 4, targetAddress);
+  addOperation(operations, `Batteryless SRAM ${name}`, offset, 8, { codeName: "batteryless_thumb_hook", value: targetAddress >>> 0 });
+}
+
+function writeBatterylessArmHook(out, offset, targetAddress, operations, name) {
+  if (offset < 0 || offset + 12 > out.length) throw new PatchError(`Batteryless ARM hook is outside the ROM: 0x${offset.toString(16)}`);
+  copyBytes(out, offset, BATTERYLESS_ARM_BRANCH_THUNK);
+  writeU32(out, offset + 8, targetAddress);
+  addOperation(operations, `Batteryless SRAM ${name}`, offset, 12, { codeName: "batteryless_arm_hook", value: targetAddress >>> 0 });
+}
+
+function writeBatterylessEepromV111Hook(out, offset, targetAddress, operations, name) {
+  const patchOffset = offset + 0x0c;
+  const pointerOffset = offset + 0x2c;
+  if (patchOffset < 0 || pointerOffset + 4 > out.length) throw new PatchError(`Batteryless EEPROM hook is outside the ROM: 0x${offset.toString(16)}`);
+  copyBytes(out, patchOffset, BATTERYLESS_EEPROM_V111_EPILOGUE_PATCH);
+  writeU32(out, pointerOffset, targetAddress);
+  addOperation(operations, `Batteryless SRAM ${name}`, patchOffset, 4, { codeName: "batteryless_eeprom_v111_epilogue", value: targetAddress >>> 0 });
+  addOperation(operations, `Batteryless SRAM ${name} target`, pointerOffset, 4, { value: targetAddress >>> 0 });
+}
+
+function patchBatterylessWriteHooks(out, payloadBase, mode, saveType, operations, warnings) {
+  const hooksFound = [];
+  let saveSize = inferredBatterylessSaveSize(saveType);
+  let storageMode = C.BATTERYLESS_STORAGE_MODE_NORMAL;
+  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase);
+
+  for (const hook of BATTERYLESS_WRITE_HOOKS) {
+    const marker = hexPattern(hook.marker);
+    let pos = 0;
+    while (true) {
+      const matchOffset = findAlignedMarker(out, marker, pos, out.length, 2);
+      if (matchOffset === null) break;
+      if (reservedStart <= matchOffset && matchOffset < reservedEnd) {
+        pos = reservedEnd;
+        continue;
+      }
+
+      hooksFound.push({ name: hook.name, offset: matchOffset });
+      const hookStorageMode = hook.storage_mode ?? C.BATTERYLESS_STORAGE_MODE_NORMAL;
+      if (hookStorageMode !== C.BATTERYLESS_STORAGE_MODE_NORMAL) {
+        if (![C.BATTERYLESS_STORAGE_MODE_NORMAL, hookStorageMode].includes(storageMode)) {
+          warnings.push("Batteryless SRAM: conflicting save storage formats detected");
+          return { saveSize: null, hooksFound, storageMode };
+        }
+        storageMode = hookStorageMode;
+        saveSize = hook.save_size;
+      } else if (storageMode === C.BATTERYLESS_STORAGE_MODE_NORMAL) {
+        saveSize = Math.max(saveSize || 0, hook.save_size);
+      }
+
+      if (mode === "auto") {
+        const targetAddress = (C.GBA_ROM_BASE + payloadBase + batterylessTargetOffset(hook.target)) >>> 0;
+        if (hook.thunk === "thumb") writeBatterylessThumbHook(out, matchOffset, targetAddress, operations, hook.name);
+        else if (hook.thunk === "arm") writeBatterylessArmHook(out, matchOffset, targetAddress, operations, hook.name);
+        else if (hook.thunk === "eeprom_v111_epilogue") writeBatterylessEepromV111Hook(out, matchOffset, targetAddress, operations, hook.name);
+        else throw new PatchError(`Unknown Batteryless hook type: ${hook.thunk}`);
+      }
+      pos = matchOffset + 2;
+    }
+  }
+
+  if (!hooksFound.length) {
+    if (mode === "auto") {
+      warnings.push("Batteryless SRAM: no matching save-write routine found for Auto mode");
+      return { saveSize: null, hooksFound, storageMode };
+    }
+    warnings.push("Batteryless SRAM: save size could not be detected safely, using 128 KiB");
+    saveSize = saveSize || 0x20000;
+  }
+  return { saveSize, hooksFound, storageMode };
+}
+
+function patchBatterylessFlash1mBankSwitch(out, payloadBase, saveType, operations) {
+  if (!saveType || !saveType.startsWith("FLASH1M")) return 0;
+  const targetAddress = (C.GBA_ROM_BASE + payloadBase + C.BATTERYLESS_SRAM_BANK_SELECT_PATCHED) >>> 0;
+  const patch = new Uint8Array(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4 + 16);
+  patch.set(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK);
+  writeU32(patch, BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length, targetAddress);
+  for (let i = BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4; i < patch.length; i += 2) {
+    patch[i] = 0xc0;
+    patch[i + 1] = 0x46;
+  }
+  if (patch.length !== BATTERYLESS_FLASH1M_DIRECT_BANK_SWITCH_PATCH.length) throw new PatchError("Batteryless SRAM: FLASH1M bank-switch patch has the wrong length");
+
+  let count = 0;
+  let pos = 0;
+  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase);
+  while (true) {
+    const matchOffset = findAlignedMarker(out, BATTERYLESS_FLASH1M_DIRECT_BANK_SWITCH_PATCH, pos, out.length, 2);
+    if (matchOffset === null) return count;
+    if (reservedStart <= matchOffset && matchOffset < reservedEnd) {
+      pos = reservedEnd;
+      continue;
+    }
+    copyBytes(out, matchOffset, patch);
+    addOperation(operations, "Batteryless SRAM FLASH1M bank switch via RAM", matchOffset, patch.length, { codeName: "batteryless_flash1m_bank_switch", value: targetAddress });
+    count += 1;
+    pos = matchOffset + patch.length;
+  }
+}
+
+function patchBatterylessIrqReferences(out, payloadBase, operations) {
+  let count = 0;
+  let pos = 0;
+  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase);
+
+  while (true) {
+    const matchOffset = findAlignedMarker(out, BATTERYLESS_OLD_IRQ_ADDR, pos, out.length, 4);
+    if (matchOffset === null) return count;
+    if (reservedStart <= matchOffset && matchOffset < reservedEnd) {
+      pos = reservedEnd;
+      continue;
+    }
+
+    copyBytes(out, matchOffset, BATTERYLESS_NEW_IRQ_ADDR);
+    addOperation(operations, "Batteryless SRAM IRQ handler address", matchOffset, 4, { value: 0x03007ff4 });
+    count += 1;
+    pos = matchOffset + 4;
+  }
+}
+
 function decodeEntrypointAddress(out) {
   if (out.length < 4 || out[3] !== 0xea) throw new PatchError("Unexpected entrypoint instruction");
   const branchWord = readU32(out, 0);
