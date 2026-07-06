@@ -37,25 +37,25 @@
           <div class="panel-heading compact"><h2 id="options-title">💾 Save Type Patch</h2></div>
           <fieldset aria-label="Save type patch mode">
             <label class="option-line"><input type="radio" name="patchMode" value="none"> None</label>
-            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked> SRAM <span class="option-hint">– partly based on GBATA’s SRAM Patcher</span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"> Batteryless SRAM <span class="option-hint">– based on <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">metroid-maniac’s Auto Batteryless Patcher</a> (experimental)</span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"> Custom 512K/1M FLASH <span class="option-hint">– based on <a href="https://github.com/lesserkuma/Custom_1M_FLASH_Patcher" target="_blank" rel="noopener noreferrer">Lesserkuma’s Custom 1M FLASH Patcher</a></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked><span class="option-copy">SRAM <span class="option-hint">(for SRAM-based cartridges with battery)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy">Batteryless SRAM <span class="option-hint">(for SRAM-based cartridges without battery, experimental)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy">Custom 512K/1M FLASH <span class="option-hint">(for Custom-FLASH-based cartridges)</span></span></label>
           </fieldset>
 
           <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
             <div class="inline-group"><span>Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Auto</label><label><input type="radio" name="batterylessMode" value="keypad"> Hotkey (L+R+START+SELECT)</label></div>
-            <label id="countdown-field" class="field-label">Delay Value <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
+            <label id="countdown-field" class="field-label">Delay Value: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
             <div class="inline-group stacked-mobile"><span>Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
           </fieldset>
 
-          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Save Flash Chip:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
+          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Flash Chip Type:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
         </section>
 
         <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
           <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
           <fieldset class="waitstate-toggle">
             <label class="option-line">
-              <input type="checkbox" name="waitstateEnabled"> Waitstate <span class="option-hint">– based on the SuperCard Patcher (experimental)</span>
+              <input type="checkbox" name="waitstateEnabled"><span class="option-copy">Waitstate <span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
             </label>
             </fieldset>
         </section>
@@ -71,7 +71,17 @@
       <section class="action-bar" aria-label="Patch and download"><button id="patch-button" type="button" class="primary-button">Patch ROMs</button><div id="status-region" class="status-region" aria-live="polite">&nbsp;</div></section>
     </main>
 
-    <footer>Version 1.1</footer>
+    <footer>
+      <div><b>GBA Save Type Patcher v1.2</b> by Lesserkuma</div>
+      <div>
+        Developed with assistance from GPT-5.5<br>
+        Portions based on:<br>
+        <a href="https://web.archive.org/web/20070225124322/http://www.gbadat.altervista.org/tools.htm" target="_blank" rel="noopener noreferrer">GBATA SRAM Patcher</a> by coolhj<br>
+        <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">gba-auto-batteryless-patcher</a> by Metroid Maniac (MIT)<br>
+        <a href="https://github.com/Lesserkuma/Custom_1M_FLASH_Patcher" target="_blank" rel="noopener noreferrer">Custom 1M FLASH Patcher</a> by Lesserkuma (GPL-3.0)<br>
+        <a href="https://github.com/davidgfnet/superfw" target="_blank" rel="noopener noreferrer">SuperFW WAITCNT patching</a> by David Guillen Fandos (GPL-3.0-or-later)
+      </div>
+    </footer>
   </div>
   <script type="module" src="js/app.js"></script>
 </body>

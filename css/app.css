@@ -330,7 +330,12 @@ h2 {
 }
 
 .option-hint {
-  color: var(--text2)
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: break-word;
+  color: var(--text2);
+  vertical-align: baseline;
+  white-space: normal
 }
 
 .option-hint a {
@@ -476,11 +481,16 @@ legend {
 
 .option-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: .65rem;
   min-height: 2rem;
   color: var(--text);
   font-size: .8rem
+}
+
+.option-copy {
+  min-width: 0;
+  display: block
 }
 
 input[type=radio],
@@ -524,8 +534,6 @@ input[type=checkbox] {
 }
 
 .field-label {
-  display: grid;
-  gap: .35rem;
   margin: .75rem 0;
   color: var(--text2);
   font-size: .78rem
@@ -533,7 +541,6 @@ input[type=checkbox] {
 
 .field-label input[type=text],
 .field-label input[type=number] {
-  width: 100%;
   min-height: 2.45rem;
   padding: 0 .7rem;
   border: 1px solid var(--bg4);
@@ -675,6 +682,10 @@ footer {
   color: var(--text3);
   text-align: center;
   font-size: .7rem
+}
+
+footer div {
+  margin-bottom: .25rem
 }
 
 ::-webkit-scrollbar {
@@ -822,6 +833,11 @@ fieldset[hidden] {
   .action-bar .primary-button {
     width: 100%
   }
+
+  .option-line {
+    flex-wrap: wrap
+  }
+
 }
 
 /* Compact Game ROMs list, closer to the GBMem builder list style */
