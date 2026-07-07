@@ -25,8 +25,15 @@
  *     referenced by PC-relative Thumb/ARM LDR instructions.
  *
  * No save, IRQ, RTC, DirectSave, or in-game-menu patch operation is applied
- * here; only WAITCNT/wcnt_ops are considered.
+ * here. The exported patch path also installs a small entrypoint payload that
+ * writes the selected WAITCNT value before continuing to the previous entrypoint.
  */
+
+import { copyBytes, findBytes, readU16, readU32, writeU32 } from "../core/binary.js";
+import { PatchError } from "../core/errors.js";
+import { applyPatchHeaderMarker, hasWaitstatePatch, makePatchHeaderFlags, readPatchFlags, updateGbaHeaderChecksum } from "./patch-state.js";
+import { SRAM_CONSTANTS as C } from "./sram-data.js";
+import { PAYLOAD_ALIGNMENT, alignedPayloadSpan, ensureDirectPayloadRegion } from "./payload-placement.js";
 
 const WAITCNT_VALUE_EXACT = 0x04000204;
 const THUMB_LDR_BACKOFF = 256;
@@ -1866,8 +1873,199 @@ function recordAndWriteBytes(rom, operations, offset, newBytes, codeName) {
   return true;
 }
 
-function applySuperfwWaitcntDbOps(inputBytes, entry, operations) {
+function collectSuperfwProgramWrites(entry) {
+  if (!entry) return [];
+
+  const writes = [];
+  const seen = new Set();
+  for (let i = 0; i < entry.ops.length; i += 1) {
+    const op = entry.ops[i] >>> 0;
+    const opcode = op >>> 28;
+    const arg = (op >>> 25) & 7;
+    const moff = op & 0x01ffffff;
+
+    if (opcode === 0x0) {
+      const program = entry.programs[arg] || new Uint8Array(0);
+      const key = `${arg}:${moff}:${program.length}`;
+      if (program.length && moff >= 0 && moff < MAX_GBA_ROM_SIZE && !seen.has(key)) {
+        seen.add(key);
+        writes.push({ programIndex: arg, oldOffset: moff, size: program.length, span: alignedPayloadSpan(program.length) });
+      }
+    } else if (opcode === 0x3) {
+      i += Math.floor((arg + 1 + 3) / 4);
+    } else if (opcode === 0x4) {
+      i += arg + 1;
+    }
+  }
+
+  return writes;
+}
+
+function makeSuperfwProgramRelocations(entry, programBaseOffset = null) {
+  const programWrites = collectSuperfwProgramWrites(entry);
+  if (programBaseOffset === null || programBaseOffset === undefined || !programWrites.length) return [];
+
+  let cursor = programBaseOffset;
+  return programWrites.map((write) => {
+    const relocation = { ...write, newOffset: cursor };
+    cursor += write.span;
+    return relocation;
+  });
+}
+
+function superfwProgramRelocationSpan(entry) {
+  return collectSuperfwProgramWrites(entry).reduce((sum, write) => sum + write.span, 0);
+}
+
+function mapRelocatedSuperfwTarget(targetAddress, relocations) {
+  const targetOffset = targetAddress - C.GBA_ROM_BASE;
+  if (!Number.isFinite(targetOffset) || targetOffset < 0 || targetOffset >= MAX_GBA_ROM_SIZE) return null;
+
+  for (const relocation of relocations || []) {
+    const oldStart = relocation.oldOffset;
+    const oldEnd = oldStart + relocation.size;
+    if (targetOffset >= oldStart && targetOffset < oldEnd) {
+      return (C.GBA_ROM_BASE + relocation.newOffset + (targetOffset - oldStart)) >>> 0;
+    }
+  }
+  return null;
+}
+
+function decodeArmBranchTarget(word, instructionAddress) {
+  if (((word >>> 25) & 0x7) !== 0x5) return null;
+  let immediate = word & 0x00ffffff;
+  if (immediate & 0x00800000) immediate -= 0x01000000;
+  return (instructionAddress + 8 + (immediate << 2)) >>> 0;
+}
+
+function encodeArmBranchToTarget(originalWord, instructionAddress, targetAddress) {
+  const delta = targetAddress - instructionAddress - 8;
+  if (delta % 4 !== 0) return null;
+  const immediate = delta >> 2;
+  if (immediate < -0x800000 || immediate > 0x7fffff) return null;
+  return ((originalWord & 0xff000000) | (immediate & 0x00ffffff)) >>> 0;
+}
+
+function decodeThumbBranchTarget(halfword, instructionAddress) {
+  if ((halfword & 0xf800) !== 0xe000) return null;
+  let immediate = halfword & 0x07ff;
+  if (immediate & 0x0400) immediate -= 0x0800;
+  return (instructionAddress + 4 + (immediate << 1)) >>> 0;
+}
+
+function encodeThumbBranchToTarget(targetAddress, instructionAddress) {
+  const delta = targetAddress - instructionAddress - 4;
+  if (delta % 2 !== 0) return null;
+  const immediate = delta >> 1;
+  if (immediate < -0x400 || immediate > 0x3ff) return null;
+  return 0xe000 | (immediate & 0x07ff);
+}
+
+function decodeThumbBlTarget(firstHalfword, secondHalfword, instructionAddress) {
+  if ((firstHalfword & 0xf800) !== 0xf000 || (secondHalfword & 0xf800) !== 0xf800) return null;
+  let high = firstHalfword & 0x07ff;
+  if (high & 0x0400) high -= 0x0800;
+  const low = secondHalfword & 0x07ff;
+  return (instructionAddress + 4 + (high << 12) + (low << 1)) >>> 0;
+}
+
+function encodeThumbBlToTarget(targetAddress, instructionAddress) {
+  const delta = targetAddress - instructionAddress - 4;
+  if (delta % 2 !== 0) return null;
+  if (delta < -0x400000 || delta > 0x3ffffe) return null;
+  return [0xf000 | ((delta >> 12) & 0x07ff), 0xf800 | ((delta >> 1) & 0x07ff)];
+}
+
+function relocateSuperfwWriteBytes(bytes, writeOffset, relocations, warnings) {
+  if (!relocations?.length) return bytes;
+
+  const relocated = new Uint8Array(bytes);
+
+  for (let offset = 0; offset + 4 <= relocated.length; offset += 1) {
+    if ((writeOffset + offset) % 4 !== 0) continue;
+    const value = readU32At(relocated, offset);
+    const mapped = mapRelocatedSuperfwTarget(value & ~1, relocations);
+    if (mapped !== null) writeU32At(relocated, offset, (mapped | (value & 1)) >>> 0);
+  }
+
+  for (let offset = 0; offset + 4 <= relocated.length; offset += 1) {
+    if ((writeOffset + offset) % 4 !== 0) continue;
+    const instructionAddress = C.GBA_ROM_BASE + writeOffset + offset;
+    const word = readU32At(relocated, offset);
+    const target = decodeArmBranchTarget(word, instructionAddress);
+    const mapped = target === null ? null : mapRelocatedSuperfwTarget(target, relocations);
+    if (mapped === null) continue;
+
+    const encoded = encodeArmBranchToTarget(word, instructionAddress, mapped);
+    if (encoded === null) {
+      warnings?.push(`Waitstate: could not relocate ARM branch at 0x${(writeOffset + offset).toString(16)} to relocated SuperFW program`);
+      continue;
+    }
+    writeU32At(relocated, offset, encoded);
+  }
+
+  for (let offset = 0; offset + 2 <= relocated.length; offset += 1) {
+    if ((writeOffset + offset) % 2 !== 0) continue;
+    const instructionAddress = C.GBA_ROM_BASE + writeOffset + offset;
+    const halfword = relocated[offset] | (relocated[offset + 1] << 8);
+
+    if (offset + 4 <= relocated.length) {
+      const nextHalfword = relocated[offset + 2] | (relocated[offset + 3] << 8);
+      const blTarget = decodeThumbBlTarget(halfword, nextHalfword, instructionAddress);
+      const mappedBl = blTarget === null ? null : mapRelocatedSuperfwTarget(blTarget, relocations);
+      if (mappedBl !== null) {
+        const encodedBl = encodeThumbBlToTarget(mappedBl, instructionAddress);
+        if (encodedBl === null) {
+          warnings?.push(`Waitstate: could not relocate Thumb BL at 0x${(writeOffset + offset).toString(16)} to relocated SuperFW program`);
+        } else {
+          writeU16At(relocated, offset, encodedBl[0]);
+          writeU16At(relocated, offset + 2, encodedBl[1]);
+        }
+        offset += 3;
+        continue;
+      }
+    }
+
+    const target = decodeThumbBranchTarget(halfword, instructionAddress);
+    const mapped = target === null ? null : mapRelocatedSuperfwTarget(target, relocations);
+    if (mapped === null) continue;
+
+    const encoded = encodeThumbBranchToTarget(mapped, instructionAddress);
+    if (encoded === null) {
+      warnings?.push(`Waitstate: could not relocate Thumb branch at 0x${(writeOffset + offset).toString(16)} to relocated SuperFW program`);
+      continue;
+    }
+    writeU16At(relocated, offset, encoded);
+  }
+
+  return relocated;
+}
+
+function relocatedSuperfwProgramOffset(relocations, programIndex, oldOffset, size) {
+  const relocation = (relocations || []).find((entry) => (
+    entry.programIndex === programIndex
+    && entry.oldOffset === oldOffset
+    && entry.size === size
+  ));
+  return relocation ? relocation.newOffset : oldOffset;
+}
+
+function writeSuperfwDbBytes(rom, operations, originalOffset, newBytes, codeName, relocationContext = {}, meta = {}) {
+  const relocations = relocationContext.programRelocations || [];
+  const actualOffset = meta.isProgram
+    ? relocatedSuperfwProgramOffset(relocations, meta.programIndex, originalOffset, newBytes.length)
+    : originalOffset;
+  const relocatedBytes = relocateSuperfwWriteBytes(newBytes, actualOffset, relocations, relocationContext.warnings);
+  const relocatedCodeName = meta.isProgram && actualOffset !== originalOffset ? `${codeName}_relocated` : codeName;
+  return recordAndWriteBytes(rom, operations, actualOffset, relocatedBytes, relocatedCodeName);
+}
+
+function applySuperfwWaitcntDbOps(inputBytes, entry, operations, options = {}) {
   const rom = { bytes: new Uint8Array(inputBytes) };
+  const relocationContext = {
+    warnings: options.warnings || [],
+    programRelocations: makeSuperfwProgramRelocations(entry, options.programBaseOffset ?? null),
+  };
   let appliedWrites = 0;
 
   for (let i = 0; i < entry.ops.length; i += 1) {
@@ -1879,16 +2077,16 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations) {
     switch (opcode) {
       case 0x0: {
         const program = entry.programs[arg] || new Uint8Array(0);
-        if (program.length && recordAndWriteBytes(rom, operations, moff, program, `superfw_db_wr_buf_prg${arg}`)) appliedWrites += 1;
+        if (program.length && writeSuperfwDbBytes(rom, operations, moff, program, `superfw_db_wr_buf_prg${arg}`, relocationContext, { isProgram: true, programIndex: arg })) appliedWrites += 1;
         break;
       }
 
       case 0x1:
-        if (recordAndWriteBytes(rom, operations, moff, u16ToBytes(0x46c0), "superfw_db_nop_thumb")) appliedWrites += 1;
+        if (writeSuperfwDbBytes(rom, operations, moff, u16ToBytes(0x46c0), "superfw_db_nop_thumb", relocationContext)) appliedWrites += 1;
         break;
 
       case 0x2:
-        if (recordAndWriteBytes(rom, operations, moff, u32ToBytes(0xe1a00000), "superfw_db_nop_arm")) appliedWrites += 1;
+        if (writeSuperfwDbBytes(rom, operations, moff, u32ToBytes(0xe1a00000), "superfw_db_nop_arm", relocationContext)) appliedWrites += 1;
         break;
 
       case 0x3: {
@@ -1899,7 +2097,7 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations) {
           const dataWord = entry.ops[i + 1 + Math.floor(j / 4)] || 0;
           newBytes[j] = (dataWord >>> ((j & 3) * 8)) & 0xff;
         }
-        if (recordAndWriteBytes(rom, operations, moff, newBytes, "superfw_db_wr_bytes")) appliedWrites += 1;
+        if (writeSuperfwDbBytes(rom, operations, moff, newBytes, "superfw_db_wr_bytes", relocationContext)) appliedWrites += 1;
         i += dataWordCount;
         break;
       }
@@ -1913,11 +2111,11 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations) {
         // even though the write address is moff+j*4.
         const writeAllowed = Array.from({ length: wordCount }, (_, j) => moff + j < MAX_GBA_ROM_SIZE);
         if (writeAllowed.every(Boolean)) {
-          if (recordAndWriteBytes(rom, operations, moff, newBytes, "superfw_db_wr_words")) appliedWrites += 1;
+          if (writeSuperfwDbBytes(rom, operations, moff, newBytes, "superfw_db_wr_words", relocationContext)) appliedWrites += 1;
         } else {
           for (let j = 0; j < wordCount; j += 1) {
             if (!writeAllowed[j]) continue;
-            if (recordAndWriteBytes(rom, operations, moff + j * 4, u32ToBytes(words[j]), "superfw_db_wr_word")) appliedWrites += 1;
+            if (writeSuperfwDbBytes(rom, operations, moff + j * 4, u32ToBytes(words[j]), "superfw_db_wr_word", relocationContext)) appliedWrites += 1;
           }
         }
         i += wordCount;
@@ -1927,11 +2125,11 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations) {
       case 0x5: {
         if (arg === 0 || arg === 1) {
           const value = arg ? 0x47702001 : 0x47702000;
-          if (recordAndWriteBytes(rom, operations, moff, u32ToBytes(value), "superfw_db_patch_fn_thumb")) appliedWrites += 1;
+          if (writeSuperfwDbBytes(rom, operations, moff, u32ToBytes(value), "superfw_db_patch_fn_thumb", relocationContext)) appliedWrites += 1;
         } else if (arg === 4 || arg === 5) {
           const value = arg === 5 ? 0xe3a00001 : 0xe3a00000;
-          if (recordAndWriteBytes(rom, operations, moff, u32ToBytes(value), "superfw_db_patch_fn_arm_ret")) appliedWrites += 1;
-          if (recordAndWriteBytes(rom, operations, moff + 4, u32ToBytes(0xe12fff1e), "superfw_db_patch_fn_arm_bx_lr")) appliedWrites += 1;
+          if (writeSuperfwDbBytes(rom, operations, moff, u32ToBytes(value), "superfw_db_patch_fn_arm_ret", relocationContext)) appliedWrites += 1;
+          if (writeSuperfwDbBytes(rom, operations, moff + 4, u32ToBytes(0xe12fff1e), "superfw_db_patch_fn_arm_bx_lr", relocationContext)) appliedWrites += 1;
         }
         break;
       }
@@ -1942,82 +2140,19 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations) {
     }
   }
 
-  return { bytes: rom.bytes, appliedWrites };
+  return { bytes: rom.bytes, appliedWrites, programRelocations: relocationContext.programRelocations };
 }
 
-// Direct port of superfw patchengine.c find_thumb_ldrpc().
-// start and target are halfword offsets.
-function findThumbLdrPc(bytes, start, target) {
-  for (let i = start; i < target; i += 1) {
-    const halfword = readU16Halfword(bytes, i);
-    if (halfword === null) return false;
-
-    const opc = halfword >>> 11;
-    if (opc === 0x09) {
-      const imm8 = halfword & 0xff;
-      const tgtaddr = (i & ~1) + imm8 * 2 + 2;
-      if (tgtaddr === target) return true;
-    }
-  }
-  return false;
-}
-
-// Direct port of superfw patchengine.c find_arm_ldrpc().
-// start and target are word offsets.
-function findArmLdrPc(bytes, start, target) {
-  for (let i = start; i < target; i += 1) {
-    const word = readU32Word(bytes, i);
-    if (word === null) return false;
-
-    const opc = (word >>> 20) & 0xff;
-    const rn = (word >>> 16) & 0x0f;
-    if (opc === 0x59 && rn === 15) {
-      const imm12 = word & 0x0fff;
-      if ((imm12 & 3) === 0) {
-        const tgtaddr = i + (imm12 >>> 2) + 2;
-        if (tgtaddr === target) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function findSuperfwPatchengineWaitcntLiteralOffsets(bytes) {
-  const offsets = [];
-  const wordCount = Math.floor(bytes.length / 4);
-
-  for (let i = 0; i < wordCount; i += 1) {
-    if (readU32Word(bytes, i) !== WAITCNT_VALUE_EXACT) continue;
-
-    const startPosThumb = i < THUMB_LDR_BACKOFF ? 0 : i - THUMB_LDR_BACKOFF;
-    const startPosArm = i < ARM_LDR_BACKOFF ? 0 : i - ARM_LDR_BACKOFF;
-    if (
-      findThumbLdrPc(bytes, startPosThumb * 2, i * 2)
-      || findArmLdrPc(bytes, startPosArm, i)
-    ) {
-      offsets.push(i * 4);
-    }
-  }
-
-  return offsets;
-}
-
-function applySuperfwPatchengineWaitcnt(inputBytes, operations) {
-  const rom = { bytes: new Uint8Array(inputBytes) };
-  const offsets = findSuperfwPatchengineWaitcntLiteralOffsets(rom.bytes);
-  for (const offset of offsets) {
-    recordAndWriteBytes(rom, operations, offset, new Uint8Array([0x00, 0x00, 0x00, 0x00]), "superfw_patchengine_waitcnt_literal_zero");
-  }
-  return { bytes: rom.bytes, patches: offsets.length };
-}
-
-function runSuperfwWaitcntPatch(inputBytes, operations, warnings) {
+function runSuperfwWaitcntPatch(inputBytes, operations, warnings, options = {}) {
   const original = new Uint8Array(inputBytes);
   const dbEntry = getSuperfwDbEntryForRom(original);
 
   if (dbEntry !== null) {
     const before = operations.length;
-    const patched = applySuperfwWaitcntDbOps(original, dbEntry, operations);
+    const patched = applySuperfwWaitcntDbOps(original, dbEntry, operations, {
+      warnings,
+      programBaseOffset: options.programBaseOffset ?? null,
+    });
     const appliedWrites = operations.length - before;
     return {
       bytes: patched.bytes,
@@ -2027,6 +2162,7 @@ function runSuperfwWaitcntPatch(inputBytes, operations, warnings) {
         source: "superfw_patch_database",
         patches: appliedWrites,
         superfw_wcnt_ops: dbEntry.wcntOps,
+        program_relocations: patched.programRelocations,
       },
     };
   }
@@ -2046,26 +2182,382 @@ function runSuperfwWaitcntPatch(inputBytes, operations, warnings) {
   };
 }
 
-export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = null, options = {}) {
-  const result = runSuperfwWaitcntPatch(rom.bytes, operations, warnings);
-  rom.bytes = result.bytes;
-  return result.waitstate;
+function alignDown(value, alignment) {
+  return value - (value % alignment);
+}
+
+function isFreeByte(value) {
+  return value === 0x00 || value === 0xff;
+}
+
+function isFreeRegion(bytes, start, size) {
+  if (start < 0 || size < 0 || start + size > bytes.length) return false;
+  for (let offset = start; offset < start + size; offset += 1) {
+    if (!isFreeByte(bytes[offset])) return false;
+  }
+  return true;
+}
+
+function rangesOverlap(start, end, ranges) {
+  return ranges.some(([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart);
+}
+
+function offsetInRanges(offset, ranges) {
+  return ranges.some(([start, end]) => start <= offset && offset < end);
+}
+
+function resizeRom(rom, newSize, fillValue = 0xff) {
+  if (newSize <= rom.bytes.length) return;
+  const expanded = new Uint8Array(newSize);
+  expanded.fill(fillValue);
+  expanded.set(rom.bytes);
+  rom.bytes = expanded;
+}
+
+function findTailFreeRegion(bytes, size, alignment = 16, end = bytes.length, excludedRanges = []) {
+  let runEnd = null;
+  const limit = Math.min(end, bytes.length);
+  for (let pos = limit - 1; pos >= -1; pos -= 1) {
+    const free = pos >= 0 && isFreeByte(bytes[pos]) && !offsetInRanges(pos, excludedRanges);
+    if (free) {
+      if (runEnd === null) runEnd = pos;
+      continue;
+    }
+    if (runEnd !== null) {
+      const runStart = pos + 1;
+      const alignedStart = alignDown(runEnd - size + 1, alignment);
+      if (alignedStart >= runStart && !rangesOverlap(alignedStart, alignedStart + size, excludedRanges)) return alignedStart;
+      runEnd = null;
+    }
+  }
+  return null;
+}
+
+function rangePairOverlaps(startA, endA, startB, endB) {
+  return startA < endB && startB < endA;
+}
+
+function overlapsBatterylessPowerBoundaryGuard(start, end) {
+  let boundary = C.BATTERYLESS_REGION_ALIGNMENT * 2;
+  while (boundary <= C.GBA_MAX_ROM_SIZE) {
+    const guardStart = boundary - C.BATTERYLESS_RESERVED_SIZE;
+    if (rangePairOverlaps(start, end, guardStart, boundary)) return true;
+    boundary <<= 1;
+  }
+  return false;
+}
+
+export function batterylessPowerBoundaryGuardRanges(limit) {
+  const ranges = [];
+  let boundary = C.BATTERYLESS_REGION_ALIGNMENT * 2;
+  while (boundary <= Math.min(limit, C.GBA_MAX_ROM_SIZE)) {
+    ranges.push([boundary - C.BATTERYLESS_RESERVED_SIZE, boundary]);
+    boundary <<= 1;
+  }
+  return ranges;
+}
+
+function lastNonEmptyBatterylessBlockStart(bytes) {
+  let blockStart = alignDown(Math.max(0, bytes.length - 1), C.BATTERYLESS_REGION_ALIGNMENT);
+  while (blockStart >= 0) {
+    const blockEnd = Math.min(blockStart + C.BATTERYLESS_REGION_ALIGNMENT, bytes.length);
+    let hasData = false;
+    for (let offset = blockStart; offset < blockEnd; offset += 1) {
+      if (!isFreeByte(bytes[offset])) {
+        hasData = true;
+        break;
+      }
+    }
+    if (hasData) return blockStart;
+    blockStart -= C.BATTERYLESS_REGION_ALIGNMENT;
+  }
+  return null;
+}
+
+function waitstatePayloadFitsAtBlockEnd(bytes, blockStart, size) {
+  const blockEnd = blockStart + C.BATTERYLESS_REGION_ALIGNMENT;
+  const payloadBase = blockEnd - size;
+  if (payloadBase < 0 || blockEnd > bytes.length) return null;
+  if (overlapsBatterylessPowerBoundaryGuard(payloadBase, blockEnd)) return null;
+  if (!isFreeRegion(bytes, payloadBase, size)) return null;
+  return payloadBase;
+}
+
+function findWaitstateBatterylessPosition(bytes, size) {
+  const lastContentBlock = lastNonEmptyBatterylessBlockStart(bytes);
+  if (lastContentBlock === null) return null;
+
+  let blockStart = lastContentBlock;
+  while (blockStart + C.BATTERYLESS_REGION_ALIGNMENT <= bytes.length) {
+    const payloadBase = waitstatePayloadFitsAtBlockEnd(bytes, blockStart, size);
+    if (payloadBase !== null) return payloadBase;
+    blockStart += C.BATTERYLESS_REGION_ALIGNMENT;
+  }
+  return null;
+}
+
+export function ensureWaitstateBatterylessPosition(rom, operations, warnings, size) {
+  while (true) {
+    if (rom.bytes.length > C.GBA_MAX_ROM_SIZE) {
+      warnings.push("Waitstate: ROM is larger than 32 MiB");
+      return null;
+    }
+    const payloadBase = findWaitstateBatterylessPosition(rom.bytes, size);
+    if (payloadBase !== null) return payloadBase;
+    if (rom.bytes.length >= C.GBA_MAX_ROM_SIZE) {
+      warnings.push("Waitstate: no free Batteryless code block and ROM is already 32 MiB");
+      return null;
+    }
+    const oldSize = rom.bytes.length;
+    const newSize = Math.min(oldSize + C.BATTERYLESS_REGION_ALIGNMENT, C.GBA_MAX_ROM_SIZE);
+    if (newSize <= oldSize) {
+      warnings.push("Waitstate: ROM could not be expanded");
+      return null;
+    }
+    resizeRom(rom, newSize, 0xff);
+    addOperation(operations, "Waitstate ROM expansion", oldSize, newSize - oldSize, { value: newSize });
+  }
+}
+
+function decodeEntrypointAddress(out) {
+  if (out.length < 4 || out[3] !== 0xea) throw new PatchError("Unexpected entrypoint instruction");
+  const branchWord = readU32(out, 0);
+  let branchOffset = branchWord & 0x00ffffff;
+  if (branchOffset & 0x00800000) branchOffset -= 0x01000000;
+  return C.GBA_ROM_BASE + 8 + (branchOffset << 2);
+}
+
+function encodeArmBranch(sourceAddress, targetAddress) {
+  const branchOffset = (targetAddress - sourceAddress - 8) >> 2;
+  if (branchOffset < -0x800000 || branchOffset > 0x7fffff) throw new PatchError("Entrypoint target is outside ARM branch range");
+  return (0xea000000 | (branchOffset & 0x00ffffff)) >>> 0;
+}
+
+function makeWaitstatePayload(waitstateValue, nextEntrypoint) {
+  const payload = new Uint8Array(C.WAITSTATE_PAYLOAD_SIZE);
+  [0xe59f0008, 0xe59f1008, 0xe1c010b0, 0xe59ff004, C.WAITSTATE_REGISTER, waitstateValue & 0xffff, nextEntrypoint >>> 0]
+    .forEach((word, index) => writeU32(payload, index * 4, word));
+  return payload;
+}
+
+function armLdrLiteralTarget(instruction, instructionAddress) {
+  if ((instruction & 0x0c100000) !== 0x04100000) return null;
+  if (((instruction >>> 16) & 0xf) !== 15) return null;
+  const immediate = instruction & 0xfff;
+  const pc = instructionAddress + 8;
+  return instruction & (1 << 23) ? pc + immediate : pc - immediate;
+}
+
+function thumbLdrLiteralTarget(instruction, instructionAddress) {
+  if ((instruction & 0xf800) !== 0x4800) return null;
+  const immediate = (instruction & 0xff) << 2;
+  return ((instructionAddress + 4) & ~3) + immediate;
+}
+
+function waitstateLiteralIsReferenced(bytes, targetOffset, searchStart, searchEnd) {
+  const targetAddress = C.GBA_ROM_BASE + targetOffset;
+  const start = Math.max(0, searchStart);
+  const end = Math.min(bytes.length, searchEnd);
+  for (let offset = start & ~1; offset < end - 1; offset += 2) {
+    if (thumbLdrLiteralTarget(readU16(bytes, offset), C.GBA_ROM_BASE + offset) === targetAddress) return true;
+  }
+  for (let offset = start & ~3; offset < end - 3; offset += 4) {
+    if (armLdrLiteralTarget(readU32(bytes, offset), C.GBA_ROM_BASE + offset) === targetAddress) return true;
+  }
+  return false;
+}
+
+function patchWaitstateStartupLiterals(out, waitstateValue, operations, excludedRanges, scanLimit) {
+  const marker = new Uint8Array(4);
+  writeU32(marker, 0, C.WAITSTATE_REGISTER);
+  const oldValues = new Set(C.WAITSTATE_DIRECT_OLD_VALUES.map((value) => value & 0xffff).filter((value) => value !== (waitstateValue & 0xffff)));
+  const limit = Math.min(out.length, scanLimit || C.WAITSTATE_DIRECT_SCAN_LIMIT);
+  let patched = 0;
+  let offset = findBytes(out, marker, 0, limit);
+  while (offset >= 0) {
+    if (offset % 4 === 0 && !rangesOverlap(offset, offset + 4, excludedRanges)) {
+      const valueOffset = offset + 4;
+      if (valueOffset + 4 <= out.length && !rangesOverlap(valueOffset, valueOffset + 4, excludedRanges) && waitstateLiteralIsReferenced(out, offset, offset - 0x1000, offset)) {
+        const oldValue = readU32(out, valueOffset) & 0xffff;
+        if (oldValues.has(oldValue)) {
+          writeU32(out, valueOffset, waitstateValue & 0xffff);
+          addOperation(operations, "Waitstate startup WAITCNT value", valueOffset, 4, { codeName: "waitstate_startup_literal", value: waitstateValue & 0xffff });
+          patched += 1;
+        }
+      }
+    }
+    offset = findBytes(out, marker, offset + 1, limit);
+  }
+  return patched;
+}
+
+export function waitstatePayloadSpanForLayout(inputBytes, waitstateOptions = {}, existingFlags = null) {
+  if (!waitstateOptions?.enabled) return 0;
+  const flags = existingFlags ?? (inputBytes ? readPatchFlags(inputBytes) : 0);
+  if (hasWaitstatePatch(flags)) return 0;
+
+  const entrypointSpan = alignedPayloadSpan(C.WAITSTATE_PAYLOAD_SIZE);
+  const dbEntry = inputBytes ? getSuperfwDbEntryForRom(inputBytes) : null;
+  return entrypointSpan + superfwProgramRelocationSpan(dbEntry);
+}
+
+export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = C.WAITSTATE_DEFAULT_VALUE, options = {}) {
+  if (hasWaitstatePatch(readPatchFlags(rom.bytes))) {
+    return { requested: true, status: "already_patched", value: waitstateValue, direct_writes: 0 };
+  }
+
+  const excludedRanges = [...(options.excludedRanges || []), [0, Math.min(C.GBA_HEADER_SIZE, rom.bytes.length)]];
+  const localOperations = [];
+  const localWarnings = [];
+  let work = new Uint8Array(rom.bytes);
+  let payloadOffset = options.payloadOffset ?? null;
+  let nextEntrypoint = null;
+  let directWrites = 0;
+  let superfwWaitstate = null;
+  let totalPayloadSpan = alignedPayloadSpan(C.WAITSTATE_PAYLOAD_SIZE);
+
+  try {
+    nextEntrypoint = decodeEntrypointAddress(work);
+    const dbEntry = getSuperfwDbEntryForRom(work);
+    const superfwProgramSpan = superfwProgramRelocationSpan(dbEntry);
+    totalPayloadSpan += superfwProgramSpan;
+
+    if (payloadOffset === null && options.payloadOffsetRequired) {
+      localWarnings.push("Waitstate: no free code block for entrypoint payload found");
+      warnings.push(...localWarnings);
+      return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
+    }
+    if (payloadOffset === null) {
+      payloadOffset = findTailFreeRegion(work, totalPayloadSpan, PAYLOAD_ALIGNMENT, work.length, excludedRanges);
+    } else if (payloadOffset < 0 || payloadOffset % PAYLOAD_ALIGNMENT || !isFreeRegion(work, payloadOffset, totalPayloadSpan)) {
+      payloadOffset = null;
+    }
+    if (payloadOffset === null) {
+      localWarnings.push("Waitstate: no free tail area for entrypoint payload found");
+      warnings.push(...localWarnings);
+      return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
+    }
+
+    const programBaseOffset = payloadOffset + alignedPayloadSpan(C.WAITSTATE_PAYLOAD_SIZE);
+    const superfwOperations = [];
+    const superfwWarnings = [];
+    let superfwResult = runSuperfwWaitcntPatch(work, superfwOperations, superfwWarnings, {
+      programBaseOffset: superfwProgramSpan ? programBaseOffset : null,
+    });
+
+    if (superfwWarnings.some((message) => message.includes("could not relocate"))) {
+      const fallbackOperations = [];
+      const fallbackWarnings = [];
+      superfwResult = runSuperfwWaitcntPatch(work, fallbackOperations, fallbackWarnings);
+      work = superfwResult.bytes;
+      localOperations.push(...fallbackOperations);
+      localWarnings.push(...fallbackWarnings);
+      superfwWaitstate = {
+        ...superfwResult.waitstate,
+        program_relocation_status: "fixed_address_fallback",
+      };
+    } else {
+      work = superfwResult.bytes;
+      localOperations.push(...superfwOperations);
+      localWarnings.push(...superfwWarnings);
+      superfwWaitstate = superfwResult.waitstate;
+    }
+
+    const waitstatePayloadRange = [[payloadOffset, payloadOffset + totalPayloadSpan]];
+    directWrites = patchWaitstateStartupLiterals(work, waitstateValue, localOperations, [...excludedRanges, ...waitstatePayloadRange], options.scanLimit);
+
+    const payload = makeWaitstatePayload(waitstateValue, nextEntrypoint);
+    const entrypointBranch = encodeArmBranch(C.GBA_ROM_BASE, C.GBA_ROM_BASE + payloadOffset);
+    writeU32(work, 0, entrypointBranch);
+    addOperation(localOperations, "Waitstate Entrypoint", 0, 4, { codeName: "waitstate_entrypoint", value: entrypointBranch });
+    copyBytes(work, payloadOffset, payload);
+    addOperation(localOperations, "Waitstate Payload", payloadOffset, payload.length, { codeName: "waitstate_payload", value: waitstateValue & 0xffff });
+  } catch (error) {
+    localWarnings.push(`Waitstate: ${error.message}`);
+    warnings.push(...localWarnings);
+    return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
+  }
+
+  rom.bytes = work;
+  operations.push(...localOperations);
+  warnings.push(...localWarnings);
+  return {
+    requested: true,
+    status: "patched",
+    value: waitstateValue,
+    payload_offset: payloadOffset,
+    size: totalPayloadSpan,
+    next_entrypoint: nextEntrypoint,
+    direct_writes: directWrites,
+    source: superfwWaitstate?.source,
+    superfw_patches: superfwWaitstate?.patches,
+    superfw_program_relocation_status: superfwWaitstate?.program_relocation_status,
+    superfw_program_relocations: superfwWaitstate?.program_relocations,
+  };
+}
+
+export function waitstatePrefixSizeForBatteryless(waitstateOptions, existingFlags, inputBytes = null) {
+  return waitstatePayloadSpanForLayout(inputBytes, waitstateOptions, existingFlags);
 }
 
 export function applyWaitstateForPipeline(rom, operations, warnings, waitstateOptions = {}, context = {}) {
-  if (!waitstateOptions?.enabled) return null;
-  return applyWaitstatePatch(rom, operations, warnings);
+  if (!waitstateOptions.enabled) return null;
+
+  const value = waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE;
+  const existingFlags = readPatchFlags(rom.bytes);
+  if (hasWaitstatePatch(existingFlags)) {
+    return { requested: true, status: "already_patched", value, direct_writes: 0 };
+  }
+
+  const payloadSpan = waitstatePayloadSpanForLayout(rom.bytes, waitstateOptions, existingFlags);
+  const excludedRanges = [...(context.excludedRanges || [])];
+  let payloadOffset = context.waitstatePayloadOffset ?? context.payloadOffset ?? null;
+
+  if (payloadOffset === null && context.batterylessPayloadOffset !== null && context.batterylessPayloadOffset !== undefined) {
+    payloadOffset = context.batterylessPayloadOffset - payloadSpan;
+  }
+
+  if (payloadOffset === null) {
+    payloadOffset = ensureDirectPayloadRegion(rom, operations, warnings, payloadSpan, "Waitstate", excludedRanges);
+  }
+
+  if (payloadOffset === null) {
+    return { requested: true, status: "failed", value, direct_writes: 0 };
+  }
+
+  if (excludedRanges.length) excludedRanges.push(...batterylessPowerBoundaryGuardRanges(rom.bytes.length));
+  return applyWaitstatePatch(rom, operations, warnings, value, {
+    excludedRanges,
+    payloadOffset,
+    payloadOffsetRequired: true,
+    scanLimit: waitstateOptions.scanLimit ?? C.WAITSTATE_DIRECT_SCAN_LIMIT,
+  });
 }
 
 export function applyWaitstateToBytes(inputBytes, waitstateOptions = {}) {
   const rom = { bytes: new Uint8Array(inputBytes) };
   const operations = [];
   const warnings = [];
+  let waitstate;
 
-  if (waitstateOptions?.enabled === false) {
+  if (!waitstateOptions?.enabled) {
     return { bytes: rom.bytes, result: { waitstate: null, operations, warnings, status: "unchanged" } };
   }
 
-  const waitstate = applyWaitstatePatch(rom, operations, warnings);
+  if (hasWaitstatePatch(readPatchFlags(rom.bytes))) {
+    waitstate = { requested: true, status: "already_patched", value: waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE, direct_writes: 0 };
+  } else {
+    const payloadOffset = ensureDirectPayloadRegion(rom, operations, warnings, waitstatePayloadSpanForLayout(rom.bytes, waitstateOptions), "Waitstate");
+    waitstate = payloadOffset === null
+      ? { requested: true, status: "failed", value: waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE, direct_writes: 0 }
+      : applyWaitstatePatch(rom, operations, warnings, waitstateOptions.value ?? C.WAITSTATE_DEFAULT_VALUE, {
+        payloadOffset,
+        payloadOffsetRequired: true,
+        scanLimit: waitstateOptions.scanLimit ?? C.WAITSTATE_DIRECT_SCAN_LIMIT,
+      });
+  }
+
+  applyPatchHeaderMarker(rom.bytes, operations, makePatchHeaderFlags(rom.bytes, { waitstateResult: waitstate }));
+  updateGbaHeaderChecksum(rom.bytes, operations);
   return { bytes: rom.bytes, result: { waitstate, operations, warnings, status: operations.length ? "patched" : waitstate.status } };
 }

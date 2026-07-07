@@ -1,5 +1,9 @@
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
 
+const GBA_HEADER_CHECKSUM_START = 0xa0;
+const GBA_HEADER_CHECKSUM_END = 0xbc;
+const GBA_HEADER_CHECKSUM_OFFSET = 0xbd;
+
 export function readPatchFlags(bytes) {
   if (
     bytes.length > C.PATCH_HEADER_MARKER_OFFSET + 1
@@ -59,4 +63,30 @@ export function applyPatchHeaderMarker(bytes, operations, flags) {
     size: 2,
     value: markerValue,
   });
+}
+
+export function computeGbaHeaderChecksum(bytes) {
+  if (bytes.length <= GBA_HEADER_CHECKSUM_OFFSET) return null;
+  let sum = 0;
+  for (let offset = GBA_HEADER_CHECKSUM_START; offset <= GBA_HEADER_CHECKSUM_END; offset += 1) {
+    sum = (sum + bytes[offset]) & 0xff;
+  }
+  return (-(sum + 0x19)) & 0xff;
+}
+
+export function updateGbaHeaderChecksum(bytes, operations) {
+  const checksum = computeGbaHeaderChecksum(bytes);
+  if (checksum === null) return null;
+  const oldChecksum = bytes[GBA_HEADER_CHECKSUM_OFFSET] & 0xff;
+  if (oldChecksum === checksum) return checksum;
+
+  bytes[GBA_HEADER_CHECKSUM_OFFSET] = checksum;
+  operations.push({
+    name: "GBA header checksum",
+    offset: GBA_HEADER_CHECKSUM_OFFSET,
+    size: 1,
+    value: checksum,
+    old_value: oldChecksum,
+  });
+  return checksum;
 }

@@ -333,9 +333,10 @@ h2 {
   display: inline-block;
   max-width: 100%;
   overflow-wrap: break-word;
+  min-width: 0;
+  white-space: normal;
   color: var(--text2);
-  vertical-align: baseline;
-  white-space: normal
+  vertical-align: baseline
 }
 
 .option-hint a {
@@ -471,7 +472,6 @@ fieldset:last-child {
 }
 
 legend {
-  margin-bottom: .5rem;
   color: var(--text2);
   font-size: .72rem;
   font-weight: 700;
@@ -483,14 +483,23 @@ legend {
   display: flex;
   align-items: flex-start;
   gap: .65rem;
-  min-height: 2rem;
+  min-height: 0;
   color: var(--text);
-  font-size: .8rem
+  font-size: .8rem;
+  line-height: 1.5
 }
 
 .option-copy {
   min-width: 0;
-  display: block
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 .22rem;
+  line-height: 1.5
+}
+
+.option-label {
+  white-space: nowrap
 }
 
 input[type=radio],
@@ -834,8 +843,17 @@ fieldset[hidden] {
     width: 100%
   }
 
+  .option-copy {
+    display: block
+  }
+
   .option-line {
-    flex-wrap: wrap
+    align-items: flex-start;
+    flex-wrap: nowrap
+  }
+
+  .option-hint {
+    display: block
   }
 
 }
@@ -915,14 +933,6 @@ fieldset[hidden] {
   display: none
 }
 
-.waitstate-toggle {
-  padding: 0 0 .85rem
-}
-
-.waitstate-toggle .option-line {
-  min-height: 2rem
-}
-
 .action-bar {
   justify-items: center
 }
@@ -951,12 +961,16 @@ fieldset[hidden] {
   text-decoration: underline
 }
 
-.options-panel fieldset:first-of-type {
+.options-panel fieldset:first-of-type,
+.waitstate-toggle {
+  display: grid;
+  row-gap: .55rem;
   border-bottom: 0;
   padding-bottom: .2rem
 }
 
-.options-panel:not(.no-extra-options) fieldset:first-of-type {
+.options-panel:not(.no-extra-options) fieldset:first-of-type,
+.waitstate-panel:has(#rtc-menu-options:not([hidden])) .waitstate-toggle {
   border-bottom: 1px solid var(--bg3);
   padding-bottom: 1rem
 }

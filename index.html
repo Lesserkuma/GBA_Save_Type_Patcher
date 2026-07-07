@@ -33,19 +33,24 @@
       </section>
 
       <form id="patch-options" class="settings-grid">
-        <section id="save-options-panel" class="panel options-panel no-extra-options" aria-labelledby="options-title">
+        <section id="save-options-panel" class="panel options-panel" aria-labelledby="options-title">
           <div class="panel-heading compact"><h2 id="options-title">💾 Save Type Patch</h2></div>
           <fieldset aria-label="Save type patch mode">
-            <label class="option-line"><input type="radio" name="patchMode" value="none"> None</label>
-            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked><span class="option-copy">SRAM <span class="option-hint">(for SRAM-based cartridges with battery)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy">Batteryless SRAM <span class="option-hint">(for SRAM-based cartridges without battery, experimental)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy">Custom 512K/1M FLASH <span class="option-hint">(for Custom-FLASH-based cartridges)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="none"> <span class="option-copy"><span class="option-label">None</span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="sram" checked><span class="option-copy"><span class="option-label">SRAM</span><span class="option-hint">(for SRAM-based cartridges with battery)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy"><span class="option-label">Batteryless SRAM</span><span class="option-hint">(for SRAM-based cartridges without battery, experimental)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy"><span class="option-label">Custom 512K/1M FLASH</span><span class="option-hint">(for Custom-FLASH-based cartridges)</span></span></label>
+          </fieldset>
+
+          <fieldset id="sram-options" class="sub-options"><legend>SRAM Options</legend>
+            <div class="inline-group stacked-mobile"><span>1M Bank Switch:</span><label><input type="radio" name="flash1mBankSwitchStyle" value="modern" checked> Repro Cart Method</label><label><input type="radio" name="flash1mBankSwitchStyle" value="gbata"> GBATA Method</label></div>
           </fieldset>
 
           <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
-            <div class="inline-group"><span>Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Auto</label><label><input type="radio" name="batterylessMode" value="keypad"> Hotkey (L+R+START+SELECT)</label></div>
+            <div class="inline-group"><span>Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> <span class="option-label">Auto</span></label><label><input type="radio" name="batterylessMode" value="keypad"><span class="option-label">Hotkey</span><span class="option-hint">(L+R+START+SELECT)</span></label></div>
             <label id="countdown-field" class="field-label">Delay Value: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
-            <div class="inline-group stacked-mobile"><span>Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
+            <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
+            <div class="inline-group stacked-mobile"><span>Last 256 KiB Block:</span><label><input type="radio" name="batterylessLastBlock" value="usable" checked> Usable</label><label><input type="radio" name="batterylessLastBlock" value="keep-empty"> Keep empty</label></div>
           </fieldset>
 
           <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Flash Chip Type:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
@@ -55,9 +60,17 @@
           <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
           <fieldset class="waitstate-toggle">
             <label class="option-line">
-              <input type="checkbox" name="waitstateEnabled"><span class="option-copy">Waitstate <span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
+              <input type="checkbox" name="rtcEnabled"><span class="option-copy"><span class="option-label">Fake RTC</span><span class="option-hint">(for RTC games on non-RTC cartridges, experimental)</span></span>
             </label>
-            </fieldset>
+            <label class="option-line">
+              <input type="checkbox" name="waitstateEnabled"><span class="option-copy"><span class="option-label">Waitstate</span><span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
+            </label>
+          </fieldset>
+          <fieldset id="rtc-menu-options" class="sub-options" hidden><legend>Fake RTC Options</legend>
+            <label class="option-line">
+              <input type="checkbox" name="rtcSkipSoftReset"><span class="option-copy"><span class="option-label">Skip Menu on Reset</span></span>
+            </label>
+          </fieldset>
         </section>
       </form>
 
@@ -72,14 +85,13 @@
     </main>
 
     <footer>
-      <div><b>GBA Save Type Patcher v1.2</b> by Lesserkuma</div>
+      <div><b>GBA Save Type Patcher v1.3</b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a> · Developed with assistance from GPT-5.5</small></div>
       <div>
-        Developed with assistance from GPT-5.5<br>
-        Portions based on:<br>
+        Portions partly based on:<br>
         <a href="https://web.archive.org/web/20070225124322/http://www.gbadat.altervista.org/tools.htm" target="_blank" rel="noopener noreferrer">GBATA SRAM Patcher</a> by coolhj<br>
         <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">gba-auto-batteryless-patcher</a> by Metroid Maniac (MIT)<br>
         <a href="https://github.com/Lesserkuma/Custom_1M_FLASH_Patcher" target="_blank" rel="noopener noreferrer">Custom 1M FLASH Patcher</a> by Lesserkuma (GPL-3.0)<br>
-        <a href="https://github.com/davidgfnet/superfw" target="_blank" rel="noopener noreferrer">SuperFW WAITCNT patching</a> by David Guillen Fandos (GPL-3.0-or-later)
+        <a href="https://github.com/davidgfnet/superfw" target="_blank" rel="noopener noreferrer">SuperFW WAITCNT and RTC patching</a> by David Guillen Fandos (GPL-3.0)<br>
       </div>
     </footer>
   </div>

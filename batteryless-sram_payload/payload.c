@@ -17,7 +17,24 @@
     #define SRAM_SIZE 64
 	#define AGB_SRAM_SIZE (SRAM_SIZE*1024)
     #define AGB_SRAM_WINDOWED(i) (AGB_SRAM + ((i) & (AGB_SRAM_SIZE - 1)))
-    #define SRAM_BANK_SEL (*(volatile unsigned char*) 0x09000000)
+    #define SRAM_BANK_SEL8  (*(volatile unsigned char*)  0x09000000)
+    #define SRAM_BANK_SEL16 (*(volatile unsigned short*) 0x09000000)
+
+    #define SRAM_BANK_SWITCH_STYLE_MODERN 0
+    #define SRAM_BANK_SWITCH_STYLE_GBATA  1
+    #ifndef SRAM_BANK_SWITCH_STYLE
+    #define SRAM_BANK_SWITCH_STYLE SRAM_BANK_SWITCH_STYLE_MODERN
+    #endif
+
+    static inline void sram_bank_select(unsigned bank_no)
+    {
+    #if SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_GBATA
+        SRAM_BANK_SEL16 = 0x8000;
+        SRAM_BANK_SEL16 = (unsigned short)(bank_no << 11);
+    #else
+        SRAM_BANK_SEL8 = (unsigned char)bank_no;
+    #endif
+    }
     
 	#define _FLASH_WRITE(pa, pd) { *(((unsigned short *)AGB_ROM)+((pa)/2)) = pd; __asm("nop"); }
 
@@ -117,6 +134,8 @@ install_sram_bank_select_tail_thumb:
     bx lr
 
 .balign 4
+# Keep this tail exactly 24 bytes. The web patcher replaces it with a
+# GBATA-style tail when SRAM Options -> 1M Bank Switch is set to GBATA-style.
 sram_bank_select_tail_start:
     .hword 0x4a04
     .hword 0x2800
@@ -836,10 +855,10 @@ void program_flash_1(unsigned sa, unsigned save_size)
     volatile unsigned timeout;
 
     // Write data
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
     for (int i=0; i<save_size; i+=2) {
         if (i == AGB_SRAM_SIZE)
-            SRAM_BANK_SEL = 1;
+            sram_bank_select(1);
         _FLASH_WRITE(sa+i, 0x40);
         _FLASH_WRITE(sa+i, (*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))));
         for (timeout = 0x4000; timeout; --timeout) {
@@ -850,12 +869,12 @@ void program_flash_1(unsigned sa, unsigned save_size)
         }
         if (timeout == 0) {
             _FLASH_WRITE(sa, 0xFF);
-            SRAM_BANK_SEL = 0;
+            sram_bank_select(0);
             return;
         }
     }
     _FLASH_WRITE(sa, 0xFF);
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
 }
 asm("program_flash_1_end:");
 
@@ -906,10 +925,10 @@ asm("erase_flash_2_end:");
 void program_flash_2(unsigned sa, unsigned save_size)
 {
     // Write data
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
     for (int i=0; i<save_size; i+=2) {
         if (i == AGB_SRAM_SIZE)
-            SRAM_BANK_SEL = 1;
+            sram_bank_select(1);
         _FLASH_WRITE(0xAAA, 0xA9);
         _FLASH_WRITE(0x555, 0x56);
         _FLASH_WRITE(0xAAA, 0xA0);
@@ -922,7 +941,7 @@ void program_flash_2(unsigned sa, unsigned save_size)
         }
     }
     _FLASH_WRITE(sa, 0xF0);
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
 }
 asm("program_flash_2_end:");
 
@@ -973,10 +992,10 @@ asm("erase_flash_3_end:");
 void program_flash_3(unsigned sa, unsigned save_size)
 {
     // Write data
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
     for (int i=0; i<save_size; i+=2) {
         if (i == AGB_SRAM_SIZE)
-            SRAM_BANK_SEL = 1;
+            sram_bank_select(1);
         _FLASH_WRITE(0xAAA, 0xAA);
         _FLASH_WRITE(0x555, 0x55);
         _FLASH_WRITE(0xAAA, 0xA0);
@@ -989,7 +1008,7 @@ void program_flash_3(unsigned sa, unsigned save_size)
         }
     }
     _FLASH_WRITE(sa, 0xF0);   
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
 }
 asm("program_flash_3_end:");
 
@@ -1053,10 +1072,10 @@ void program_flash_4(unsigned sa, unsigned save_size)
 {
     // Write data
     int c = 0;
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
     while (c < save_size) {
         if (c == AGB_SRAM_SIZE)
-            SRAM_BANK_SEL = 1;
+            sram_bank_select(1);
         _FLASH_WRITE(sa+c, 0xEA);
         while (1) {
             __asm("nop");
@@ -1082,7 +1101,7 @@ void program_flash_4(unsigned sa, unsigned save_size)
     	
     for (volatile int i = 0; i < 1024; ++i)
         __asm("nop");
-    SRAM_BANK_SEL = 0;
+    sram_bank_select(0);
 }
 asm("program_flash_4_end:");
 

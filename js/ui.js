@@ -16,8 +16,10 @@ export function bindElements() {
     optionsPanel: document.querySelector("#save-options-panel"),
     batterylessOptions: document.querySelector("#batteryless-options"),
     countdownField: document.querySelector("#countdown-field"),
+    sramOptions: document.querySelector("#sram-options"),
     customFlashOptions: document.querySelector("#custom-flash-options"),
     waitstateOptions: document.querySelector("#waitstate-options"),
+    rtcMenuOptions: document.querySelector("#rtc-menu-options"),
     patchButton: document.querySelector("#patch-button"),
     clearButton: document.querySelector("#clear-button"),
     statusRegion: document.querySelector("#status-region"),
@@ -77,12 +79,15 @@ export function hideImportProgress(delayMs = 0) {
 }
 
 export function renderOptions(state) {
+  const isSram = state.options.patchMode === "sram";
   const isBatteryless = state.options.patchMode === "batteryless-sram";
   elements.batterylessOptions.hidden = !isBatteryless;
+  if (elements.sramOptions) elements.sramOptions.hidden = !(isSram || isBatteryless);
   elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
   if (elements.waitstateOptions) elements.waitstateOptions.hidden = !state.options.waitstate.enabled;
+  if (elements.rtcMenuOptions) elements.rtcMenuOptions.hidden = !state.options.rtc.enabled;
   elements.countdownField.hidden = !isBatteryless || state.options.batteryless.mode !== "auto";
-  elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "sram" || state.options.patchMode === "none");
+  elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "none");
 }
 
 export function renderRomList(state, options = {}) {
@@ -173,9 +178,13 @@ export function syncOptionsFromForm(state) {
   state.options.batteryless.mode = f.elements.batterylessMode.value;
   state.options.batteryless.countdownFrames = Number.parseInt(delayInput.value, 10);
   state.options.batteryless.indicator = f.elements.indicator.value;
+  state.options.batteryless.lastBlock = f.elements.batterylessLastBlock?.value || "usable";
   state.options.customFlash.saveChipType = f.elements.saveChipType.value;
+  state.options.sram.flash1mBankSwitchStyle = f.elements.flash1mBankSwitchStyle?.value || "modern";
   state.options.waitstate.enabled = f.elements.waitstateEnabled.checked;
   state.options.waitstate.mode = "supercard_exact";
+  state.options.rtc.enabled = f.elements.rtcEnabled.checked;
+  state.options.rtc.skipSoftReset = f.elements.rtcSkipSoftReset?.checked || false;
 }
 
 export function readValidatedOptions(state) {
@@ -189,12 +198,21 @@ export function readValidatedOptions(state) {
     options.batteryless.countdownFrames = 102;
   }
 
+  options.sram = options.sram || {};
+  options.sram.flash1mBankSwitchStyle = options.sram.flash1mBankSwitchStyle === "gbata" ? "gbata" : "modern";
+
+  options.batteryless.lastBlock = options.batteryless.lastBlock === "keep-empty" ? "keep-empty" : "usable";
+
   options.waitstate = options.waitstate.enabled
     ? { enabled: true, mode: "supercard_exact" }
     : { enabled: false, mode: "supercard_exact" };
 
-  if (options.patchMode === "none" && !options.waitstate.enabled) {
-    throw new Error("Select Waitstate or choose a save type patch mode.");
+  options.rtc = options.rtc?.enabled
+    ? { enabled: true, skipSoftReset: options.rtc.skipSoftReset === true }
+    : { enabled: false, skipSoftReset: false };
+
+  if (options.patchMode === "none" && !options.waitstate.enabled && !options.rtc.enabled) {
+    throw new Error("Select an Other Patch or choose a save type patch mode.");
   }
 
   return options;
