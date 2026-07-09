@@ -542,6 +542,11 @@ input[type=checkbox] {
   color: var(--text)
 }
 
+label:has(#batteryless-countdown-indicator:disabled) {
+  color: var(--text3);
+  cursor: not-allowed
+}
+
 .hotkey-badge-group {
   gap: .45rem;
   align-items: center
@@ -1007,6 +1012,16 @@ fieldset[hidden] {
   color: var(--red)
 }
 
+.rom-card[data-state=warning] {
+  border-color: rgba(252, 211, 77, .3)
+}
+
+.rom-card[data-state=warning] .rom-status {
+  border-color: rgba(252, 211, 77, .35);
+  background: rgba(252, 211, 77, .12);
+  color: var(--yellow)
+}
+
 .rom-meta,
 .rom-main {
   display: none
@@ -1055,7 +1070,7 @@ fieldset[hidden] {
 }
 
 .rom-card {
-  grid-template-columns: minmax(0, 1fr) auto auto auto
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto
 }
 
 .rom-title,
@@ -1087,12 +1102,36 @@ fieldset[hidden] {
   display: none !important
 }
 
+.save-type-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: .1rem .42rem;
+  border: 1px solid rgba(63, 220, 142, .34);
+  border-radius: 999px;
+  background: rgba(63, 220, 142, .1);
+  color: var(--green);
+  font-size: .58rem;
+  font-weight: 800;
+  letter-spacing: .02em
+}
+
+.save-type-badge[hidden] {
+  display: none !important
+}
+
 @media(max-width:520px) {
   .rom-card {
     grid-template-columns: minmax(0, 1fr) auto auto
   }
 
-  .library-badge {
+  .library-badge,
+  .save-type-badge {
     grid-column: 1 / -2;
     justify-self: start
   }
@@ -1146,13 +1185,19 @@ fieldset[hidden] {
   line-height: 1.35
 }
 
-.rom-card[data-state=error] {
+.rom-card[data-state=error],
+.rom-card[data-state=warning] {
   align-items: start
 }
 
 .rom-card[data-state=error] .library-badge,
+.rom-card[data-state=error] .save-type-badge,
 .rom-card[data-state=error] .rom-status,
-.rom-card[data-state=error] .ghost-button.small {
+.rom-card[data-state=error] .ghost-button.small,
+.rom-card[data-state=warning] .library-badge,
+.rom-card[data-state=warning] .save-type-badge,
+.rom-card[data-state=warning] .rom-status,
+.rom-card[data-state=warning] .ghost-button.small {
   margin-top: .08rem
 }
 

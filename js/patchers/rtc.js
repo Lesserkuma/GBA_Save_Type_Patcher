@@ -18,7 +18,6 @@ const RTC_DETECTION_ALIGNMENT = 4;
 const RTC_PAYLOAD_ALIGNMENT = TARGET_PAYLOAD_ALIGNMENT;
 const PATCH_CODE_SECTOR_ALIGNMENT = 0x40000;
 const ORIGINAL_PAYLOAD_LINK_ADDR = RTC_PAYLOAD_CONSTANTS.RTC_ORIGINAL_PAYLOAD_LINK_ADDR || 0x9000000;
-const RTC_MENU_OPTION_SKIP_SOFT_RESET = 1;
 
 export const RTC_PAYLOAD_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PAYLOAD_SIZE || 5556;
 
@@ -152,8 +151,7 @@ const ORIGINAL_PAYLOAD_SYMBOLS = {
   "payload_getstatus": 0x09000058,
   "payload_gettimedate": 0x09000060,
   "payload_probe": 0x09000000,
-  "payload_reset": 0x09000054,
-  "rtc_menu_options": 0x09000F48
+  "payload_reset": 0x09000054
 };
 const ACTIVE_RELOCATION_OFFSETS = RTC_PAYLOAD_CONSTANTS.RTC_RELOCATION_OFFSETS || RELOCATION_OFFSETS;
 const ACTIVE_RELATIVE_ASSET_RELOCATION_OFFSETS = RTC_PAYLOAD_CONSTANTS.RTC_RELATIVE_ASSET_RELOCATION_OFFSETS || RELATIVE_ASSET_RELOCATION_OFFSETS;
@@ -343,16 +341,7 @@ function embeddedPayloadBytes() {
   return EMBEDDED_PAYLOAD;
 }
 
-function applyPayloadOptions(relocated, symbols, linkAddr, rtcOptions = {}) {
-  const optionsAddr = symbols.rtc_menu_options;
-  if (optionsAddr === undefined) throw new PatchError("RTC: embedded payload is missing rtc_menu_options symbol");
-  const optionsOffset = optionsAddr - linkAddr;
-  if (optionsOffset < 0 || optionsOffset + 4 > relocated.length) throw new PatchError("RTC: bad rtc_menu_options symbol");
-  const value = rtcOptions.skipSoftReset ? RTC_MENU_OPTION_SKIP_SOFT_RESET : 0;
-  writeU32(relocated, optionsOffset, value >>> 0);
-}
-
-function relocatePayload(payload, newLinkAddr, rtcOptions = {}) {
+function relocatePayload(payload, newLinkAddr) {
   const delta = newLinkAddr - ORIGINAL_PAYLOAD_LINK_ADDR;
   const relocated = new Uint8Array(payload);
 
@@ -376,36 +365,7 @@ function relocatePayload(payload, newLinkAddr, rtcOptions = {}) {
   for (const [name, address] of Object.entries(ACTIVE_ORIGINAL_PAYLOAD_SYMBOLS)) {
     symbols[name] = (address + delta) >>> 0;
   }
-  applyPayloadOptions(relocated, symbols, newLinkAddr, rtcOptions);
   return { payloadBytes: relocated, symbols };
-}
-
-function repairRtcPayloadRelativeAssetRelocations(bytes, payloadOffset, operations) {
-  const linkAddr = (GBA_ROM_BASE + payloadOffset) >>> 0;
-  const delta = linkAddr - ORIGINAL_PAYLOAD_LINK_ADDR;
-  let repaired = 0;
-
-  for (const offset of ACTIVE_RELATIVE_ASSET_RELOCATION_OFFSETS) {
-    const absoluteOffset = payloadOffset + offset;
-    if (absoluteOffset + 4 > bytes.length) return repaired;
-    const originalValue = readU32(EMBEDDED_PAYLOAD, offset);
-    const expectedValue = (originalValue + delta) >>> 0;
-    const currentValue = readU32(bytes, absoluteOffset);
-    if (currentValue === expectedValue) continue;
-    // Older RTC web-tool builds relocated code pointers but left these asset
-    // addends at their original link values. Repair only that known state.
-    if (currentValue !== originalValue) continue;
-    writeU32(bytes, absoluteOffset, expectedValue);
-    repaired += 1;
-  }
-
-  if (repaired) {
-    addOperation(operations, "RTC graphics relocation repair", payloadOffset, RTC_PAYLOAD_SIZE, {
-      codeName: "rtc_graphics_relocation_repair",
-      value: repaired,
-    });
-  }
-  return repaired;
 }
 
 function findAlignedMarker(bytes, marker, start = 0, end = bytes.length, alignment = 1) {
@@ -509,7 +469,7 @@ function signatureVariants(name) {
   return [SIGS[name], ...(ADDITIONAL_SIGS[name] || [])];
 }
 
-function findRtcHandlers(bytes) {
+function findRtcHandlers(bytes, excludedRanges = []) {
   const matches = [];
   const problems = [];
 
@@ -520,6 +480,7 @@ function findRtcHandlers(bytes) {
         // Multiple variants may intentionally identify the same handler.
         // Keep the longest replacement window for that offset.
         const size = sig.length * 2;
+        if (rangesOverlap(offset, offset + size, excludedRanges)) continue;
         candidatesByOffset.set(offset, Math.max(candidatesByOffset.get(offset) || 0, size));
       }
     }
@@ -564,17 +525,16 @@ function validatePayloadOffset(bytes, payloadOffset) {
   }
 }
 
-function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, options = {}, context = {}) {
+function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, context = {}) {
   const existingBase = findRtcPayloadBase(originalBytes);
   if (existingBase !== null) {
-    const repaired = repairRtcPayloadRelativeAssetRelocations(workRom.bytes, existingBase, operations);
     const markerWritten = writeRtcRomMarker(workRom.bytes, operations, existingBase);
     const existingLinkAddr = (GBA_ROM_BASE + existingBase) >>> 0;
     const existingDelta = existingLinkAddr - ORIGINAL_PAYLOAD_LINK_ADDR;
     const runtimeMenuSymbol = ACTIVE_ORIGINAL_PAYLOAD_SYMBOLS.fake_rtc_menu_run_runtime;
     return {
       requested: true,
-      status: repaired || markerWritten ? "repaired" : "already_patched",
+      status: markerWritten ? "repaired" : "already_patched",
       payload_offset: existingBase,
       runtime_base: existingLinkAddr,
       runtime_menu_entry: runtimeMenuSymbol === undefined ? null : ((runtimeMenuSymbol + existingDelta) | 1) >>> 0,
@@ -583,7 +543,7 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, opti
     };
   }
 
-  const matches = findRtcHandlers(originalBytes);
+  const matches = findRtcHandlers(originalBytes, context.excludedRanges || []);
   let payloadOffset = context.payloadOffset ?? null;
   const placement = context.placement || (payloadOffset === null ? "patch-code-sector" : "manual");
 
@@ -607,7 +567,7 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, opti
   if (!isRtcFreeRegion(region, 0, region.length)) throw new PatchError("RTC: chosen payload region is not free");
 
   const linkAddr = (GBA_ROM_BASE + payloadOffset) >>> 0;
-  const payloadBuild = relocatePayload(embeddedPayloadBytes(), linkAddr, options);
+  const payloadBuild = relocatePayload(embeddedPayloadBytes(), linkAddr);
   copyBytes(workRom.bytes, payloadOffset, payloadBuild.payloadBytes);
   addOperation(operations, "RTC payload", payloadOffset, payloadBuild.payloadBytes.length, { codeName: "rtc_payload", value: linkAddr });
   writeRtcRomMarker(workRom.bytes, operations, payloadOffset);
@@ -646,7 +606,7 @@ export function applyRtcForPipeline(rom, operations, warnings, rtcOptions = {}, 
   const localWarnings = [];
 
   try {
-    const rtc = patchRtcOnWorkingRom(workRom, localOperations, localWarnings, originalBytes, rtcOptions, context);
+    const rtc = patchRtcOnWorkingRom(workRom, localOperations, localWarnings, originalBytes, context);
     rom.bytes = workRom.bytes;
     operations.push(...localOperations);
     warnings.push(...localWarnings);

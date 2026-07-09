@@ -19,4 +19,4 @@ int payload_probe(void);
 int payload_reset(void);
 int payload_getstatus(SiiRtcInfo *info);
 int payload_gettimedate(SiiRtcInfo *info);
-void fake_rtc_menu_run_runtime(void);
+void fake_rtc_menu_run_runtime(uint32_t release_mask);

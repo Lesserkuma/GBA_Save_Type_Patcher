@@ -1,5 +1,8 @@
 import { parseRomMetadata, ROM_EXTENSIONS, SAVE_EXTENSION, splitFileName } from "./core/rom.js";
-import { findSaveType } from "./patchers/sram.js";
+import { detectRomSaveMetadata } from "./patchers/save-type.js";
+import { decodePatchHeaderSaveMetadata, hasPatchHeaderMarker } from "./patchers/patch-state.js";
+
+const AUTO_REMOVE_PATCH_STATUSES = new Set(["Patched", "Patched + warning"]);
 
 function yieldToBrowser() {
   return new Promise((resolve) => {
@@ -37,9 +40,19 @@ export async function addFilesToState(files, state, options = {}) {
     const { baseName, extension } = splitFileName(file.name);
 
     if (ROM_EXTENSIONS.has(extension)) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const metadata = parseRomMetadata(bytes.slice(0, 0xc0));
-      const saveType = metadata.validHeader ? findSaveType(bytes) : null;
+      // Reject invalid files after reading only the small GBA header. Valid
+      // ROMs are read in full only when save-type detection actually needs it.
+      const headerBytes = new Uint8Array(await file.slice(0, 0xc0).arrayBuffer());
+      const metadata = parseRomMetadata(headerBytes);
+      const alreadyPatched = metadata.validHeader && hasPatchHeaderMarker(headerBytes);
+      const romBytes = metadata.validHeader && !alreadyPatched
+        ? new Uint8Array(await file.arrayBuffer())
+        : null;
+      const saveMetadata = alreadyPatched
+        ? decodePatchHeaderSaveMetadata(headerBytes)
+        : romBytes
+          ? detectRomSaveMetadata(romBytes)
+          : { library: null, medium: "none", size: null, label: "Unknown" };
       additions.push({
         id: createId(),
         file,
@@ -49,10 +62,15 @@ export async function addFilesToState(files, state, options = {}) {
         size: file.size,
         title: metadata.title,
         gameCode: metadata.gameCode,
+        headerValid: metadata.validHeader,
         validHeader: metadata.validHeader,
-        saveType,
-        status: metadata.validHeader ? "Ready" : "Invalid ROM header",
+        alreadyPatched,
+        saveType: saveMetadata.library,
+        saveTypeLabel: saveMetadata.label,
+        saveSize: saveMetadata.size,
+        status: alreadyPatched ? "Already patched" : metadata.validHeader ? "Ready" : "Invalid ROM header",
         error: metadata.validHeader ? null : "Invalid GBA header.",
+        warning: null,
         result: null,
       });
     } else if (extension === SAVE_EXTENSION) {
@@ -65,8 +83,15 @@ export async function addFilesToState(files, state, options = {}) {
     await yieldToBrowser();
   }
 
+  if (additions.length) {
+    state.roms = state.roms.filter((rom) => !AUTO_REMOVE_PATCH_STATUSES.has(rom.status));
+  }
   state.roms.push(...additions);
   return { addedRoms: additions.length, addedRomIds: additions.map((rom) => rom.id), ignored };
+}
+
+export function isRomPatchable(rom) {
+  return Boolean(rom?.validHeader && !rom.alreadyPatched);
 }
 
 export function removeRom(state, id) {

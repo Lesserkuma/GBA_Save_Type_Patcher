@@ -29,7 +29,6 @@ REQUIRED_SYMBOLS = {
     "payload_reset",
     "payload_getstatus",
     "payload_gettimedate",
-    "rtc_menu_options",
     "fake_rtc_menu_run_runtime",
 }
 

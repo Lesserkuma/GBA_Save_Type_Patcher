@@ -87,20 +87,10 @@ flush_sram_manual_entry:
     mov lr, r0
     pop {r0, r1, r2, r3, r4}
 # feel free to put any housekeeping before you return to your injected branch here
-    nop
-    nop
-    nop
-    nop
-
     bx lr
-
-    nop
-    nop
-    nop
-    nop
 .balign 4
 flush_sram_manual_entry_ref:
-    .word flush_sram - flush_sram_manual_entry_ref
+    .word flush_sram_no_hotkey - flush_sram_manual_entry_ref
 .ltorg
 
 .thumb
@@ -324,7 +314,9 @@ write_sram_patched:
     push {lr}
     push {r4, r5, r6, r7}
 
-    # Disable interrupts while writing - just in case
+    # Only mapper selection and arming the first dirty write need to be
+    # atomic. Keeping IME disabled for a complete 32/64 KiB copy starves
+    # Direct Sound games such as Kururin long enough to expose stale samples.
     ldr r6, =0x04000208
     ldrh r7, [r6]
     mov r3, # 0
@@ -338,6 +330,7 @@ write_sram_patched:
     mov r0, r5
     bl sram_bank_select_payload_entry
     pop {r0}
+    push {r5}
     cmp r5, # 0
     beq 1f
     mov r3, # 0x10
@@ -345,6 +338,7 @@ write_sram_patched:
     sub r1, r3
 1:
     mov r3, # 0
+    strh r7, [r6]
     
     add r2, r0
 write_sram_patched_loop:
@@ -352,27 +346,42 @@ write_sram_patched_loop:
     ldrb r4, [r0]
     ldrb r5, [r1]
     cmp r4, r5
-    beq (.+6)
-    mov r3, # 1
-    strb r4, [r1]
-    add r0, # 1
-    add r1, # 1
-    cmp r0, r2
-    blo write_sram_patched_loop
-
-    # If the flag was not set, the function had no effect. Short circuit
+    beq write_sram_patched_skip_byte
     cmp r3, # 0
-    beq write_sram_patched_exit
+    bne write_sram_patched_store_byte
 
-    # Install the chosen irq handler and initialise countdown value if needed.
+    # The first changed byte starts a new dirty interval. Re-select the SRAM
+    # bank and reset the auto-flush countdown before allowing that byte to
+    # become visible to the Shared IRQ handler.
+    mov r3, # 1
+    mov r5, # 0
+    strh r5, [r6]
+    ldr r5, [sp]
+    push {r0}
+    mov r0, r5
+    bl sram_bank_select_payload_entry
+    pop {r0}
+
+    push {r0, r1}
     adr r0, write_sram_patched_flush_mode_ref
     ldr r1, [r0]
     add r0, r1
     ldrh r0, [r0]
     cmp r0, # 0
-    bne write_sram_patched_exit
-    
+    bne write_sram_patched_first_change_armed
     bl install_countdown_handler
+write_sram_patched_first_change_armed:
+    pop {r0, r1}
+    strh r7, [r6]
+
+write_sram_patched_store_byte:
+    strb r4, [r1]
+write_sram_patched_skip_byte:
+    add r0, # 1
+    add r1, # 1
+    cmp r0, r2
+    blo write_sram_patched_loop
+
     b write_sram_patched_exit
 
     .balign 4
@@ -381,6 +390,7 @@ write_sram_patched_flush_mode_ref:
 
 write_sram_patched_exit:
     strh r7, [r6]
+    add sp, # 4
     mov r0, # 0
     pop {r4, r5, r6, r7}
     pop {r1}
@@ -536,7 +546,7 @@ flush_dirty_sram_on_boot:
     ldrb r0, [r4, # 3]
     cmp r0, # 0x30
     bne flush_dirty_sram_boot_done
-    bl flush_sram
+    bl flush_sram_no_hotkey
     mov r0, # 0
     strb r0, [r4, # 0]
     strb r0, [r4, # 1]
@@ -549,6 +559,9 @@ flush_dirty_sram_boot_done:
 # Ensure interrupts are disabled and there is plenty of stack space before calling
 .global flush_sram
 flush_sram:
+    stmfd sp!, {r8, r9}
+    mov r8, r0
+    mov r9, r1
     mov r0, # 0x04000000
     ldr r1, indicator_mode
     cmp r1, # 2
@@ -699,6 +712,7 @@ found_flash:
     add r2, r7
     add r3, r7
     bl run_from_ram
+    bl flush_sram_mark_success
 
 flush_sram_done:
     ldr r0, storage_mode
@@ -708,14 +722,9 @@ flush_sram_done:
 flush_sram_no_restore:
     pop {r4, r5, r6, r7}
 
-    pop {lr}
     mov r0, #0x04000000
-    ldr r1, indicator_mode
-    cmp r1, # 2
-    bne flush_sram_no_disable_save_indicator
-    mov r1, # 0
-    strh r1, [r0, # 0x02]
-flush_sram_no_disable_save_indicator:
+    bl flush_sram_finish_indicator_and_wait
+    pop {lr}
 
     # restore DMAs state
     pop {r3}
@@ -771,6 +780,7 @@ flush_sram_audio_no_restore_tm1:
     strh r3, [r12, # 0x02]
 flush_sram_audio_no_restore_tm0:
 
+    ldmfd sp!, {r8, r9}
     bx lr
     
 flash_fn_table:
@@ -1134,6 +1144,43 @@ void program_flash_4(unsigned sa, unsigned save_size)
 asm("program_flash_4_end:");
 
 asm(R"(
+.arm
+
+# Calls outside the Shared IRQ path do not carry a hotkey mask.
+flush_sram_no_hotkey:
+    mov r0, # 0
+    b flush_sram
+
+# A recognized ROM flash driver completed both erase and program passes.
+# Clear the mirrored Shared-IRQ countdown before returning to the common
+# finish path, so a manual flush cannot be repeated by the old timer.
+flush_sram_mark_success:
+    mov r0, # 0x04000000
+    mov r1, # 0
+    strh r1, [r0, # -0x06]
+    ldr r2, indicator_mode
+    cmp r2, # 1
+    bne flush_sram_mark_success_done
+    strh r1, [r0, # 0x02]
+flush_sram_mark_success_done:
+    bx lr
+
+# r0 = I/O base, r8 = active-low Shared-IRQ combo (zero for automatic calls),
+# r9 = Shared-IRQ release-wait helper.
+# Finish Green Swap first, then keep Direct Sound/DMA paused until a manual
+# combo is no longer held. The outer Shared-IRQ wait remains a fallback.
+flush_sram_finish_indicator_and_wait:
+    ldr r1, indicator_mode
+    cmp r1, # 2
+    bne flush_sram_finish_wait
+    mov r1, # 0
+    strh r1, [r0, # 0x02]
+
+flush_sram_finish_wait:
+    cmp r8, # 0
+    bxeq lr
+    bx r9
+
 # The following footer must come last.
 .balign 4
 .ascii "thx Maniac"

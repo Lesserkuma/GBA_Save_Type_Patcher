@@ -1,6 +1,6 @@
 const elements = {};
 let importProgressHideTimer = null;
-const DEFAULT_BATTERYLESS_HOTKEY = ["start", "select", "l", "r"];
+const DEFAULT_BATTERYLESS_HOTKEY = ["select", "l"];
 const BATTERYLESS_HOTKEY_BITS = {
   a: 0x0001,
   b: 0x0002,
@@ -28,12 +28,14 @@ export function bindElements() {
     optionsForm: document.querySelector("#patch-options"),
     optionsPanel: document.querySelector("#save-options-panel"),
     batterylessOptions: document.querySelector("#batteryless-options"),
+    flash512kOptions: document.querySelector("#flash512k-options"),
     sharedHotkeyOptions: document.querySelector("#shared-hotkey-options"),
     countdownField: document.querySelector("#countdown-field"),
+    batterylessCountdownIndicator: document.querySelector("#batteryless-countdown-indicator"),
+    batterylessAutoFlushCopy: document.querySelector("#batteryless-auto-flush-copy"),
     sramOptions: document.querySelector("#sram-options"),
     customFlashOptions: document.querySelector("#custom-flash-options"),
     waitstateOptions: document.querySelector("#waitstate-options"),
-    rtcMenuOptions: document.querySelector("#rtc-menu-options"),
     patchButton: document.querySelector("#patch-button"),
     clearButton: document.querySelector("#clear-button"),
     statusRegion: document.querySelector("#status-region"),
@@ -95,14 +97,25 @@ export function hideImportProgress(delayMs = 0) {
 export function renderOptions(state) {
   const isSram = state.options.patchMode === "sram";
   const isBatteryless = state.options.patchMode === "batteryless-sram";
+  const isFlash512k = state.options.patchMode === "flash512k";
   const isRtc = state.options.rtc.enabled;
   elements.batterylessOptions.hidden = !isBatteryless;
+  if (elements.flash512kOptions) elements.flash512kOptions.hidden = !isFlash512k;
   if (elements.sharedHotkeyOptions) elements.sharedHotkeyOptions.hidden = !(isBatteryless || isRtc);
   if (elements.sramOptions) elements.sramOptions.hidden = !(isSram || isBatteryless);
   elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
   if (elements.waitstateOptions) elements.waitstateOptions.hidden = !state.options.waitstate.enabled;
-  if (elements.rtcMenuOptions) elements.rtcMenuOptions.hidden = !state.options.rtc.enabled;
-  elements.countdownField.hidden = !isBatteryless || state.options.batteryless.mode !== "auto";
+  const isAutoModeEnabled = state.options.batteryless.mode === "auto";
+  const isBatterylessAutoMode = isBatteryless && isAutoModeEnabled;
+  if (elements.batterylessCountdownIndicator) {
+    elements.batterylessCountdownIndicator.disabled = !isAutoModeEnabled;
+    if (!isAutoModeEnabled && elements.batterylessCountdownIndicator.checked) {
+      elements.optionsForm.elements.indicator.value = "save";
+      state.options.batteryless.indicator = "save";
+    }
+  }
+  elements.countdownField.hidden = !isBatterylessAutoMode;
+  if (elements.batterylessAutoFlushCopy) elements.batterylessAutoFlushCopy.hidden = !isBatterylessAutoMode;
   elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "none");
 }
 
@@ -122,6 +135,7 @@ export function renderRomList(state, options = {}) {
     if (options.addedIds?.has(rom.id)) item.classList.add("is-added");
     item.dataset.id = rom.id;
     if (rom.error) item.dataset.state = "error";
+    else if (rom.warning) item.dataset.state = "warning";
     else if (["patched", "already"].some((prefix) => rom.status.toLowerCase().startsWith(prefix))) item.dataset.state = "success";
 
     const fileColumn = document.createElement("div");
@@ -163,11 +177,17 @@ export function renderRomList(state, options = {}) {
     libraryBadge.textContent = rom.saveType || "UNKNOWN";
     libraryBadge.hidden = !rom.saveType;
 
+    const saveTypeBadge = document.createElement("span");
+    saveTypeBadge.className = "save-type-badge";
+    saveTypeBadge.textContent = rom.saveTypeLabel || "Unknown";
+    saveTypeBadge.hidden = !(rom.headerValid ?? rom.validHeader);
+
     const status = document.createElement("span");
     status.className = "rom-status";
     status.textContent = rom.error ? "Error" : rom.status;
-    status.title = rom.error || rom.status;
+    status.title = rom.error || rom.warning || rom.status;
     if (rom.error) status.setAttribute("aria-label", `Error: ${rom.error}`);
+    else if (rom.warning) status.setAttribute("aria-label", `Warning: ${rom.warning}`);
 
     const removeButton = document.createElement("button");
     removeButton.type = "button";
@@ -176,7 +196,7 @@ export function renderRomList(state, options = {}) {
     removeButton.disabled = state.isPatching;
     removeButton.textContent = "Remove";
 
-    item.append(fileColumn, libraryBadge, status, removeButton);
+    item.append(fileColumn, libraryBadge, saveTypeBadge, status, removeButton);
     elements.romList.append(item);
   }
 }
@@ -220,20 +240,27 @@ export function syncOptionsFromForm(state) {
 
   state.options.patchMode = f.elements.patchMode.value;
   state.options.batteryless.mode = f.elements.batterylessMode.value;
-  state.options.batteryless.hotkey = checkedValues(f.elements.batterylessHotkey);
+  const sharedHotkey = checkedValues(f.elements.batterylessHotkey);
+  state.options.batteryless.hotkey = sharedHotkey;
   state.options.batteryless.countdownFrames = Number.parseInt(delayInput.value, 10);
   state.options.batteryless.indicator = f.elements.indicator.value;
   state.options.batteryless.lastBlock = f.elements.batterylessLastBlock?.value || "usable";
+  state.options.flash512k = state.options.flash512k || {};
+  state.options.flash512k.countdownFrames = Number.parseInt(f.elements.flash512kCountdownFrames.value, 10);
+  state.options.flash512k.indicator = f.elements.flash512kIndicator.value;
   state.options.customFlash.saveChipType = f.elements.saveChipType.value;
   state.options.sram.flash1mBankSwitchStyle = f.elements.flash1mBankSwitchStyle?.value || "modern";
   state.options.waitstate.enabled = f.elements.waitstateEnabled.checked;
   state.options.waitstate.mode = "supercard_exact";
   state.options.rtc.enabled = f.elements.rtcEnabled.checked;
-  state.options.rtc.skipSoftReset = f.elements.rtcSkipSoftReset?.checked || false;
 }
 
 export function readValidatedOptions(state) {
   const options = structuredClone(state.options);
+  const supportedPatchModes = new Set(["none", "sram", "batteryless-sram", "flash512k", "custom-flash"]);
+  if (!supportedPatchModes.has(options.patchMode)) {
+    throw new Error(`Unsupported patch mode: ${options.patchMode}.`);
+  }
 
   if (options.patchMode === "batteryless-sram" && options.batteryless.mode === "auto") {
     if (!Number.isInteger(options.batteryless.countdownFrames) || options.batteryless.countdownFrames < 0 || options.batteryless.countdownFrames > 255) {
@@ -241,6 +268,19 @@ export function readValidatedOptions(state) {
     }
   } else {
     options.batteryless.countdownFrames = 102;
+  }
+  if (options.batteryless.mode !== "auto" && options.batteryless.indicator === "countdown") options.batteryless.indicator = "save";
+
+  options.flash512k = options.flash512k || { countdownFrames: 100, indicator: "save" };
+  if (options.patchMode === "flash512k") {
+    if (!Number.isInteger(options.flash512k.countdownFrames) || options.flash512k.countdownFrames < 1 || options.flash512k.countdownFrames > 255) {
+      throw new Error("512K FLASH Delay must be a number from 1 to 255.");
+    }
+    if (!["save", "countdown", "off"].includes(options.flash512k.indicator)) {
+      options.flash512k.indicator = "save";
+    }
+  } else {
+    options.flash512k.countdownFrames = 100;
   }
 
   options.sram = options.sram || {};
@@ -259,9 +299,7 @@ export function readValidatedOptions(state) {
     ? { enabled: true, mode: "supercard_exact" }
     : { enabled: false, mode: "supercard_exact" };
 
-  options.rtc = options.rtc?.enabled
-    ? { enabled: true, skipSoftReset: options.rtc.skipSoftReset === true }
-    : { enabled: false, skipSoftReset: false };
+  options.rtc = { enabled: options.rtc?.enabled === true };
 
   if (options.patchMode === "none" && !options.waitstate.enabled && !options.rtc.enabled) {
     throw new Error("Select an Other Patch or choose a save type patch mode.");

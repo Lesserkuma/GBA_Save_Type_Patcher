@@ -9,6 +9,11 @@ const IRQ_HANDLER_PAYLOAD = hexToBytes(IRQ_HANDLER_PAYLOAD_HEX);
 const IRQ_HANDLER_MARKER = IRQ_HANDLER_PAYLOAD.slice(C.IRQ_CONFIG_MAGIC_OFFSET, C.IRQ_CONFIG_MAGIC_OFFSET + 4);
 const IRQ_HANDLER_CODE_MARKER = IRQ_HANDLER_PAYLOAD.slice(C.IRQ_BOOTSTRAP_OFFSET, C.IRQ_BOOTSTRAP_OFFSET + 16);
 const IRQ_HANDLER_ROM_MARKER_TEXT = "lk_irq_shared";
+const IRQ_HANDLER_ROM_MARKER = asciiBytes(IRQ_HANDLER_ROM_MARKER_TEXT);
+const IRQ_SAVE_FLUSH_ENTRY_OFFSET = C.IRQ_SAVE_FLUSH_ENTRY_OFFSET;
+const IRQ_FLAG_SAVE_FLUSH = C.IRQ_FLAG_SAVE_FLUSH;
+const IRQ_FLAG_SAVE_FLUSH_AUTO = C.IRQ_FLAG_SAVE_FLUSH_AUTO;
+const IRQ_FLAG_SAVE_FLUSH_HOTKEY = C.IRQ_FLAG_SAVE_FLUSH_HOTKEY;
 const OLD_IRQ_SLOT = hexToBytes("fc7f0003");
 const ORIGINAL_IRQ_SLOT = hexToBytes("f47f0003");
 
@@ -56,7 +61,7 @@ export function irqHandlerPayloadSpanForLayout() {
 }
 
 function writeIrqHandlerRomMarker(bytes, operations, payloadBase) {
-  const marker = asciiBytes(IRQ_HANDLER_ROM_MARKER_TEXT);
+  const marker = IRQ_HANDLER_ROM_MARKER;
   const markerOffset = payloadBase + IRQ_HANDLER_PAYLOAD.length;
   const markerEnd = markerOffset + marker.length;
   const paddingEnd = payloadBase + alignedPayloadSpan(IRQ_HANDLER_PAYLOAD.length);
@@ -64,6 +69,29 @@ function writeIrqHandlerRomMarker(bytes, operations, payloadBase) {
   if (!isFreeRegion(bytes, markerOffset, marker.length)) return false;
   copyBytes(bytes, markerOffset, marker);
   addOperation(operations, "Shared IRQ ROM marker", markerOffset, marker.length, { codeName: "shared_irq_rom_marker" });
+  return true;
+}
+
+function isHandlerConfigByte(offset) {
+  const configOffsets = [
+    C.IRQ_ORIGINAL_ENTRYPOINT_OFFSET,
+    C.IRQ_FLAGS_OFFSET,
+    C.IRQ_RTC_MENU_ENTRY_OFFSET,
+    IRQ_SAVE_FLUSH_ENTRY_OFFSET,
+    C.IRQ_COUNTDOWN_FRAMES_OFFSET,
+    C.IRQ_INDICATOR_MODE_OFFSET,
+    C.IRQ_HOTKEY_MASK_OFFSET,
+    C.IRQ_HANDLER_ENTRY_OFFSET,
+  ];
+  return configOffsets.some((configOffset) => offset >= configOffset && offset < configOffset + 4);
+}
+
+function currentHandlerCodeMatches(bytes, payloadBase) {
+  if (payloadBase < 0 || payloadBase + IRQ_HANDLER_PAYLOAD.length > bytes.length) return false;
+  for (let offset = 0; offset < IRQ_HANDLER_PAYLOAD.length; offset += 1) {
+    if (isHandlerConfigByte(offset)) continue;
+    if (bytes[payloadBase + offset] !== IRQ_HANDLER_PAYLOAD[offset]) return false;
+  }
   return true;
 }
 
@@ -117,11 +145,19 @@ function hotkeyMaskValue(hotkeyMask) {
 }
 
 function irqFlags(options) {
+  const saveFlushEntry = options.saveFlushEntry ?? 0;
+  const saveFlushAuto = options.saveFlushAuto ?? false;
+  const saveFlushHotkey = options.saveFlushHotkey ?? Boolean(saveFlushEntry);
   return (
     (options.rtcMenuEntry ? C.IRQ_FLAG_RTC : 0)
-    | (options.batterylessFlushEntry ? C.IRQ_FLAG_BATTERYLESS : 0)
-    | (options.batterylessAuto ? C.IRQ_FLAG_BATTERYLESS_AUTO : 0)
+    | (saveFlushEntry ? IRQ_FLAG_SAVE_FLUSH : 0)
+    | (saveFlushEntry && saveFlushAuto ? IRQ_FLAG_SAVE_FLUSH_AUTO : 0)
+    | (saveFlushEntry && saveFlushHotkey ? IRQ_FLAG_SAVE_FLUSH_HOTKEY : 0)
   ) >>> 0;
+}
+
+function saveFlushEntryValue(options) {
+  return (options.saveFlushEntry ?? 0) >>> 0;
 }
 
 function writeExistingConfig(bytes, operations, payloadBase, offset, value, name) {
@@ -141,10 +177,15 @@ export function applyIrqHandlerForPipeline(rom, operations, warnings, options = 
     const handlerAddress = (payloadAddress + C.IRQ_HANDLER_OFFSET) >>> 0;
     const flags = irqFlags(options);
     const hotkeyMask = hotkeyMaskValue(options.hotkeyMask);
+    const saveFlushEntry = saveFlushEntryValue(options);
+    if (!currentHandlerCodeMatches(rom.bytes, existingBase)) {
+      throw new PatchError("Shared IRQ: an installed handler does not match the current payload; migrations are not supported");
+    }
+
     let updated = 0;
     updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_FLAGS_OFFSET, flags, "Shared IRQ flags") ? 1 : 0;
     updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_RTC_MENU_ENTRY_OFFSET, options.rtcMenuEntry || 0, "Shared IRQ RTC menu entry") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_BATTERYLESS_FLUSH_ENTRY_OFFSET, options.batterylessFlushEntry || 0, "Shared IRQ Batteryless flush entry") ? 1 : 0;
+    updated += writeExistingConfig(rom.bytes, operations, existingBase, IRQ_SAVE_FLUSH_ENTRY_OFFSET, saveFlushEntry, "Shared IRQ save flush entry") ? 1 : 0;
     updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_COUNTDOWN_FRAMES_OFFSET, options.countdownFrames || 0, "Shared IRQ countdown frames") ? 1 : 0;
     updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_INDICATOR_MODE_OFFSET, indicatorModeValue(options.indicatorMode), "Shared IRQ indicator mode") ? 1 : 0;
     updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_HOTKEY_MASK_OFFSET, hotkeyMask, "Shared IRQ hotkey mask") ? 1 : 0;
@@ -155,6 +196,7 @@ export function applyIrqHandlerForPipeline(rom, operations, warnings, options = 
       payload_offset: existingBase,
       size: IRQ_HANDLER_PAYLOAD.length,
       flags,
+      save_flush_entry: saveFlushEntry,
       hotkey_mask: hotkeyMask,
       handler_entry: handlerAddress,
     };
@@ -184,11 +226,12 @@ export function applyIrqHandlerForPipeline(rom, operations, warnings, options = 
     const bootstrapAddress = (payloadAddress + C.IRQ_BOOTSTRAP_OFFSET) >>> 0;
     const flags = irqFlags(options);
     const hotkeyMask = hotkeyMaskValue(options.hotkeyMask);
+    const saveFlushEntry = saveFlushEntryValue(options);
 
     writeConfig(payload, C.IRQ_ORIGINAL_ENTRYPOINT_OFFSET, originalEntrypoint);
     writeConfig(payload, C.IRQ_FLAGS_OFFSET, flags);
     writeConfig(payload, C.IRQ_RTC_MENU_ENTRY_OFFSET, options.rtcMenuEntry || 0);
-    writeConfig(payload, C.IRQ_BATTERYLESS_FLUSH_ENTRY_OFFSET, options.batterylessFlushEntry || 0);
+    writeConfig(payload, IRQ_SAVE_FLUSH_ENTRY_OFFSET, saveFlushEntry);
     writeConfig(payload, C.IRQ_COUNTDOWN_FRAMES_OFFSET, options.countdownFrames || 0);
     writeConfig(payload, C.IRQ_INDICATOR_MODE_OFFSET, indicatorModeValue(options.indicatorMode));
     writeConfig(payload, C.IRQ_HOTKEY_MASK_OFFSET, hotkeyMask);
@@ -214,6 +257,7 @@ export function applyIrqHandlerForPipeline(rom, operations, warnings, options = 
       runtime_base: payloadAddress,
       size: IRQ_HANDLER_PAYLOAD.length,
       flags,
+      save_flush_entry: saveFlushEntry,
       handler_entry: handlerAddress,
       bootstrap_entry: bootstrapAddress,
       original_entrypoint: originalEntrypoint,

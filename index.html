@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GBA Save Type Patcher</title>
-  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/app.css?2">
 </head>
 <body>
   <div class="page-shell">
@@ -39,7 +39,8 @@
             <label class="option-line"><input type="radio" name="patchMode" value="none"> <span class="option-copy"><span class="option-label">None</span></span></label>
             <label class="option-line"><input type="radio" name="patchMode" value="sram" checked><span class="option-copy"><span class="option-label">SRAM</span><span class="option-hint">(for SRAM-based cartridges with battery)</span></span></label>
             <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy"><span class="option-label">Batteryless SRAM</span><span class="option-hint">(for SRAM-based cartridges without battery, experimental)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy"><span class="option-label">Custom 512K/1M FLASH</span><span class="option-hint">(for Custom-FLASH-based cartridges)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="flash512k"><span class="option-copy"><span class="option-label">512K FLASH</span><span class="option-hint">(for cartridges with a SST-compatible FLASH save chip, experimental)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy"><span class="option-label">Custom 512K/1M FLASH</span><span class="option-hint">(for cartridges with a non-standard FLASH save chip)</span></span></label>
           </fieldset>
 
           <fieldset id="sram-options" class="sub-options"><legend>SRAM Options</legend>
@@ -48,8 +49,15 @@
 
           <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
             <div class="inline-group"><span>Auto Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Enabled</label><label><input type="radio" name="batterylessMode" value="keypad"> Disabled (less invasive)</label></div>
-            <label id="countdown-field" class="field-label">Auto Mode Delay: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
-            <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
+            <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input id="batteryless-countdown-indicator" type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
+            <label id="countdown-field" class="field-label">Flush Delay: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"> VBlank frames</label>
+            <p id="batteryless-auto-flush-copy" class="small-copy">Pending save data is flushed automatically after the configured delay.</p>
+          </fieldset>
+
+          <fieldset id="flash512k-options" class="sub-options" hidden><legend>512K FLASH options</legend>
+            <label class="field-label">Flush Delay: <input type="number" name="flash512kCountdownFrames" min="1" max="255" step="1" value="100" inputmode="numeric"> VBlank frames</label>
+            <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="flash512kIndicator" value="save" checked> While saving</label><label><input type="radio" name="flash512kIndicator" value="countdown"> While delaying</label><label><input type="radio" name="flash512kIndicator" value="off"> Off</label></div>
+            <p class="small-copy">Pending journal data is flushed automatically after the configured delay.</p>
           </fieldset>
 
           <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Flash Chip Type:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
@@ -66,15 +74,10 @@
                 <input type="checkbox" name="waitstateEnabled"><span class="option-copy"><span class="option-label">Waitstate</span><span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
               </label>
             </fieldset>
-            <fieldset id="rtc-menu-options" class="sub-options" hidden><legend>Fake RTC Options</legend>
-              <label class="option-line">
-                <input type="checkbox" name="rtcSkipSoftReset"><span class="option-copy"><span class="option-label">Skip Menu on Reset</span></span>
-              </label>
-            </fieldset>
           </section>
 
           <section id="other-settings-panel" class="panel other-settings-panel" aria-labelledby="other-settings-title">
-            <div class="panel-heading compact"><h2 id="other-settings-title">Other Settings</h2></div>
+            <div class="panel-heading compact"><h2 id="other-settings-title">⚙️ Other Settings</h2></div>
             <fieldset id="shared-hotkey-options" class="sub-options" hidden><legend>Global Hotkey</legend>
               <div class="inline-group hotkey-badge-group"><label><input type="checkbox" name="batterylessHotkey" value="start"> START</label><label><input type="checkbox" name="batterylessHotkey" value="select" checked> SELECT</label><label><input type="checkbox" name="batterylessHotkey" value="l" checked> L</label><label><input type="checkbox" name="batterylessHotkey" value="r"> R</label><label><input type="checkbox" name="batterylessHotkey" value="up"> &uarr;</label><label><input type="checkbox" name="batterylessHotkey" value="down"> &darr;</label><label><input type="checkbox" name="batterylessHotkey" value="left"> &larr;</label><label><input type="checkbox" name="batterylessHotkey" value="right"> &rarr;</label><label><input type="checkbox" name="batterylessHotkey" value="a"> A</label><label><input type="checkbox" name="batterylessHotkey" value="b"> B</label><div><span>Buttons to push at the same time</span></div></div>
             </fieldset>
@@ -96,16 +99,44 @@
     </main>
 
     <footer>
-      <div><b>GBA Save Type Patcher v1.4</b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a></small></div>
+      <div><b>GBA Save Type Patcher v1.5</b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a></small></div>
       <div>
         Portions partly based on:<br>
         <a href="https://web.archive.org/web/20070225124322/http://www.gbadat.altervista.org/tools.htm" target="_blank" rel="noopener noreferrer">GBATA SRAM Patcher</a> by coolhj<br>
         <a href="https://github.com/metroid-maniac/gba-auto-batteryless-patcher" target="_blank" rel="noopener noreferrer">gba-auto-batteryless-patcher</a> by Metroid Maniac (MIT)<br>
+        <a href="https://github.com/metroid-maniac/gba-flash-patcher" target="_blank" rel="noopener noreferrer">gba-flash-patcher</a> by Metroid Maniac (MIT)<br>
         <a href="https://github.com/Lesserkuma/Custom_1M_FLASH_Patcher" target="_blank" rel="noopener noreferrer">Custom 1M FLASH Patcher</a> by Lesserkuma (GPL-3.0)<br>
         <a href="https://github.com/davidgfnet/superfw" target="_blank" rel="noopener noreferrer">SuperFW WAITCNT and RTC patching</a> by David Guillen Fandos (GPL-3.0)<br>
       </div>
     </footer>
   </div>
-  <script type="module" src="js/app.js"></script>
+  <script type="module">
+    async function startApp() {
+      if ("serviceWorker" in navigator) {
+        try {
+          await navigator.serviceWorker.register("./service-worker.js", {
+            updateViaCache: "none",
+          });
+          await navigator.serviceWorker.ready;
+
+          if (!navigator.serviceWorker.controller) {
+            await new Promise((resolve) => {
+              const timeout = window.setTimeout(resolve, 1000);
+              navigator.serviceWorker.addEventListener("controllerchange", () => {
+                window.clearTimeout(timeout);
+                resolve();
+              }, { once: true });
+            });
+          }
+        } catch {
+          // Keep the app usable when service workers are unavailable.
+        }
+      }
+
+      await import("./js/app.js?2");
+    }
+
+    startApp();
+  </script>
 </body>
 </html>

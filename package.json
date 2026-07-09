@@ -1,0 +1,8 @@
+{
+  "name": "gba-save-type-patcher",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

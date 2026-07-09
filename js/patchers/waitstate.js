@@ -34,6 +34,7 @@ import { PatchError } from "../core/errors.js";
 import { applyPatchHeaderMarker, hasWaitstatePatch, makePatchHeaderFlags, readPatchFlags, updateGbaHeaderChecksum } from "./patch-state.js";
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
 import { PAYLOAD_ALIGNMENT, alignedPayloadSpan, ensureDirectPayloadRegion } from "./payload-placement.js";
+import { detectRomSaveMetadata } from "./save-type.js";
 
 const WAITCNT_VALUE_EXACT = 0x04000204;
 const THUMB_LDR_BACKOFF = 256;
@@ -1708,6 +1709,17 @@ const SUPERFW_PATCH_DB_BASE64 = [
   'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 ].join("");
 
+export function findWaitstatePayloadBase(bytes) {
+  const marker = asciiBytes(WAITCNT_ENTRYPOINT_MARKER);
+  let markerOffset = findBytes(bytes, marker);
+  while (markerOffset >= 0) {
+    const payloadBase = markerOffset - C.WAITSTATE_PAYLOAD_SIZE;
+    if (payloadBase >= 0 && payloadBase % PAYLOAD_ALIGNMENT === 0) return payloadBase;
+    markerOffset = findBytes(bytes, marker, markerOffset + 1);
+  }
+  return null;
+}
+
 let parsedSuperfwPatchDb = null;
 
 function addOperation(operations, name, offset, size, details = {}) {
@@ -1919,6 +1931,52 @@ function superfwProgramRelocationSpan(entry) {
   return collectSuperfwProgramWrites(entry).reduce((sum, write) => sum + write.span, 0);
 }
 
+function collectSuperfwFixedWriteRanges(entry) {
+  if (!entry) return [];
+
+  const ranges = [];
+  for (let i = 0; i < entry.ops.length; i += 1) {
+    const op = entry.ops[i] >>> 0;
+    const opcode = op >>> 28;
+    const arg = (op >>> 25) & 7;
+    const offset = op & 0x01ffffff;
+    let size = 0;
+
+    switch (opcode) {
+      case 0x1:
+        size = 2;
+        break;
+      case 0x2:
+        size = 4;
+        break;
+      case 0x3:
+        size = arg + 1;
+        i += Math.floor((size + 3) / 4);
+        break;
+      case 0x4:
+        size = (arg + 1) * 4;
+        i += arg + 1;
+        break;
+      case 0x5:
+        size = arg === 0 || arg === 1 ? 4 : (arg === 4 || arg === 5 ? 8 : 0);
+        break;
+      default:
+        // Program writes (opcode 0) are relocated into the Waitstate payload.
+        break;
+    }
+
+    if (size > 0 && offset < MAX_GBA_ROM_SIZE) {
+      ranges.push([offset, Math.min(offset + size, MAX_GBA_ROM_SIZE)]);
+    }
+  }
+  return ranges;
+}
+
+export function waitstateFixedWriteRangesForLayout(inputBytes, waitstateOptions = {}) {
+  if (!waitstateOptions?.enabled) return [];
+  return collectSuperfwFixedWriteRanges(getSuperfwDbEntryForRom(inputBytes));
+}
+
 function mapRelocatedSuperfwTarget(targetAddress, relocations) {
   const targetOffset = targetAddress - C.GBA_ROM_BASE;
   if (!Number.isFinite(targetOffset) || targetOffset < 0 || targetOffset >= MAX_GBA_ROM_SIZE) return null;
@@ -2057,6 +2115,9 @@ function writeSuperfwDbBytes(rom, operations, originalOffset, newBytes, codeName
   const actualOffset = meta.isProgram
     ? relocatedSuperfwProgramOffset(relocations, meta.programIndex, originalOffset, newBytes.length)
     : originalOffset;
+  if (rangesOverlap(actualOffset, actualOffset + newBytes.length, relocationContext.excludedRanges || [])) {
+    throw new PatchError(`SuperFW WAITCNT write overlaps an excluded range at 0x${actualOffset.toString(16)}`);
+  }
   const relocatedBytes = relocateSuperfwWriteBytes(newBytes, actualOffset, relocations, relocationContext.warnings);
   const relocatedCodeName = meta.isProgram && actualOffset !== originalOffset ? `${codeName}_relocated` : codeName;
   return recordAndWriteBytes(rom, operations, actualOffset, relocatedBytes, relocatedCodeName);
@@ -2067,6 +2128,7 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations, options = {}) {
   const relocationContext = {
     warnings: options.warnings || [],
     programRelocations: makeSuperfwProgramRelocations(entry, options.programBaseOffset ?? null),
+    excludedRanges: options.excludedRanges || [],
   };
   let appliedWrites = 0;
 
@@ -2145,6 +2207,32 @@ function applySuperfwWaitcntDbOps(inputBytes, entry, operations, options = {}) {
   return { bytes: rom.bytes, appliedWrites, programRelocations: relocationContext.programRelocations };
 }
 
+function applySuperfwPatchengineWaitcnt(inputBytes, operations, excludedRanges = []) {
+  const out = new Uint8Array(inputBytes);
+  const marker = new Uint8Array(4);
+  writeU32(marker, 0, WAITCNT_VALUE_EXACT);
+  let patches = 0;
+  let offset = findBytes(out, marker);
+
+  while (offset >= 0) {
+    if (
+      offset % 4 === 0
+      && !rangesOverlap(offset, offset + 4, excludedRanges)
+      && waitstateLiteralIsReferenced(out, offset, offset - ARM_LDR_BACKOFF * 4, offset)
+    ) {
+      writeU32(out, offset, 0);
+      addOperation(operations, "SuperFW WAITCNT literal", offset, 4, {
+        codeName: "superfw_patchengine_waitcnt",
+        value: 0,
+      });
+      patches += 1;
+    }
+    offset = findBytes(out, marker, offset + 1);
+  }
+
+  return { bytes: out, patches };
+}
+
 function runSuperfwWaitcntPatch(inputBytes, operations, warnings, options = {}) {
   const original = new Uint8Array(inputBytes);
   const dbEntry = getSuperfwDbEntryForRom(original);
@@ -2154,6 +2242,7 @@ function runSuperfwWaitcntPatch(inputBytes, operations, warnings, options = {}) 
     const patched = applySuperfwWaitcntDbOps(original, dbEntry, operations, {
       warnings,
       programBaseOffset: options.programBaseOffset ?? null,
+      excludedRanges: options.excludedRanges || [],
     });
     const appliedWrites = operations.length - before;
     return {
@@ -2170,7 +2259,7 @@ function runSuperfwWaitcntPatch(inputBytes, operations, warnings, options = {}) 
   }
 
   const before = operations.length;
-  const patched = applySuperfwPatchengineWaitcnt(original, operations);
+  const patched = applySuperfwPatchengineWaitcnt(original, operations, options.excludedRanges || []);
   const appliedWrites = operations.length - before;
   return {
     bytes: patched.bytes,
@@ -2420,7 +2509,7 @@ export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = 
     return { requested: true, status: "already_patched", value: waitstateValue, direct_writes: 0 };
   }
 
-  const excludedRanges = [...(options.excludedRanges || []), [0, Math.min(C.GBA_HEADER_SIZE, rom.bytes.length)]];
+  const excludedRanges = [...(options.excludedRanges || [])];
   const localOperations = [];
   const localWarnings = [];
   let work = new Uint8Array(rom.bytes);
@@ -2434,6 +2523,7 @@ export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = 
     nextEntrypoint = decodeEntrypointAddress(work);
     const dbEntry = getSuperfwDbEntryForRom(work);
     const superfwProgramSpan = superfwProgramRelocationSpan(dbEntry);
+    const fixedWriteRanges = collectSuperfwFixedWriteRanges(dbEntry);
     totalPayloadSpan += superfwProgramSpan;
 
     if (payloadOffset === null && options.payloadOffsetRequired) {
@@ -2442,8 +2532,13 @@ export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = 
       return { requested: true, status: "failed", value: waitstateValue, direct_writes: 0 };
     }
     if (payloadOffset === null) {
-      payloadOffset = findTailFreeRegion(work, totalPayloadSpan, PAYLOAD_ALIGNMENT, work.length, excludedRanges);
-    } else if (payloadOffset < 0 || payloadOffset % PAYLOAD_ALIGNMENT || !isFreeRegion(work, payloadOffset, totalPayloadSpan)) {
+      payloadOffset = findTailFreeRegion(work, totalPayloadSpan, PAYLOAD_ALIGNMENT, work.length, [...excludedRanges, ...fixedWriteRanges]);
+    } else if (
+      payloadOffset < 0
+      || payloadOffset % PAYLOAD_ALIGNMENT
+      || !isFreeRegion(work, payloadOffset, totalPayloadSpan)
+      || rangesOverlap(payloadOffset, payloadOffset + totalPayloadSpan, fixedWriteRanges)
+    ) {
       payloadOffset = null;
     }
     if (payloadOffset === null) {
@@ -2457,12 +2552,13 @@ export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = 
     const superfwWarnings = [];
     let superfwResult = runSuperfwWaitcntPatch(work, superfwOperations, superfwWarnings, {
       programBaseOffset: superfwProgramSpan ? programBaseOffset : null,
+      excludedRanges,
     });
 
     if (superfwWarnings.some((message) => message.includes("could not relocate"))) {
       const fallbackOperations = [];
       const fallbackWarnings = [];
-      superfwResult = runSuperfwWaitcntPatch(work, fallbackOperations, fallbackWarnings);
+      superfwResult = runSuperfwWaitcntPatch(work, fallbackOperations, fallbackWarnings, { excludedRanges });
       work = superfwResult.bytes;
       localOperations.push(...fallbackOperations);
       localWarnings.push(...fallbackWarnings);
@@ -2549,6 +2645,10 @@ export function applyWaitstateForPipeline(rom, operations, warnings, waitstateOp
 
   const payloadSpan = waitstatePayloadSpanForLayout(rom.bytes, waitstateOptions, existingFlags);
   const excludedRanges = [...(context.excludedRanges || [])];
+  const placementExcludedRanges = [
+    ...excludedRanges,
+    ...waitstateFixedWriteRangesForLayout(rom.bytes, waitstateOptions),
+  ];
   let payloadOffset = context.waitstatePayloadOffset ?? context.payloadOffset ?? null;
 
   if (payloadOffset === null && context.batterylessPayloadOffset !== null && context.batterylessPayloadOffset !== undefined) {
@@ -2556,14 +2656,13 @@ export function applyWaitstateForPipeline(rom, operations, warnings, waitstateOp
   }
 
   if (payloadOffset === null) {
-    payloadOffset = ensureDirectPayloadRegion(rom, operations, warnings, payloadSpan, "Waitstate", excludedRanges);
+    payloadOffset = ensureDirectPayloadRegion(rom, operations, warnings, payloadSpan, "Waitstate", placementExcludedRanges);
   }
 
   if (payloadOffset === null) {
     return { requested: true, status: "failed", value, direct_writes: 0 };
   }
 
-  if (excludedRanges.length) excludedRanges.push(...batterylessPowerBoundaryGuardRanges(rom.bytes.length));
   return applyWaitstatePatch(rom, operations, warnings, value, {
     excludedRanges,
     payloadOffset,
@@ -2574,6 +2673,7 @@ export function applyWaitstateForPipeline(rom, operations, warnings, waitstateOp
 
 export function applyWaitstateToBytes(inputBytes, waitstateOptions = {}) {
   const rom = { bytes: new Uint8Array(inputBytes) };
+  const sourceSaveMetadata = detectRomSaveMetadata(rom.bytes);
   const operations = [];
   const warnings = [];
   let waitstate;
@@ -2595,7 +2695,14 @@ export function applyWaitstateToBytes(inputBytes, waitstateOptions = {}) {
       });
   }
 
-  applyPatchHeaderMarker(rom.bytes, operations, makePatchHeaderFlags(rom.bytes, { waitstateResult: waitstate }));
+  if (["patched", "already_patched"].includes(waitstate.status)) {
+    applyPatchHeaderMarker(rom.bytes, operations, makePatchHeaderFlags(rom.bytes, {
+      saveMedium: sourceSaveMetadata.medium,
+      saveSize: sourceSaveMetadata.size,
+      batteryless: false,
+      waitstateResult: waitstate,
+    }));
+  }
   updateGbaHeaderChecksum(rom.bytes, operations);
   return { bytes: rom.bytes, result: { waitstate, operations, warnings, status: operations.length ? "patched" : waitstate.status } };
 }

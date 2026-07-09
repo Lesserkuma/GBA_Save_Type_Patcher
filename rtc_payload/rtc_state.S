@@ -106,11 +106,3 @@ rtc_state_is_initialized:
     movne   r0, #0
     bx      lr
     .size rtc_state_is_initialized, . - rtc_state_is_initialized
-
-    .section .rodata.rtc_options, "a", %progbits
-    .align 2
-    .global rtc_menu_options
-    .type rtc_menu_options, %object
-rtc_menu_options:
-    .word 0
-    .size rtc_menu_options, . - rtc_menu_options

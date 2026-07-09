@@ -1,5 +1,5 @@
 ENTRY(payload_probe)
-EXTERN(payload_probe payload_reset payload_getstatus payload_gettimedate fake_rtc_menu_run_runtime rtc_menu_options)
+EXTERN(payload_probe payload_reset payload_getstatus payload_gettimedate fake_rtc_menu_run_runtime)
 
 SECTIONS
 {

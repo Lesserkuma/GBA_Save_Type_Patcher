@@ -2,6 +2,7 @@ import { asciiBytes, copyBytes, fillBytes, findBytes, hexToBytes, readAscii, rea
 import { PatchError } from "../core/errors.js";
 import { findSaveType } from "./sram.js";
 import { applyWaitstateToBytes } from "./waitstate.js";
+import { applyPatchHeaderMarker, makePatchHeaderFlags, PATCH_SAVE_MEDIUM } from "./patch-state.js";
 
 const GBA_ROM_BASE = 0x08000000;
 const SAVE_CHIP_TYPES = { 1: "SST25VF064C, SST49LF080A, 0xFFFF", 2: "SST39VF6401B" };
@@ -22,6 +23,14 @@ const GCC_BANK = hexToBytes("AA225521054B1A70054A1170B0221A70E0230006000E1B05187
 const GCC_READ = hexToBytes("AA2555261C4B1D701C4D2E70B0251D70E02300011B05000E1870");
 const ID_MARKERS = { old: hexToBytes("90B593B06F46391D081C"), agbcc: hexToBytes("034A101C08E000005555000EAA2A000E"), gcc: hexToBytes("11A9881A423811000988013B02321152") };
 const BL_PLACEHOLDER = hexToBytes("F7000000");
+
+export function customFlashSaveSize(libraryNames) {
+  const names = Array.from(libraryNames || []);
+  const has1M = names.some((name) => FLASH_1M.has(name));
+  const has512K = names.some((name) => !FLASH_1M.has(name));
+  if (has1M && has512K) throw new PatchError("Custom FLASH found conflicting 512K and 1M FLASH libraries.");
+  return has1M ? 131072 : 65536;
+}
 
 function cloneCode(type) { const code = Object.fromEntries(Object.entries(CODE).map(([k, v]) => [k, new Uint8Array(v)])); if (type === 2) { code.erase1m[0x40] = 0x50; code.erase512[0x3c] = 0x50; } return code; }
 function addOperation(operations, library, fn, offset, size) { operations.push({ name: `${library}: ${fn}`, library, function: fn, offset, size }); }
@@ -59,6 +68,8 @@ export function patchCustomFlashBytes(inputBytes, options = {}) {
   let setBank = null;
   const libs = findFlashLibraries(out);
   if (!libs.length) throw new PatchError("Custom FLASH requires a 512K FLASH or 1M FLASH ROM.");
+  const has1M = libs.some((library) => FLASH_1M.has(library.name));
+  const targetSaveSize = customFlashSaveSize(libs.map((library) => library.name));
 
   for (const lib of libs) {
     if (lib.base_offset < 0 || lib.base_offset >= out.length) { warnings.push(`${lib.name}: invalid base offset`); continue; }
@@ -114,9 +125,18 @@ export function patchCustomFlashBytes(inputBytes, options = {}) {
     warnings.push(...wait.result.warnings);
     waitstate = wait.result.waitstate;
   }
+  if (!options.deferHeaderFinalization && operations.length) {
+    const headerFlags = makePatchHeaderFlags(bytes, {
+      saveMedium: PATCH_SAVE_MEDIUM.FLASH,
+      saveSize: targetSaveSize,
+      batteryless: false,
+      waitstateResult: waitstate,
+    });
+    applyPatchHeaderMarker(bytes, operations, headerFlags);
+  }
   const changed = !sameBytes(bytes, beforePatch);
   const status = changed ? "patched" : "already_patched";
-  const result = { mode: "custom-flash", status, save_type: [...new Set(libs.map((h) => h.name))].join(","), detected_save_type: findSaveType(bytes), save_chip_type: type, save_chip_name: SAVE_CHIP_TYPES[type], flash_libraries: libs, operations, warnings, title: readAscii(bytes, 0xa0, 12), game_code: readAscii(bytes, 0xac, 4) };
+  const result = { mode: "custom-flash", status, save_type: [...new Set(libs.map((h) => h.name))].join(","), detected_save_type: findSaveType(bytes), target_save_type: has1M ? "FLASH1M" : "FLASH512", logical_save_size: targetSaveSize, save_chip_type: type, save_chip_name: SAVE_CHIP_TYPES[type], flash_libraries: libs, operations, warnings, title: readAscii(bytes, 0xa0, 12), game_code: readAscii(bytes, 0xac, 4) };
   if (waitstate) result.waitstate = waitstate;
   return { bytes, result };
 }

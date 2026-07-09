@@ -55,7 +55,6 @@ extern uint32_t rtc_state_is_initialized(void);
 #define KEY_DOWN  0x0080
 #define KEY_R     0x0100
 #define KEY_L     0x0200
-#define KEY_MENU_COMBO (KEY_L | KEY_R | KEY_SELECT | KEY_START)
 
 #define ATTR0_4BPP   0x0000
 #define ATTR0_SQUARE 0x0000
@@ -503,15 +502,15 @@ static void runtime_restore(const RuntimeBackup *backup, uint16_t tile_base) {
     mem_copy16(MEM_OBJ_PALETTE, backup->obj_palette, 16);
     oam_restore(backup->oam);
 
-    REG_DMA0CNT_H = backup->dma_cnt_h[0];
-    if (!is_direct_sound_dma(1u, backup->dma_cnt_h[1])) REG_DMA1CNT_H = backup->dma_cnt_h[1];
-    if (!is_direct_sound_dma(2u, backup->dma_cnt_h[2])) REG_DMA2CNT_H = backup->dma_cnt_h[2];
     REG_DMA3CNT_H = backup->dma_cnt_h[3];
+    if (!is_direct_sound_dma(2u, backup->dma_cnt_h[2])) REG_DMA2CNT_H = backup->dma_cnt_h[2];
+    if (!is_direct_sound_dma(1u, backup->dma_cnt_h[1])) REG_DMA1CNT_H = backup->dma_cnt_h[1];
+    REG_DMA0CNT_H = backup->dma_cnt_h[0];
 
-    if (backup->sound_timer_mask & 1u) REG_TM0CNT_H = backup->timer_cnt_h[0];
-    if (backup->sound_timer_mask & 2u) REG_TM1CNT_H = backup->timer_cnt_h[1];
     REG_SOUNDCNT_H = backup->soundcnt_h;
     REG_SOUNDCNT_L = backup->soundcnt_l;
+    if (backup->sound_timer_mask & 2u) REG_TM1CNT_H = backup->timer_cnt_h[1];
+    if (backup->sound_timer_mask & 1u) REG_TM0CNT_H = backup->timer_cnt_h[0];
     REG_DISPCNT = backup->dispcnt;
 }
 
@@ -577,12 +576,6 @@ static uint16_t read_keys(void) {
 
 static void wait_keys_release(uint16_t key_mask) {
     while (read_keys() & key_mask) {
-        wait_vblank();
-    }
-}
-
-static void wait_hotkey_release(void) {
-    while ((read_keys() & KEY_MENU_COMBO) == KEY_MENU_COMBO) {
         wait_vblank();
     }
 }
@@ -700,7 +693,7 @@ static void load_menu_fields(RtcFields *fields) {
     timestamp_to_fields(menu_timestamp, menu_speed, fields);
 }
 
-static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint8_t wait_for_hotkey_release, uint16_t tile_base, uint16_t sprite_limit, uint8_t initial_rendered, RtcFields fields) {
+static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, uint16_t sprite_limit, uint8_t initial_rendered, RtcFields fields) {
     uint16_t prev_keys = 0;
     uint16_t hold_up = 0;
     uint16_t hold_down = 0;
@@ -709,7 +702,6 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint8_t wait_for_hotk
     uint8_t selected = 0;
 
     if (!initial_rendered) render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
-    if (wait_for_hotkey_release) wait_hotkey_release();
 
     for (;;) {
         uint16_t keys;
@@ -766,17 +758,21 @@ void fake_rtc_menu_run(void) {
     load_menu_fields(&fields);
     audio_backup_and_mute(&audio_backup);
     draw_background();
-    fake_rtc_menu_loop(0, 0, 0, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 0, fields);
+    fake_rtc_menu_loop(0, 0, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 0, fields);
     audio_restore(&audio_backup);
 }
 
-void fake_rtc_menu_run_runtime(void) {
+void fake_rtc_menu_run_runtime(uint32_t release_mask) {
     RuntimeBackup backup;
     RtcFields fields;
     uint16_t tile_base;
 
     load_menu_fields(&fields);
     runtime_backup_and_pause(&backup);
+    /* Shared IRQ passes the actual configured combo. Consume every key that
+     * opened the menu before accepting input or restoring the game, so A and
+     * D-pad hotkeys cannot leak into the menu and early exits stay silent. */
+    wait_keys_release((uint16_t)(release_mask & 0x03FFu));
     tile_base = select_runtime_obj_tile_base(&backup);
     if (tile_base == MENU_RUNTIME_OBJ_TILE_BASE_INVALID) {
         runtime_restore(&backup, tile_base);
@@ -786,6 +782,6 @@ void fake_rtc_menu_run_runtime(void) {
     draw_runtime_background(tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
     render_menu_from_index(&fields, 0, 0, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
     REG_DISPCNT = runtime_menu_dispcnt(backup.dispcnt);
-    fake_rtc_menu_loop(0, 1, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 1, fields);
+    fake_rtc_menu_loop(0, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 1, fields);
     runtime_restore(&backup, tile_base);
 }

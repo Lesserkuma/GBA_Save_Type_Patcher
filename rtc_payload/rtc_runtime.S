@@ -15,17 +15,12 @@
 
     .syntax unified
 
-    .equ RTC_STATE_MAGIC, 0x46525443  // same sentinel as rtc_state.S
-    .equ RTC_MENU_OPTION_SKIP_SOFT_RESET, 1
     .equ RTC_TICK_SHIFT, 0            // seconds advanced per read/frame = speed
     .equ RTC_MAX_TIMESTAMP, 0xBC19137F // 2099-12-31 23:59:59
     .extern fake_rtc_menu_run
-    .extern rtc_menu_options
 
 // --------------------------------------------------------------------------
-// Probe: this is the only runtime handler that may open the menu. ABORT[LR]
-// records whether the menu has run before; rtc_menu_options decides whether
-// that sentinel should skip the menu on soft reset.
+// Probe: this is the only runtime handler that may open the menu.
 // --------------------------------------------------------------------------
     .section .text.payload_probe, "ax", %progbits
     .thumb
@@ -33,36 +28,12 @@
     .global payload_probe
     .type payload_probe, %function
 payload_probe:
-    // Check ABORT[LR] sentinel without touching RAM.
-    bx      pc
-    nop
-    .arm
-1:
-    mrs     r3, cpsr
-    mov     r2, #0x97          // Abort mode, IRQ disabled
-    msr     cpsr_c, r2
-    mov     r2, lr
-    msr     cpsr_c, r3
-    ldr     r3, =rtc_menu_options
-    ldr     r3, [r3]
-    tst     r3, #RTC_MENU_OPTION_SKIP_SOFT_RESET
-    moveq   r2, #0
-    ldr     r3, =RTC_STATE_MAGIC
-    cmp     r2, r3
-    add     r3, pc, #1
-    bx      r3
-
-    .thumb
-    beq     2f
     push    {lr}
     bl      fake_rtc_menu_run
     pop     {r1}
     movs    r0, #1
     bx      r1
 
-2:
-    movs    r0, #1
-    bx      lr
     .size payload_probe, . - payload_probe
 
 // --------------------------------------------------------------------------

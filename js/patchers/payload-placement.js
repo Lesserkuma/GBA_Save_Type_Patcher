@@ -30,6 +30,15 @@ export function rangesOverlap(start, end, ranges) {
   return ranges.some(([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart);
 }
 
+export function overlapsPowerOfTwoTailBlock(start, end, blockSize, maxSize = GBA_MAX_ROM_SIZE) {
+  let boundary = blockSize * 2;
+  while (boundary <= maxSize) {
+    if (start < boundary && end > boundary - blockSize) return true;
+    boundary *= 2;
+  }
+  return false;
+}
+
 export function resizeRom(rom, newSize, fillValue = 0xff) {
   if (newSize <= rom.bytes.length) return;
   const expanded = new Uint8Array(newSize);

@@ -162,6 +162,22 @@ def update_constants(constants: dict, payload: bytes) -> int:
     constants["BATTERYLESS_SAVE_SIZE_OFFSET"] = 0x08
     constants["BATTERYLESS_STORAGE_MODE_OFFSET"] = 0x24
     constants["BATTERYLESS_INDICATOR_MODE_OFFSET"] = 0x28
+    for legacy_name in (
+        "PATCH_HEADER_FLAG_SRAM",
+        "PATCH_HEADER_FLAG_WAITSTATE",
+        "PATCH_HEADER_FLAG_BATTERYLESS",
+        "PATCH_HEADER_FLAG_FLASH512",
+        "PATCH_HEADER_FEATURE_MASK",
+        "PATCH_HEADER_RESERVED_MASK",
+        "PATCH_HEADER_SAVE_SIZE_SHIFT",
+    ):
+        constants.pop(legacy_name, None)
+    constants["PATCH_HEADER_SAVE_SIZE_MASK"] = 0x07
+    constants["PATCH_HEADER_SAVE_MEDIUM_MASK"] = 0x18
+    constants["PATCH_HEADER_SAVE_MEDIUM_SHIFT"] = 3
+    constants["PATCH_HEADER_FLAG_BATTERYLESS"] = 0x20
+    constants["PATCH_HEADER_FLAG_WAITSTATE"] = 0x40
+    constants["PATCH_HEADER_FLAG_FAKE_RTC"] = 0x80
 
     countdown_offset = find_countdown_offset(payload)
     constants["BATTERYLESS_COUNTDOWN_IMMEDIATE_OFFSET"] = countdown_offset
