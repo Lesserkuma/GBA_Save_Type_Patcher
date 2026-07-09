@@ -2,6 +2,7 @@ import { patchSramBytes } from "./patchers/sram.js";
 import { patchCustomFlashBytes } from "./patchers/custom-flash.js";
 import { applyWaitstateToBytes } from "./patchers/waitstate.js";
 import { applyRtcForPipeline } from "./patchers/rtc.js";
+import { applyIrqHandlerForPipeline } from "./patchers/irq-handler.js";
 import { updateGbaHeaderChecksum } from "./patchers/patch-state.js";
 
 
@@ -39,9 +40,23 @@ function applyWaitstateStandalonePatch(patched, waitstateOptions = {}) {
 }
 
 function applyStandaloneAddonPatches(patched, options = {}) {
-  // Target layout without Batteryless SRAM: [last ROM data] [Fake RTC] [Waitstate] [free space].
+  // Target layout without Batteryless SRAM: [last ROM data] [Fake RTC] [Waitstate] [Shared IRQ] [free space].
   patched = applyRtcStandalonePatch(patched, options.rtc);
   patched = applyWaitstateStandalonePatch(patched, options.waitstate);
+  const rtcMenuEntry = patched.result.rtc?.runtime_menu_entry || 0;
+  if (rtcMenuEntry) {
+    ensureResultArrays(patched);
+    const operationCountBeforeIrq = patched.result.operations.length;
+    const rom = { bytes: patched.bytes };
+    const irqHandler = applyIrqHandlerForPipeline(rom, patched.result.operations, patched.result.warnings, {
+      enabled: true,
+      rtcMenuEntry,
+      hotkeyMask: options.batteryless?.hotkeyMask,
+    });
+    patched.bytes = rom.bytes;
+    patched.result.irq_handler = irqHandler;
+    if (patched.result.operations.length > operationCountBeforeIrq) patched.result.status = "patched";
+  }
   return patched;
 }
 
@@ -60,6 +75,7 @@ function ensureSuccessfulPatch(result) {
   if (result?.batteryless?.status === "failed") throw new Error(firstWarning(result));
   if (result?.waitstate?.status === "failed") throw new Error(firstWarning(result));
   if (result?.rtc?.status === "failed") throw new Error(firstWarning(result));
+  if (result?.irq_handler?.status === "failed") throw new Error(firstWarning(result));
   if (result?.status === "unsupported") throw new Error(firstWarning(result));
   if (result?.status === "unchanged" && !result.operations?.length) throw new Error("This ROM could not be patched.");
 }
@@ -88,6 +104,7 @@ self.addEventListener("message", (event) => {
         batterylessCountdown: message.options.batteryless.countdownFrames,
         batterylessIndicatorMode: message.options.batteryless.indicator,
         batterylessLastBlock: message.options.batteryless.lastBlock,
+        batterylessHotkeyMask: message.options.batteryless.hotkeyMask,
         flash1mBankSwitchStyle: message.options.sram?.flash1mBankSwitchStyle || "modern",
         saveBuffer: message.saveBuffer || null,
         waitstate: message.options.waitstate,

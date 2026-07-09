@@ -11,6 +11,7 @@ import {
 import { PatchError } from "../core/errors.js";
 import { applyWaitstateForPipeline, waitstatePayloadSpanForLayout } from "./waitstate.js";
 import { applyRtcForPipeline, findRtcPayloadBase, RTC_PAYLOAD_SIZE } from "./rtc.js";
+import { applyIrqHandlerForPipeline, findIrqHandlerPayloadBase, IRQ_HANDLER_PAYLOAD_SIZE, irqHandlerPayloadSpanForLayout } from "./irq-handler.js";
 import { applyPatchHeaderMarker, hasBatterylessPatch, hasSaveTypePatch, hasWaitstatePatch, makePatchHeaderFlags, readPatchFlags, updateGbaHeaderChecksum } from "./patch-state.js";
 import {
   BATTERYLESS_ARM_BRANCH_THUNK_HEX,
@@ -18,6 +19,7 @@ import {
   BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX,
   BATTERYLESS_NEW_IRQ_ADDR_HEX,
   BATTERYLESS_OLD_IRQ_ADDR_HEX,
+  BATTERYLESS_PAYLOAD_GBATA_HEX,
   BATTERYLESS_PAYLOAD_HEX,
   BATTERYLESS_SIGNATURE_HEX,
   BATTERYLESS_SRAM_BANK_SELECT_GBATA_TAIL_HEX,
@@ -33,7 +35,9 @@ import {
 import { PAYLOAD_ALIGNMENT, alignedPayloadSpan, ensureDirectPayloadRegion } from "./payload-placement.js";
 
 const C = SRAM_CONSTANTS;
-const BATTERYLESS_PAYLOAD = hexToBytes(BATTERYLESS_PAYLOAD_HEX);
+const BATTERYLESS_PAYLOAD_MODERN = hexToBytes(BATTERYLESS_PAYLOAD_HEX);
+const BATTERYLESS_PAYLOAD_GBATA = hexToBytes(BATTERYLESS_PAYLOAD_GBATA_HEX);
+const BATTERYLESS_PAYLOAD = BATTERYLESS_PAYLOAD_MODERN;
 const BATTERYLESS_SIGNATURE = hexToBytes(BATTERYLESS_SIGNATURE_HEX);
 const BATTERYLESS_THUMB_BRANCH_THUNK = hexToBytes(BATTERYLESS_THUMB_BRANCH_THUNK_HEX);
 const BATTERYLESS_ARM_BRANCH_THUNK = hexToBytes(BATTERYLESS_ARM_BRANCH_THUNK_HEX);
@@ -53,11 +57,20 @@ const FLASH1M_BANK_SWITCH_MODERN_PATCH = hexToBytes(FLASH1M_BANK_SWITCH_MODERN_P
 const FLASH1M_BANK_SWITCH_GBATA_PATCH = hexToBytes(FLASH1M_BANK_SWITCH_GBATA_PATCH_HEX);
 const FLASH1M_BANK_SWITCH_PATCHES = [FLASH1M_BANK_SWITCH_MODERN_PATCH, FLASH1M_BANK_SWITCH_GBATA_PATCH];
 const FLASH1M_SWITCH_BANK_CODE_NAMES = new Set(["flash1m_v102_switch_bank", "flash1m_v103_switch_bank"]);
+// ROM offset 0x01000000 maps to CPU address 0x09000000, which the SRAM
+// conversion uses as the FLASH1M SRAM bank-select register.
+const FLASH1M_SRAM_BANK_SELECT_ROM_OFFSET = 0x01000000;
 const BATTERYLESS_SRAM_BANK_SELECT_MODERN_TAIL = hexToBytes(BATTERYLESS_SRAM_BANK_SELECT_MODERN_TAIL_HEX);
 const BATTERYLESS_SRAM_BANK_SELECT_TAIL_BY_STYLE = {
   [FLASH1M_BANK_SWITCH_STYLE_MODERN]: BATTERYLESS_SRAM_BANK_SELECT_MODERN_TAIL,
   [FLASH1M_BANK_SWITCH_STYLE_GBATA]: hexToBytes(BATTERYLESS_SRAM_BANK_SELECT_GBATA_TAIL_HEX),
 };
+const BATTERYLESS_PAYLOAD_BY_STYLE = {
+  [FLASH1M_BANK_SWITCH_STYLE_MODERN]: BATTERYLESS_PAYLOAD_MODERN,
+  [FLASH1M_BANK_SWITCH_STYLE_GBATA]: BATTERYLESS_PAYLOAD_GBATA,
+};
+const BATTERYLESS_CODE_MARKER_OFFSET = 0x30;
+const BATTERYLESS_CODE_MARKER_LENGTH = 0x20;
 const SAVE_TYPE_PREFIXES = ["EEPROM", "SRAM_F", "SRAM", "FLASH512", "FLASH1M", "FLASH"];
 const hexPatternCache = new Map();
 const asciiPatternCache = new Map();
@@ -92,6 +105,17 @@ function firstBytePattern(value) {
 
 function normalizeFlash1mBankSwitchStyle(style) {
   return style === FLASH1M_BANK_SWITCH_STYLE_GBATA ? FLASH1M_BANK_SWITCH_STYLE_GBATA : FLASH1M_BANK_SWITCH_STYLE_MODERN;
+}
+
+function batterylessPayloadForStyle(style) {
+  return BATTERYLESS_PAYLOAD_BY_STYLE[normalizeFlash1mBankSwitchStyle(style)];
+}
+
+function batterylessPayloadVariants() {
+  return [
+    { style: FLASH1M_BANK_SWITCH_STYLE_MODERN, payload: BATTERYLESS_PAYLOAD_MODERN },
+    { style: FLASH1M_BANK_SWITCH_STYLE_GBATA, payload: BATTERYLESS_PAYLOAD_GBATA },
+  ];
 }
 
 function normalizeBatterylessLastBlock(lastBlock) {
@@ -340,18 +364,39 @@ function containsBatterylessSignature(bytes) {
   return findAlignedMarker(bytes, BATTERYLESS_SIGNATURE, 0, bytes.length, 4) !== null;
 }
 
-function findBatterylessPayloadBase(bytes) {
+function findBatterylessPayloadInfo(bytes) {
   const signatureOffset = findAlignedMarker(bytes, BATTERYLESS_SIGNATURE, 0, bytes.length, 4);
-  const payloadSignatureOffset = findBytes(BATTERYLESS_PAYLOAD, BATTERYLESS_SIGNATURE);
-  if (signatureOffset === null || payloadSignatureOffset < 0) return null;
+  if (signatureOffset === null) return null;
 
-  const payloadBase = signatureOffset - payloadSignatureOffset;
-  if (payloadBase < 0 || payloadBase + BATTERYLESS_PAYLOAD.length > bytes.length) return null;
-  return payloadBase;
+  for (const candidate of batterylessPayloadVariants()) {
+    const payloadSignatureOffset = findBytes(candidate.payload, BATTERYLESS_SIGNATURE);
+    if (payloadSignatureOffset < 0) continue;
+
+    const payloadBase = signatureOffset - payloadSignatureOffset;
+    if (payloadBase < 0 || payloadBase + candidate.payload.length > bytes.length) continue;
+    if (!startsWithBytes(
+      bytes,
+      payloadBase + BATTERYLESS_CODE_MARKER_OFFSET,
+      candidate.payload.slice(BATTERYLESS_CODE_MARKER_OFFSET, BATTERYLESS_CODE_MARKER_OFFSET + BATTERYLESS_CODE_MARKER_LENGTH),
+    )) {
+      continue;
+    }
+    return { payloadBase, payload: candidate.payload, style: candidate.style };
+  }
+  return null;
 }
 
-function batterylessSaveOffset(payloadBase) {
-  return alignUp(payloadBase + BATTERYLESS_PAYLOAD.length, C.BATTERYLESS_REGION_ALIGNMENT);
+function findBatterylessPayloadBase(bytes) {
+  return findBatterylessPayloadInfo(bytes)?.payloadBase ?? null;
+}
+
+function batterylessSaveOffset(payloadBase, payload = BATTERYLESS_PAYLOAD) {
+  return alignUp(payloadBase + payload.length, C.BATTERYLESS_REGION_ALIGNMENT);
+}
+
+function batterylessSaveRangeHitsFlash1mBankSelect(saveOffset, size = C.BATTERYLESS_RESERVED_SIZE) {
+  const end = saveOffset + size;
+  return saveOffset <= FLASH1M_SRAM_BANK_SELECT_ROM_OFFSET && FLASH1M_SRAM_BANK_SELECT_ROM_OFFSET < end;
 }
 
 function rangePairOverlaps(startA, endA, startB, endB) {
@@ -385,41 +430,42 @@ function lastNonEmptyBatterylessBlockStart(bytes) {
   return null;
 }
 
-function batterylessPayloadFitsAtBlockEnd(bytes, blockStart, prefixSize = 0, keepLastBlockEmpty = false) {
+function batterylessPayloadFitsAtBlockEnd(bytes, blockStart, payload = BATTERYLESS_PAYLOAD, prefixSize = 0, keepLastBlockEmpty = false) {
   const blockEnd = blockStart + C.BATTERYLESS_REGION_ALIGNMENT;
-  const payloadBase = blockEnd - BATTERYLESS_PAYLOAD.length;
+  const payloadBase = blockEnd - payload.length;
   const prefixBase = payloadBase - prefixSize;
   const saveOffset = blockEnd;
   const regionEnd = saveOffset + C.BATTERYLESS_RESERVED_SIZE;
 
   if (prefixBase < 0 || regionEnd > bytes.length) return null;
+  if (batterylessSaveRangeHitsFlash1mBankSelect(saveOffset)) return null;
   if (keepLastBlockEmpty && overlapsBatterylessPowerBoundaryGuard(prefixBase, regionEnd)) return null;
   if (prefixSize && !isFreeRegion(bytes, prefixBase, prefixSize)) return null;
-  if (!isFreeRegion(bytes, payloadBase, BATTERYLESS_PAYLOAD.length)) return null;
+  if (!isFreeRegion(bytes, payloadBase, payload.length)) return null;
   if (!isFreeRegion(bytes, saveOffset, C.BATTERYLESS_RESERVED_SIZE)) return null;
   return payloadBase;
 }
 
-function findBatterylessFreeRegion(bytes, prefixSize = 0, keepLastBlockEmpty = false) {
+function findBatterylessFreeRegion(bytes, payload = BATTERYLESS_PAYLOAD, prefixSize = 0, keepLastBlockEmpty = false) {
   const lastContentBlock = lastNonEmptyBatterylessBlockStart(bytes);
   if (lastContentBlock === null) return null;
 
   let blockStart = lastContentBlock;
   while (blockStart + C.BATTERYLESS_REGION_ALIGNMENT * 2 <= bytes.length) {
-    const payloadBase = batterylessPayloadFitsAtBlockEnd(bytes, blockStart, prefixSize, keepLastBlockEmpty);
+    const payloadBase = batterylessPayloadFitsAtBlockEnd(bytes, blockStart, payload, prefixSize, keepLastBlockEmpty);
     if (payloadBase !== null) return payloadBase;
     blockStart += C.BATTERYLESS_REGION_ALIGNMENT;
   }
   return null;
 }
 
-function ensureBatterylessRegion(rom, operations, warnings, prefixSize = 0, keepLastBlockEmpty = false) {
+function ensureBatterylessRegion(rom, operations, warnings, payload = BATTERYLESS_PAYLOAD, prefixSize = 0, keepLastBlockEmpty = false) {
   while (true) {
     if (rom.bytes.length > C.GBA_MAX_ROM_SIZE) {
       warnings.push("Batteryless SRAM: ROM is larger than 32 MiB");
       return null;
     }
-    const payloadBase = findBatterylessFreeRegion(rom.bytes, prefixSize, keepLastBlockEmpty);
+    const payloadBase = findBatterylessFreeRegion(rom.bytes, payload, prefixSize, keepLastBlockEmpty);
     if (payloadBase !== null) return payloadBase;
     if (rom.bytes.length >= C.GBA_MAX_ROM_SIZE) {
       warnings.push("Batteryless SRAM: no free area and ROM is already 32 MiB");
@@ -436,24 +482,31 @@ function ensureBatterylessRegion(rom, operations, warnings, prefixSize = 0, keep
   }
 }
 
-function layoutPrefixBeforePayload(payloadBase, rtcSpan = 0, waitstateSpan = 0) {
+function layoutPrefixBeforePayload(payloadBase, rtcSpan = 0, waitstateSpan = 0, irqSpan = 0) {
   let cursor = payloadBase;
   let rtcOffset = null;
   let waitstateOffset = null;
+  let irqOffset = null;
+
+  if (irqSpan > 0) {
+    if (cursor < irqSpan) return { prefixBase: -1, prefixSize: 0, rtcOffset, waitstateOffset, irqOffset };
+    irqOffset = alignDown(cursor - irqSpan, PAYLOAD_ALIGNMENT);
+    cursor = irqOffset;
+  }
 
   if (waitstateSpan > 0) {
-    if (cursor < waitstateSpan) return { prefixBase: -1, prefixSize: 0, rtcOffset, waitstateOffset };
+    if (cursor < waitstateSpan) return { prefixBase: -1, prefixSize: 0, rtcOffset, waitstateOffset, irqOffset };
     waitstateOffset = alignDown(cursor - waitstateSpan, PAYLOAD_ALIGNMENT);
     cursor = waitstateOffset;
   }
 
   if (rtcSpan > 0) {
-    if (cursor < rtcSpan) return { prefixBase: -1, prefixSize: 0, rtcOffset, waitstateOffset };
+    if (cursor < rtcSpan) return { prefixBase: -1, prefixSize: 0, rtcOffset, waitstateOffset, irqOffset };
     rtcOffset = alignDown(cursor - rtcSpan, PAYLOAD_ALIGNMENT);
     cursor = rtcOffset;
   }
 
-  return { prefixBase: cursor, prefixSize: payloadBase - cursor, rtcOffset, waitstateOffset };
+  return { prefixBase: cursor, prefixSize: payloadBase - cursor, rtcOffset, waitstateOffset, irqOffset };
 }
 
 function rangeForSpan(offset, span) {
@@ -476,42 +529,43 @@ function ensureNonBatterylessAddonLayout(rom, operations, warnings, rtcSpan, wai
   };
 }
 
-function batterylessLayoutFitsAtBlockEnd(bytes, blockStart, rtcSpan = 0, waitstateSpan = 0, keepLastBlockEmpty = false) {
+function batterylessLayoutFitsAtBlockEnd(bytes, blockStart, payload = BATTERYLESS_PAYLOAD, rtcSpan = 0, waitstateSpan = 0, irqSpan = 0, keepLastBlockEmpty = false) {
   const blockEnd = blockStart + C.BATTERYLESS_REGION_ALIGNMENT;
-  const payloadBase = blockEnd - BATTERYLESS_PAYLOAD.length;
-  const prefixLayout = layoutPrefixBeforePayload(payloadBase, rtcSpan, waitstateSpan);
+  const payloadBase = blockEnd - payload.length;
+  const prefixLayout = layoutPrefixBeforePayload(payloadBase, rtcSpan, waitstateSpan, irqSpan);
   const prefixBase = prefixLayout.prefixBase;
   const saveOffset = blockEnd;
   const regionEnd = saveOffset + C.BATTERYLESS_RESERVED_SIZE;
 
   if (prefixBase < 0 || regionEnd > bytes.length) return null;
+  if (batterylessSaveRangeHitsFlash1mBankSelect(saveOffset)) return null;
   if (keepLastBlockEmpty && overlapsBatterylessPowerBoundaryGuard(prefixBase, regionEnd)) return null;
   if (prefixLayout.prefixSize && !isFreeRegion(bytes, prefixBase, prefixLayout.prefixSize)) return null;
-  if (!isFreeRegion(bytes, payloadBase, BATTERYLESS_PAYLOAD.length)) return null;
+  if (!isFreeRegion(bytes, payloadBase, payload.length)) return null;
   if (!isFreeRegion(bytes, saveOffset, C.BATTERYLESS_RESERVED_SIZE)) return null;
   return { payloadBase, prefixLayout };
 }
 
-function findBatterylessFreeLayout(bytes, rtcSpan = 0, waitstateSpan = 0, keepLastBlockEmpty = false) {
+function findBatterylessFreeLayout(bytes, payload = BATTERYLESS_PAYLOAD, rtcSpan = 0, waitstateSpan = 0, irqSpan = 0, keepLastBlockEmpty = false) {
   const lastContentBlock = lastNonEmptyBatterylessBlockStart(bytes);
   if (lastContentBlock === null) return null;
 
   let blockStart = lastContentBlock;
   while (blockStart + C.BATTERYLESS_REGION_ALIGNMENT * 2 <= bytes.length) {
-    const layout = batterylessLayoutFitsAtBlockEnd(bytes, blockStart, rtcSpan, waitstateSpan, keepLastBlockEmpty);
+    const layout = batterylessLayoutFitsAtBlockEnd(bytes, blockStart, payload, rtcSpan, waitstateSpan, irqSpan, keepLastBlockEmpty);
     if (layout !== null) return layout;
     blockStart += C.BATTERYLESS_REGION_ALIGNMENT;
   }
   return null;
 }
 
-function ensureBatterylessLayout(rom, operations, warnings, rtcSpan = 0, waitstateSpan = 0, keepLastBlockEmpty = false) {
+function ensureBatterylessLayout(rom, operations, warnings, payload = BATTERYLESS_PAYLOAD, rtcSpan = 0, waitstateSpan = 0, irqSpan = 0, keepLastBlockEmpty = false) {
   while (true) {
     if (rom.bytes.length > C.GBA_MAX_ROM_SIZE) {
       warnings.push("Batteryless SRAM: ROM is larger than 32 MiB");
       return null;
     }
-    const layout = findBatterylessFreeLayout(rom.bytes, rtcSpan, waitstateSpan, keepLastBlockEmpty);
+    const layout = findBatterylessFreeLayout(rom.bytes, payload, rtcSpan, waitstateSpan, irqSpan, keepLastBlockEmpty);
     if (layout !== null) return layout;
     if (rom.bytes.length >= C.GBA_MAX_ROM_SIZE) {
       warnings.push("Batteryless SRAM: no free area and ROM is already 32 MiB");
@@ -528,8 +582,8 @@ function ensureBatterylessLayout(rom, operations, warnings, rtcSpan = 0, waitsta
   }
 }
 
-function batterylessReservedRange(payloadBase, prefixSize = 0) {
-  return [payloadBase - prefixSize, batterylessSaveOffset(payloadBase) + C.BATTERYLESS_RESERVED_SIZE];
+function batterylessReservedRange(payloadBase, prefixSize = 0, payload = BATTERYLESS_PAYLOAD) {
+  return [payloadBase - prefixSize, batterylessSaveOffset(payloadBase, payload) + C.BATTERYLESS_RESERVED_SIZE];
 }
 
 function inferredBatterylessSaveSize(saveType) {
@@ -573,11 +627,11 @@ function writeBatterylessEepromV111Hook(out, offset, targetAddress, operations, 
   addOperation(operations, `Batteryless SRAM ${name} target`, pointerOffset, 4, { value: targetAddress >>> 0 });
 }
 
-function patchBatterylessWriteHooks(out, payloadBase, mode, saveType, operations, warnings, prefixSize = 0) {
+function patchBatterylessWriteHooks(out, payloadBase, mode, saveType, operations, warnings, prefixSize = 0, payload = BATTERYLESS_PAYLOAD) {
   const hooksFound = [];
   let saveSize = inferredBatterylessSaveSize(saveType);
   let storageMode = C.BATTERYLESS_STORAGE_MODE_NORMAL;
-  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase, prefixSize);
+  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase, prefixSize, payload);
 
   for (const hook of BATTERYLESS_WRITE_HOOKS) {
     const marker = hexPattern(hook.marker);
@@ -625,7 +679,7 @@ function patchBatterylessWriteHooks(out, payloadBase, mode, saveType, operations
   return { saveSize, hooksFound, storageMode };
 }
 
-function patchBatterylessFlash1mBankSwitch(out, payloadBase, saveType, operations, prefixSize = 0) {
+function patchBatterylessFlash1mBankSwitch(out, payloadBase, saveType, operations, prefixSize = 0, payload = BATTERYLESS_PAYLOAD) {
   if (!saveType || !saveType.startsWith("FLASH1M")) return 0;
   const targetAddress = (C.GBA_ROM_BASE + payloadBase + C.BATTERYLESS_SRAM_BANK_SELECT_PATCHED) >>> 0;
   const patch = new Uint8Array(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4 + 16);
@@ -640,7 +694,7 @@ function patchBatterylessFlash1mBankSwitch(out, payloadBase, saveType, operation
   }
 
   let count = 0;
-  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase, prefixSize);
+  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase, prefixSize, payload);
   for (const directPatch of FLASH1M_BANK_SWITCH_PATCHES) {
     let pos = 0;
     while (true) {
@@ -659,10 +713,10 @@ function patchBatterylessFlash1mBankSwitch(out, payloadBase, saveType, operation
   return count;
 }
 
-function patchBatterylessIrqReferences(out, payloadBase, operations, prefixSize = 0) {
+function patchBatterylessIrqReferences(out, payloadBase, operations, prefixSize = 0, payload = BATTERYLESS_PAYLOAD) {
   let count = 0;
   let pos = 0;
-  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase, prefixSize);
+  const [reservedStart, reservedEnd] = batterylessReservedRange(payloadBase, prefixSize, payload);
 
   while (true) {
     const matchOffset = findAlignedMarker(out, BATTERYLESS_OLD_IRQ_ADDR, pos, out.length, 4);
@@ -696,10 +750,11 @@ function encodeArmBranch(sourceAddress, targetAddress) {
 function makeBatterylessPayload(originalEntrypoint, mode, saveSize, countdown, storageMode, indicatorMode, flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN) {
   if (countdown < 0 || countdown > 0xff) throw new PatchError("Batteryless SRAM: delay value must be between 0 and 255");
   if (!(indicatorMode in C.BATTERYLESS_INDICATOR_MODE_VALUES)) throw new PatchError("Batteryless SRAM: unknown indicator mode");
-  const payload = new Uint8Array(BATTERYLESS_PAYLOAD);
+  const bankSwitchStyle = normalizeFlash1mBankSwitchStyle(flash1mBankSwitchStyle);
+  const payload = new Uint8Array(batterylessPayloadForStyle(bankSwitchStyle));
   const bankSelectTailOffset = findBytes(payload, BATTERYLESS_SRAM_BANK_SELECT_MODERN_TAIL);
   if (bankSelectTailOffset < 0) throw new PatchError("Batteryless SRAM: bank-select tail signature not found");
-  copyBytes(payload, bankSelectTailOffset, BATTERYLESS_SRAM_BANK_SELECT_TAIL_BY_STYLE[normalizeFlash1mBankSwitchStyle(flash1mBankSwitchStyle)]);
+  copyBytes(payload, bankSelectTailOffset, BATTERYLESS_SRAM_BANK_SELECT_TAIL_BY_STYLE[bankSwitchStyle]);
   writeU32(payload, C.BATTERYLESS_ORIGINAL_ENTRYPOINT_OFFSET, originalEntrypoint >>> 0);
   writeU32(payload, C.BATTERYLESS_FLUSH_MODE_OFFSET, mode === "auto" ? 0 : 1);
   writeU32(payload, C.BATTERYLESS_SAVE_SIZE_OFFSET, saveSize >>> 0);
@@ -710,14 +765,20 @@ function makeBatterylessPayload(originalEntrypoint, mode, saveSize, countdown, s
 }
 
 function applyBatterylessPatch(rom, operations, warnings, mode, saveType, countdown, indicatorMode, flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN, payloadBase = null, prefixSize = 0, keepLastBlockEmpty = false) {
+  const selectedPayload = batterylessPayloadForStyle(flash1mBankSwitchStyle);
   if (containsBatterylessSignature(rom.bytes)) {
-    const existingBase = findBatterylessPayloadBase(rom.bytes);
+    const existingInfo = findBatterylessPayloadInfo(rom.bytes);
+    const existingBase = existingInfo?.payloadBase ?? null;
+    const existingPayload = existingInfo?.payload ?? selectedPayload;
     const result = { requested: true, mode, status: "already_patched", countdown, indicator_mode: indicatorMode, flash1m_bank_switch_style: normalizeFlash1mBankSwitchStyle(flash1mBankSwitchStyle) };
     if (existingBase !== null) {
       result.payload_offset = existingBase;
-      result.save_offset = batterylessSaveOffset(existingBase);
+      result.save_offset = batterylessSaveOffset(existingBase, existingPayload);
       result.reserved_size = C.BATTERYLESS_RESERVED_SIZE;
       result.save_size = readU32(rom.bytes, existingBase + C.BATTERYLESS_SAVE_SIZE_OFFSET) || inferredBatterylessSaveSize(saveType);
+      if (C.BATTERYLESS_FLUSH_SRAM !== undefined) {
+        result.flush_entry = (C.GBA_ROM_BASE + existingBase + C.BATTERYLESS_FLUSH_SRAM) >>> 0;
+      }
     }
     return result;
   }
@@ -728,14 +789,14 @@ function applyBatterylessPatch(rom, operations, warnings, mode, saveType, countd
   let resolvedPayloadBase = payloadBase;
 
   if (resolvedPayloadBase === null) {
-    resolvedPayloadBase = ensureBatterylessRegion(workRom, localOperations, localWarnings, 0, keepLastBlockEmpty);
+    resolvedPayloadBase = ensureBatterylessRegion(workRom, localOperations, localWarnings, selectedPayload, 0, keepLastBlockEmpty);
   } else {
-    const saveOffset = batterylessSaveOffset(resolvedPayloadBase);
+    const saveOffset = batterylessSaveOffset(resolvedPayloadBase, selectedPayload);
     const reservedStart = resolvedPayloadBase - prefixSize;
     const reservedEnd = saveOffset + C.BATTERYLESS_RESERVED_SIZE;
     if (
       (keepLastBlockEmpty && overlapsBatterylessPowerBoundaryGuard(reservedStart, reservedEnd))
-      || !isFreeRegion(workRom.bytes, resolvedPayloadBase, BATTERYLESS_PAYLOAD.length)
+      || !isFreeRegion(workRom.bytes, resolvedPayloadBase, selectedPayload.length)
       || !isFreeRegion(workRom.bytes, saveOffset, C.BATTERYLESS_RESERVED_SIZE)
     ) {
       localWarnings.push("Batteryless SRAM: reserved area is no longer free");
@@ -747,18 +808,11 @@ function applyBatterylessPatch(rom, operations, warnings, mode, saveType, countd
     return { requested: true, mode, status: "failed", countdown, indicator_mode: indicatorMode };
   }
 
-  const saveOffset = batterylessSaveOffset(resolvedPayloadBase);
+  const saveOffset = batterylessSaveOffset(resolvedPayloadBase, selectedPayload);
 
   try {
     const originalEntrypoint = decodeEntrypointAddress(workRom.bytes);
-    const irqReferenceCount = patchBatterylessIrqReferences(workRom.bytes, resolvedPayloadBase, localOperations, prefixSize);
-    if (irqReferenceCount === 0) {
-      localWarnings.push("Batteryless SRAM: no IRQ handler reference to 0x03007FFC found");
-      warnings.push(...localWarnings);
-      return { requested: true, mode, status: "failed", countdown, indicator_mode: indicatorMode, payload_offset: resolvedPayloadBase, save_offset: saveOffset };
-    }
-
-    const hookResult = patchBatterylessWriteHooks(workRom.bytes, resolvedPayloadBase, mode, saveType, localOperations, localWarnings, prefixSize);
+    const hookResult = patchBatterylessWriteHooks(workRom.bytes, resolvedPayloadBase, mode, saveType, localOperations, localWarnings, prefixSize, selectedPayload);
     if (hookResult.saveSize === null) {
       warnings.push(...localWarnings);
       return { requested: true, mode, status: "failed", countdown, indicator_mode: indicatorMode, payload_offset: resolvedPayloadBase, save_offset: saveOffset };
@@ -773,7 +827,7 @@ function applyBatterylessPatch(rom, operations, warnings, mode, saveType, countd
     copyBytes(workRom.bytes, resolvedPayloadBase, payload);
     addOperation(localOperations, "Batteryless SRAM Payload", resolvedPayloadBase, payload.length, { codeName: "batteryless_payload" });
 
-    const flash1mBankSwitchCount = patchBatterylessFlash1mBankSwitch(workRom.bytes, resolvedPayloadBase, saveType, localOperations, prefixSize);
+    const flash1mBankSwitchCount = patchBatterylessFlash1mBankSwitch(workRom.bytes, resolvedPayloadBase, saveType, localOperations, prefixSize, selectedPayload);
     if (!isFreeRegion(workRom.bytes, saveOffset, C.BATTERYLESS_RESERVED_SIZE)) {
       localWarnings.push("Batteryless SRAM: save area is not free");
       warnings.push(...localWarnings);
@@ -795,10 +849,10 @@ function applyBatterylessPatch(rom, operations, warnings, mode, saveType, countd
       reserved_size: C.BATTERYLESS_RESERVED_SIZE,
       save_size: hookResult.saveSize,
       storage_mode: hookResult.storageMode,
+      flush_entry: C.BATTERYLESS_FLUSH_SRAM === undefined ? null : (C.GBA_ROM_BASE + resolvedPayloadBase + C.BATTERYLESS_FLUSH_SRAM) >>> 0,
       countdown,
       indicator_mode: indicatorMode,
       hooks: hookResult.hooksFound,
-      irq_references: irqReferenceCount,
       flash1m_bank_switches: flash1mBankSwitchCount,
       flash1m_bank_switch_style: normalizeFlash1mBankSwitchStyle(flash1mBankSwitchStyle),
     };
@@ -823,11 +877,12 @@ function embedSaveFile(rom, batterylessResult, saveBuffer, operations) {
   return true;
 }
 
-function makeResult(saveType, status, operations, warnings, batteryless = null, waitstate = null, saveEmbedded = false, rtc = null) {
+function makeResult(saveType, status, operations, warnings, batteryless = null, waitstate = null, saveEmbedded = false, rtc = null, irqHandler = null) {
   const result = { save_type: saveType, status, changed: operations.length > 0, operations, warnings };
   if (batteryless !== null) result.batteryless = batteryless;
   if (waitstate !== null) result.waitstate = waitstate;
   if (rtc !== null) result.rtc = rtc;
+  if (irqHandler !== null) result.irq_handler = irqHandler;
   if (saveEmbedded) result.save_embedded = true;
   return result;
 }
@@ -844,14 +899,17 @@ export function patchSramBytes(inputBytes, options = {}) {
   let batterylessResult = null;
   let waitstateResult = null;
   let rtcResult = null;
+  let irqHandlerResult = null;
   let batterylessPayloadOffset = null;
   let rtcPayloadOffset = null;
   let waitstatePayloadOffset = null;
+  let irqHandlerPayloadOffset = null;
   let rtcPlacement = null;
   let batterylessPrefixSize = 0;
   let batterylessExcludedRanges = [];
   let rtcExcludedRanges = [];
   let waitstateExcludedRanges = [];
+  let irqHandlerExcludedRanges = [];
   let skipSavePatch = false;
   let sramPatchApplied = false;
   const batteryless = options.batteryless === true;
@@ -859,32 +917,43 @@ export function patchSramBytes(inputBytes, options = {}) {
   const rtc = options.rtc?.enabled === true;
   const rtcAlreadyApplied = rtc && findRtcPayloadBase(originalData) !== null;
   const waitstateAlreadyApplied = waitstate && hasWaitstatePatch(existingFlags);
+  const irqHandlerAlreadyApplied = findIrqHandlerPayloadBase(originalData) !== null;
   const rtcPayloadSpan = rtc && !rtcAlreadyApplied ? alignedPayloadSpan(RTC_PAYLOAD_SIZE) : 0;
   const waitstatePayloadSpan = waitstatePayloadSpanForLayout(originalData, options.waitstate, existingFlags);
   const batterylessMode = options.batterylessMode || "auto";
   const batterylessCountdown = options.batterylessCountdown ?? C.BATTERYLESS_DEFAULT_COUNTDOWN;
   const batterylessIndicatorMode = options.batterylessIndicatorMode || "off";
+  const batterylessHotkeyMask = options.batterylessHotkeyMask;
   const flash1mBankSwitchStyle = normalizeFlash1mBankSwitchStyle(options.flash1mBankSwitchStyle);
+  const selectedBatterylessPayload = batterylessPayloadForStyle(flash1mBankSwitchStyle);
+  let activeBatterylessPayload = selectedBatterylessPayload;
   const batterylessLastBlock = normalizeBatterylessLastBlock(options.batterylessLastBlock);
   const keepBatterylessLastBlockEmpty = batterylessLastBlock === BATTERYLESS_LAST_BLOCK_KEEP_EMPTY;
   const batterylessWaitstatePrefixSize = batteryless ? waitstatePayloadSpan : 0;
+  const batterylessIrqPrefixSize = batteryless && !irqHandlerAlreadyApplied ? irqHandlerPayloadSpanForLayout() : 0;
 
   if (batteryless && batterylessAlreadyApplied) {
     batterylessResult = { requested: true, mode: batterylessMode, status: "already_patched", countdown: batterylessCountdown, indicator_mode: batterylessIndicatorMode, flash1m_bank_switch_style: flash1mBankSwitchStyle };
-    const batterylessPayloadBase = findBatterylessPayloadBase(rom.bytes);
+    const batterylessPayloadInfo = findBatterylessPayloadInfo(rom.bytes);
+    const batterylessPayloadBase = batterylessPayloadInfo?.payloadBase ?? null;
+    const existingBatterylessPayload = batterylessPayloadInfo?.payload ?? selectedBatterylessPayload;
+    activeBatterylessPayload = existingBatterylessPayload;
     if (batterylessPayloadBase !== null) {
       batterylessPayloadOffset = batterylessPayloadBase;
       batterylessResult.payload_offset = batterylessPayloadBase;
-      batterylessResult.save_offset = batterylessSaveOffset(batterylessPayloadBase);
+      batterylessResult.save_offset = batterylessSaveOffset(batterylessPayloadBase, existingBatterylessPayload);
       batterylessResult.reserved_size = C.BATTERYLESS_RESERVED_SIZE;
       batterylessResult.save_size = readU32(rom.bytes, batterylessPayloadBase + C.BATTERYLESS_SAVE_SIZE_OFFSET) || inferredBatterylessSaveSize(saveType);
+      if (C.BATTERYLESS_FLUSH_SRAM !== undefined) {
+        batterylessResult.flush_entry = (C.GBA_ROM_BASE + batterylessPayloadBase + C.BATTERYLESS_FLUSH_SRAM) >>> 0;
+      }
 
       const batterylessRtcPrefixSize = rtc && !rtcAlreadyApplied ? rtcPayloadSpan : 0;
-      const existingPrefixLayout = layoutPrefixBeforePayload(batterylessPayloadBase, batterylessRtcPrefixSize, batterylessWaitstatePrefixSize);
+      const existingPrefixLayout = layoutPrefixBeforePayload(batterylessPayloadBase, batterylessRtcPrefixSize, batterylessWaitstatePrefixSize, batterylessIrqPrefixSize);
       if (existingPrefixLayout.prefixSize) {
         if (existingPrefixLayout.prefixBase >= 0 && isFreeRegion(rom.bytes, existingPrefixLayout.prefixBase, existingPrefixLayout.prefixSize)) {
           batterylessPrefixSize = existingPrefixLayout.prefixSize;
-          batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase, batterylessPrefixSize)];
+          batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase, batterylessPrefixSize, existingBatterylessPayload)];
           if (batterylessRtcPrefixSize) {
             rtcPayloadOffset = existingPrefixLayout.rtcOffset;
             rtcPlacement = "before-batteryless";
@@ -894,8 +963,12 @@ export function patchSramBytes(inputBytes, options = {}) {
             waitstatePayloadOffset = existingPrefixLayout.waitstateOffset;
             waitstateExcludedRanges = rangeForSpan(waitstatePayloadOffset, batterylessWaitstatePrefixSize);
           }
+          if (batterylessIrqPrefixSize) {
+            irqHandlerPayloadOffset = existingPrefixLayout.irqOffset;
+            irqHandlerExcludedRanges = rangeForSpan(irqHandlerPayloadOffset, batterylessIrqPrefixSize);
+          }
         } else {
-          batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase)];
+          batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase, 0, existingBatterylessPayload)];
           if (batterylessRtcPrefixSize) {
             warnings.push("RTC: no free 0x100-aligned area directly before the existing Batteryless SRAM payload");
             rtcResult = { requested: true, status: "failed", size: RTC_PAYLOAD_SIZE };
@@ -904,9 +977,13 @@ export function patchSramBytes(inputBytes, options = {}) {
             warnings.push("Waitstate: no free 0x100-aligned area directly before the existing Batteryless SRAM payload");
             waitstateResult = { requested: true, status: "failed", value: options.waitstate?.value ?? C.WAITSTATE_DEFAULT_VALUE, direct_writes: 0 };
           }
+          if (batterylessIrqPrefixSize) {
+            warnings.push("Shared IRQ: no free 0x100-aligned area directly before the existing Batteryless SRAM payload");
+            irqHandlerResult = { requested: true, status: "failed", size: IRQ_HANDLER_PAYLOAD_SIZE };
+          }
         }
       } else {
-        batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase)];
+        batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadBase, 0, existingBatterylessPayload)];
       }
     } else if (rtc && !rtcAlreadyApplied) {
       warnings.push("RTC: existing Batteryless SRAM payload could not be located for before-Batteryless placement");
@@ -944,13 +1021,13 @@ export function patchSramBytes(inputBytes, options = {}) {
 
   if (batteryless && batterylessResult === null) {
     const batterylessRtcPrefixSize = rtc && !rtcAlreadyApplied && rtcResult === null ? rtcPayloadSpan : 0;
-    const plannedLayout = ensureBatterylessLayout(rom, operations, warnings, batterylessRtcPrefixSize, batterylessWaitstatePrefixSize, keepBatterylessLastBlockEmpty);
+    const plannedLayout = ensureBatterylessLayout(rom, operations, warnings, selectedBatterylessPayload, batterylessRtcPrefixSize, batterylessWaitstatePrefixSize, batterylessIrqPrefixSize, keepBatterylessLastBlockEmpty);
     if (plannedLayout === null) {
       batterylessResult = { requested: true, mode: batterylessMode, status: "failed", countdown: batterylessCountdown, indicator_mode: batterylessIndicatorMode };
     } else {
       batterylessPayloadOffset = plannedLayout.payloadBase;
       batterylessPrefixSize = plannedLayout.prefixLayout.prefixSize;
-      batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadOffset, batterylessPrefixSize)];
+      batterylessExcludedRanges = [batterylessReservedRange(batterylessPayloadOffset, batterylessPrefixSize, selectedBatterylessPayload)];
       if (batterylessRtcPrefixSize) {
         rtcPayloadOffset = plannedLayout.prefixLayout.rtcOffset;
         rtcPlacement = "before-batteryless";
@@ -959,6 +1036,10 @@ export function patchSramBytes(inputBytes, options = {}) {
       if (batterylessWaitstatePrefixSize) {
         waitstatePayloadOffset = plannedLayout.prefixLayout.waitstateOffset;
         waitstateExcludedRanges = rangeForSpan(waitstatePayloadOffset, batterylessWaitstatePrefixSize);
+      }
+      if (batterylessIrqPrefixSize) {
+        irqHandlerPayloadOffset = plannedLayout.prefixLayout.irqOffset;
+        irqHandlerExcludedRanges = rangeForSpan(irqHandlerPayloadOffset, batterylessIrqPrefixSize);
       }
     }
   }
@@ -970,7 +1051,7 @@ export function patchSramBytes(inputBytes, options = {}) {
     } else if (patchInfo.type === "simple") {
       applySimplePatch(originalData, rom.bytes, patchInfo, operations, warnings, flash1mBankSwitchStyle);
     } else if (patchInfo.type === "tail_trampoline") {
-      applyTailTrampolinePatch(originalData, rom.bytes, patchInfo, operations, warnings, rangesWithPrefixGuard([...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges], C.TAIL_TRAMPOLINE_EXCLUDED_PREFIX_GUARD));
+      applyTailTrampolinePatch(originalData, rom.bytes, patchInfo, operations, warnings, rangesWithPrefixGuard([...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges, ...irqHandlerExcludedRanges], C.TAIL_TRAMPOLINE_EXCLUDED_PREFIX_GUARD));
     } else {
       warnings.push(`${patchInfo.name}: unknown patch type`);
     }
@@ -1002,7 +1083,7 @@ export function patchSramBytes(inputBytes, options = {}) {
     rtcResult = applyRtcForPipeline(rom, operations, warnings, options.rtc, {
       payloadOffset: rtcPayloadOffset,
       placement: rtcPlacement,
-      excludedRanges: [...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges],
+      excludedRanges: [...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges, ...irqHandlerExcludedRanges],
     });
   }
 
@@ -1015,11 +1096,40 @@ export function patchSramBytes(inputBytes, options = {}) {
 
   if (waitstateResult === null) {
     waitstateResult = applyWaitstateForPipeline(rom, operations, warnings, options.waitstate, {
-      excludedRanges: [...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges],
+      excludedRanges: [...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges, ...irqHandlerExcludedRanges],
       waitstatePayloadOffset,
       batterylessPayloadOffset,
       batterylessJustPatched: batterylessResult?.status === "patched",
     });
+  }
+
+  {
+    const rtcMenuEntry = rtcResult?.runtime_menu_entry || 0;
+    const batterylessFlushEntry = batterylessResult?.flush_entry || 0;
+    if (irqHandlerResult === null && (rtcMenuEntry || batterylessFlushEntry)) {
+      const irqExcludedRanges = [...batterylessExcludedRanges, ...rtcExcludedRanges, ...waitstateExcludedRanges, ...irqHandlerExcludedRanges];
+      if (batterylessResult?.payload_offset !== undefined && batterylessResult?.payload_offset !== null) {
+        irqExcludedRanges.push(batterylessReservedRange(batterylessResult.payload_offset, batterylessPrefixSize, activeBatterylessPayload));
+      }
+      if (rtcResult?.payload_offset !== undefined && rtcResult?.payload_offset !== null && rtcResult?.size) {
+        irqExcludedRanges.push([rtcResult.payload_offset, rtcResult.payload_offset + alignedPayloadSpan(rtcResult.size)]);
+      }
+      if (waitstateResult?.payload_offset !== undefined && waitstateResult?.payload_offset !== null && waitstateResult?.size) {
+        irqExcludedRanges.push([waitstateResult.payload_offset, waitstateResult.payload_offset + alignedPayloadSpan(waitstateResult.size)]);
+      }
+      irqHandlerResult = applyIrqHandlerForPipeline(rom, operations, warnings, {
+        enabled: true,
+        rtcMenuEntry,
+        batterylessFlushEntry,
+        batterylessAuto: Boolean(batterylessFlushEntry && batterylessMode === "auto"),
+        countdownFrames: batterylessCountdown,
+        indicatorMode: batterylessIndicatorMode,
+        hotkeyMask: batterylessHotkeyMask,
+      }, {
+        excludedRanges: irqExcludedRanges,
+        payloadOffset: irqHandlerPayloadOffset,
+      });
+    }
   }
 
   const headerSaveSize = batterylessResult && batterylessResult.status === "patched" ? batterylessResult.save_size : savePatchAlreadyApplied ? null : inferredBatterylessSaveSize(saveType);
@@ -1036,5 +1146,5 @@ export function patchSramBytes(inputBytes, options = {}) {
   else if (patchInfo === null) status = "unsupported";
   else status = "unchanged";
 
-  return { bytes: rom.bytes, result: makeResult(saveType, status, operations, warnings, batterylessResult, waitstateResult, saveEmbedded, rtcResult) };
+  return { bytes: rom.bytes, result: makeResult(saveType, status, operations, warnings, batterylessResult, waitstateResult, saveEmbedded, rtcResult, irqHandlerResult) };
 }

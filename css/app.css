@@ -542,6 +542,61 @@ input[type=checkbox] {
   color: var(--text)
 }
 
+.hotkey-badge-group {
+  gap: .45rem;
+  align-items: center
+}
+
+.hotkey-badge-group>span {
+  margin-right: .15rem
+}
+
+.hotkey-badge-group label {
+  position: relative;
+  min-height: 1.85rem;
+  padding: .25rem .62rem;
+  border: 1px solid rgba(94, 140, 252, .28);
+  border-radius: 999px;
+  background: rgba(13, 15, 26, .66);
+  color: var(--text2);
+  font-size: .7rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  line-height: 1;
+  text-transform: uppercase;
+  transition: var(--transition)
+}
+
+.hotkey-badge-group label:hover {
+  border-color: rgba(94, 140, 252, .62);
+  color: var(--text)
+}
+
+.hotkey-badge-group input[type=checkbox] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none
+}
+
+.hotkey-badge-group label:has(input[type=checkbox]:checked) {
+  border-color: rgba(139, 184, 255, .8);
+  background: rgba(94, 140, 252, .42);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06), 0 0 0 1px rgba(94, 140, 252, .12);
+  color: #fff
+}
+
+.hotkey-badge-group label:has(input[type=checkbox]:checked):hover {
+  background: rgba(94, 140, 252, .55)
+}
+
+.hotkey-badge-group label:has(input[type=checkbox]:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px
+}
+
 .field-label {
   margin: .75rem 0;
   color: var(--text2);
@@ -777,12 +832,27 @@ footer div {
 /* Layout updates */
 .settings-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, .78fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
   gap: 1rem;
   margin-top: 1.5rem
 }
 
+.settings-side-column {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: 1rem
+}
+
+.settings-grid>.panel,
+.settings-side-column {
+  height: 100%;
+  min-height: 0
+}
+
 .waitstate-panel,
+.other-settings-panel,
 .rom-panel,
 .options-panel {
   padding: 1rem;
@@ -833,6 +903,15 @@ fieldset[hidden] {
 @media(max-width:700px) {
   .settings-grid {
     grid-template-columns: 1fr
+  }
+
+  .settings-grid>.panel,
+  .settings-side-column {
+    height: auto
+  }
+
+  .settings-side-column {
+    grid-template-rows: auto
   }
 
   .action-bar {

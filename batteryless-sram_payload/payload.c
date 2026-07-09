@@ -56,6 +56,8 @@ storage_mode:
     .word 0
 indicator_mode:
     .word 0
+flush_sram_entry:
+    .word flush_sram
 
 .thumb
 # If you are writing a manual batteryless save patch, you can branch here
@@ -248,13 +250,6 @@ eeprom_v111_expand_sram_raw:
 .ltorg
 
 patched_entrypoint:
-    mov r0, # 0x04000000
-    ldr r1, flush_mode
-    cmp r1, # 0
-    adr r1, idle_irq_handler
-    adrne r1, keypad_irq_handler
-    str r1, [r0, # -4]
-
     mov r1, # 0x0e000000
     # Lock 369in1 mapper
     mov r4, # 0x80
@@ -465,12 +460,10 @@ install_countdown_handler:
     mov r2, # 1
 
 install_countdown_use_configured:
-    adr r0, countdown_irq_handler
     mov r1, # 0x04
     lsl r1, # 24
     sub r1, # 0x10
     strh r2, [r1, # 0x0a]
-    str r0, [r1, # 0x0c]
     adr r0, install_countdown_indicator_mode_ref
     ldr r3, [r0]
     add r0, r3
@@ -553,92 +546,8 @@ flush_dirty_sram_boot_done:
     ldmfd sp!, {r0, r1, r2, r3, r4, lr}
     bx lr
 
-# IRQ handlers are called with 0x04000000 in r0 which is handy!
-keypad_irq_handler:
-    # Check keypad register for L+R+START+SELECT
-    # May need to be changed to ldrh
-    ldr r3, [r0, # 0x130]
-    teq r3, # 0xf3
-    ldrne pc, [r0, # - 12]
-    
-    ldr r1, indicator_mode
-    cmp r1, # 1
-    bne keypad_irq_no_enable_indicator
-    mov r1, # 1
-    strh r1, [r0, # 0x02]
-keypad_irq_no_enable_indicator:
-    
-    # Switch to system mode to get lots of stack
-    mov r3, # 0x9f
-    msr cpsr, r3
-    
-    push {lr}
-    bl flush_sram
-    pop {lr}
-
-    # return to irq mode
-    mov r3, # 0x92
-    msr cpsr, r3
-    
-    mov r0, # 0x04000000
-    ldr r1, indicator_mode
-    cmp r1, # 1
-    bne keypad_irq_no_disable_indicator
-    mov r1, # 0
-    strh r1, [r0, # 0x02]
-keypad_irq_no_disable_indicator:
-    
-    # Wait until keypad register is no longer L+R+START+SELECT
-    ldr r3, [r0, # 0x130]
-    teq r3, # 0xf3
-    beq (.-8)
-    
-    ldr pc, [r0, # - 12]
-
-countdown_irq_handler:
-    # if not vblank IF then user handler
-    ldr r1, [r0, # 0x200]
-    tst r1, # 0x00010000
-    ldreq pc, [r0, # -12]
-
-    # if (--counter) then user handler
-    ldrh r1, [r0, # - 6]
-    subs r1, # 1
-    strh r1, [r0, # - 6]
-    ldrne pc, [r0, # -12]
-
-    # Switch to system mode to get lots of stack
-    mov r3, # 0x9f
-    msr cpsr, r3
-    
-    push {lr}
-    bl flush_sram
-    pop {lr}
-    
-    # return to irq mode
-    mov r3, # 0x92
-    msr cpsr, r3
-
-    mov r0, # 0x04000000
-    ldr r1, indicator_mode
-    cmp r1, # 1
-    bne countdown_irq_no_disable_indicator
-    mov r1, # 0
-    strh r1, [r0, # 0x02]
-countdown_irq_no_disable_indicator:
-    
-    # Uninstall countdown irq handler 
-    adr r1, idle_irq_handler
-    str r1, [r0, # - 4]
-    
-    # Continue IRQ handler
-    b idle_irq_handler
-    
-idle_irq_handler:
-    ldr pc, [r0, # -12]
-
-
 # Ensure interrupts are disabled and there is plenty of stack space before calling
+.global flush_sram
 flush_sram:
     mov r0, # 0x04000000
     ldr r1, indicator_mode
@@ -648,22 +557,103 @@ flush_sram:
     strh r1, [r0, # 0x02]
 flush_sram_no_enable_save_indicator:
 
-    # save sound state then disable it
-    ldrh r2, [r0, # 0x0080]
-    ldrh r3, [r0, # 0x0084]
-    push {r2, r3}
-    strh r0, [r0, # 0x0084]
+    # Pause Direct Sound before issuing flash commands. Keep FIFO reset bits
+    # clear when saving/restoring SOUNDCNT_H; they are write-only triggers.
+    ldrh r3, [r0, # 0x0080]
+    push {r3}
+    ldrh r3, [r0, # 0x0082]
+    mov r2, # 0x88
+    lsl r2, # 8
+    bic r3, r2
+    push {r3}
+    add r12, r0, # 0x0100
+    ldrh r3, [r12, # 0x02]
+    push {r3}
+    ldrh r3, [r12, # 0x06]
+    push {r3}
 
-    # save DMAs state then disable them
+    ldrh r3, [r0, # 0x0082]
+    mov r2, # 0x88
+    lsl r2, # 8
+    bic r3, r2
+    mov r1, # 0
+    mov r2, # 0x03
+    lsl r2, # 8
+    tst r3, r2
+    beq flush_sram_audio_no_a
+    mov r2, # 0x04
+    lsl r2, # 8
+    tst r3, r2
+    moveq r1, # 1
+    movne r1, # 2
+flush_sram_audio_no_a:
+    mov r2, # 0x30
+    lsl r2, # 8
+    tst r3, r2
+    beq flush_sram_audio_no_b
+    mov r2, # 0x40
+    lsl r2, # 8
+    tst r3, r2
+    orreq r1, r1, # 1
+    orrne r1, r1, # 2
+flush_sram_audio_no_b:
+    push {r1}
+
+    mov r2, # 0x33
+    lsl r2, # 8
+    bic r3, r3, r2
+    strh r3, [r0, # 0x0082]
+    mov r2, # 0
+    strh r2, [r0, # 0x0080]
+
+    mov r2, # 0x80
+    tst r1, # 1
+    beq flush_sram_audio_no_stop_tm0
+    ldrh r3, [r12, # 0x02]
+    bic r3, r3, r2
+    strh r3, [r12, # 0x02]
+flush_sram_audio_no_stop_tm0:
+    tst r1, # 2
+    beq flush_sram_audio_no_stop_tm1
+    ldrh r3, [r12, # 0x06]
+    bic r3, r3, r2
+    strh r3, [r12, # 0x06]
+flush_sram_audio_no_stop_tm1:
+
+    # save DMAs state then disable non-sound DMAs
     ldrh r3, [r0, # 0x00BA]
     push {r3}
     strh r0, [r0, # 0x00BA]
     ldrh r3, [r0, # 0x00C6]
     push {r3}
+    mov r2, # 0x80
+    lsl r2, # 8
+    tst r3, r2
+    beq 1f
+    mov r2, # 0x30
+    lsl r2, # 8
+    mov r1, r3
+    and r1, r2
+    cmp r1, r2
+    beq 2f
+1:
     strh r0, [r0, # 0x00C6]
+2:
     ldrh r3, [r0, # 0x00d2]
     push {r3}
+    mov r2, # 0x80
+    lsl r2, # 8
+    tst r3, r2
+    beq 3f
+    mov r2, # 0x30
+    lsl r2, # 8
+    mov r1, r3
+    and r1, r2
+    cmp r1, r2
+    beq 4f
+3:
     strh r0, [r0, # 0x00d2]
+4:
     ldrh r3, [r0, # 0x00de]
     push {r3}
     strh r0, [r0, # 0x00de]
@@ -731,17 +721,55 @@ flush_sram_no_disable_save_indicator:
     pop {r3}
     strh r3, [r0, # 0x00de]
     pop {r3}
+    mov r2, # 0x80
+    lsl r2, # 8
+    tst r3, r2
+    beq 5f
+    mov r2, # 0x30
+    lsl r2, # 8
+    mov r1, r3
+    and r1, r2
+    cmp r1, r2
+    beq 6f
+5:
     strh r3, [r0, # 0x00d2]
+6:
     pop {r3}
+    mov r2, # 0x80
+    lsl r2, # 8
+    tst r3, r2
+    beq 7f
+    mov r2, # 0x30
+    lsl r2, # 8
+    mov r1, r3
+    and r1, r2
+    cmp r1, r2
+    beq 8f
+7:
     strh r3, [r0, # 0x00c6]
+8:
     pop {r3}
     strh r3, [r0, # 0x00ba]
 
+    # Restore sound controls before restarting timers; DMA controls are already
+    # back in their previous state at this point.
+    pop {r1}
+    pop {r2}
+    pop {r3}
+    pop {r12}
+    strh r12, [r0, # 0x0082]
+    pop {r12}
+    strh r12, [r0, # 0x0080]
 
-    # restore sound state
-    pop {r2, r3}
-    strh r3, [r0, # 0x0084]
-    strh r2, [r0, # 0x0080]
+    add r12, r0, # 0x0100
+    tst r1, # 2
+    beq flush_sram_audio_no_restore_tm1
+    strh r2, [r12, # 0x06]
+flush_sram_audio_no_restore_tm1:
+    tst r1, # 1
+    beq flush_sram_audio_no_restore_tm0
+    strh r3, [r12, # 0x02]
+flush_sram_audio_no_restore_tm0:
 
     bx lr
     
@@ -1108,7 +1136,10 @@ asm("program_flash_4_end:");
 asm(R"(
 # The following footer must come last.
 .balign 4
-.ascii "<3 from Maniac"
+.ascii "thx Maniac"
+.byte 0
+.byte 0
+.ascii "lk_batteryless"
 # Size of payload
 .hword (.+2)
 .balign 4

@@ -1,5 +1,18 @@
 const elements = {};
 let importProgressHideTimer = null;
+const DEFAULT_BATTERYLESS_HOTKEY = ["start", "select", "l", "r"];
+const BATTERYLESS_HOTKEY_BITS = {
+  a: 0x0001,
+  b: 0x0002,
+  select: 0x0004,
+  start: 0x0008,
+  right: 0x0010,
+  left: 0x0020,
+  up: 0x0040,
+  down: 0x0080,
+  r: 0x0100,
+  l: 0x0200,
+};
 
 export function bindElements() {
   Object.assign(elements, {
@@ -15,6 +28,7 @@ export function bindElements() {
     optionsForm: document.querySelector("#patch-options"),
     optionsPanel: document.querySelector("#save-options-panel"),
     batterylessOptions: document.querySelector("#batteryless-options"),
+    sharedHotkeyOptions: document.querySelector("#shared-hotkey-options"),
     countdownField: document.querySelector("#countdown-field"),
     sramOptions: document.querySelector("#sram-options"),
     customFlashOptions: document.querySelector("#custom-flash-options"),
@@ -81,7 +95,9 @@ export function hideImportProgress(delayMs = 0) {
 export function renderOptions(state) {
   const isSram = state.options.patchMode === "sram";
   const isBatteryless = state.options.patchMode === "batteryless-sram";
+  const isRtc = state.options.rtc.enabled;
   elements.batterylessOptions.hidden = !isBatteryless;
+  if (elements.sharedHotkeyOptions) elements.sharedHotkeyOptions.hidden = !(isBatteryless || isRtc);
   if (elements.sramOptions) elements.sramOptions.hidden = !(isSram || isBatteryless);
   elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
   if (elements.waitstateOptions) elements.waitstateOptions.hidden = !state.options.waitstate.enabled;
@@ -165,6 +181,34 @@ export function renderRomList(state, options = {}) {
   }
 }
 
+function formControlsToArray(controls) {
+  if (!controls) return [];
+  if (typeof controls.length === "number") return Array.from(controls);
+  return [controls];
+}
+
+function checkedValues(controls) {
+  return formControlsToArray(controls)
+    .filter((control) => control.checked)
+    .map((control) => control.value);
+}
+
+function normalizeHotkeyKeys(keys) {
+  const normalized = [];
+  const seen = new Set();
+  for (const key of Array.isArray(keys) ? keys : []) {
+    const value = String(key).toLowerCase();
+    if (!(value in BATTERYLESS_HOTKEY_BITS) || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function hotkeyMaskFromKeys(keys) {
+  return normalizeHotkeyKeys(keys).reduce((mask, key) => mask | BATTERYLESS_HOTKEY_BITS[key], 0);
+}
+
 export function syncOptionsFromForm(state) {
   const f = elements.optionsForm;
   const delayInput = f.elements.countdownFrames;
@@ -176,6 +220,7 @@ export function syncOptionsFromForm(state) {
 
   state.options.patchMode = f.elements.patchMode.value;
   state.options.batteryless.mode = f.elements.batterylessMode.value;
+  state.options.batteryless.hotkey = checkedValues(f.elements.batterylessHotkey);
   state.options.batteryless.countdownFrames = Number.parseInt(delayInput.value, 10);
   state.options.batteryless.indicator = f.elements.indicator.value;
   state.options.batteryless.lastBlock = f.elements.batterylessLastBlock?.value || "usable";
@@ -202,6 +247,13 @@ export function readValidatedOptions(state) {
   options.sram.flash1mBankSwitchStyle = options.sram.flash1mBankSwitchStyle === "gbata" ? "gbata" : "modern";
 
   options.batteryless.lastBlock = options.batteryless.lastBlock === "keep-empty" ? "keep-empty" : "usable";
+  options.batteryless.hotkey = normalizeHotkeyKeys(options.batteryless.hotkey);
+  const needsHotkey = options.patchMode === "batteryless-sram" || options.rtc?.enabled;
+  if (!options.batteryless.hotkey.length) {
+    if (needsHotkey) throw new Error("Select at least one Hotkey button.");
+    options.batteryless.hotkey = DEFAULT_BATTERYLESS_HOTKEY;
+  }
+  options.batteryless.hotkeyMask = hotkeyMaskFromKeys(options.batteryless.hotkey);
 
   options.waitstate = options.waitstate.enabled
     ? { enabled: true, mode: "supercard_exact" }

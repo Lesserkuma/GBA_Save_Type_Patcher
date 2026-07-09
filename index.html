@@ -47,31 +47,42 @@
           </fieldset>
 
           <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
-            <div class="inline-group"><span>Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> <span class="option-label">Auto</span></label><label><input type="radio" name="batterylessMode" value="keypad"><span class="option-label">Hotkey</span><span class="option-hint">(L+R+START+SELECT)</span></label></div>
-            <label id="countdown-field" class="field-label">Delay Value: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
+            <div class="inline-group"><span>Auto Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Enabled</label><label><input type="radio" name="batterylessMode" value="keypad"> Disabled (less invasive)</label></div>
+            <label id="countdown-field" class="field-label">Auto Mode Delay: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"></label>
             <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
-            <div class="inline-group stacked-mobile"><span>Last 256 KiB Block:</span><label><input type="radio" name="batterylessLastBlock" value="usable" checked> Usable</label><label><input type="radio" name="batterylessLastBlock" value="keep-empty"> Keep empty</label></div>
           </fieldset>
 
           <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Flash Chip Type:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
         </section>
 
-        <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
-          <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
-          <fieldset class="waitstate-toggle">
-            <label class="option-line">
-              <input type="checkbox" name="rtcEnabled"><span class="option-copy"><span class="option-label">Fake RTC</span><span class="option-hint">(for RTC games on non-RTC cartridges, experimental)</span></span>
-            </label>
-            <label class="option-line">
-              <input type="checkbox" name="waitstateEnabled"><span class="option-copy"><span class="option-label">Waitstate</span><span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
-            </label>
-          </fieldset>
-          <fieldset id="rtc-menu-options" class="sub-options" hidden><legend>Fake RTC Options</legend>
-            <label class="option-line">
-              <input type="checkbox" name="rtcSkipSoftReset"><span class="option-copy"><span class="option-label">Skip Menu on Reset</span></span>
-            </label>
-          </fieldset>
-        </section>
+        <div class="settings-side-column">
+          <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
+            <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
+            <fieldset class="waitstate-toggle">
+              <label class="option-line">
+                <input type="checkbox" name="rtcEnabled"><span class="option-copy"><span class="option-label">Fake RTC</span><span class="option-hint">(for RTC games on non-RTC cartridges, experimental)</span></span>
+              </label>
+              <label class="option-line">
+                <input type="checkbox" name="waitstateEnabled"><span class="option-copy"><span class="option-label">Waitstate</span><span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
+              </label>
+            </fieldset>
+            <fieldset id="rtc-menu-options" class="sub-options" hidden><legend>Fake RTC Options</legend>
+              <label class="option-line">
+                <input type="checkbox" name="rtcSkipSoftReset"><span class="option-copy"><span class="option-label">Skip Menu on Reset</span></span>
+              </label>
+            </fieldset>
+          </section>
+
+          <section id="other-settings-panel" class="panel other-settings-panel" aria-labelledby="other-settings-title">
+            <div class="panel-heading compact"><h2 id="other-settings-title">Other Settings</h2></div>
+            <fieldset id="shared-hotkey-options" class="sub-options" hidden><legend>Global Hotkey</legend>
+              <div class="inline-group hotkey-badge-group"><label><input type="checkbox" name="batterylessHotkey" value="start"> START</label><label><input type="checkbox" name="batterylessHotkey" value="select" checked> SELECT</label><label><input type="checkbox" name="batterylessHotkey" value="l" checked> L</label><label><input type="checkbox" name="batterylessHotkey" value="r"> R</label><label><input type="checkbox" name="batterylessHotkey" value="up"> &uarr;</label><label><input type="checkbox" name="batterylessHotkey" value="down"> &darr;</label><label><input type="checkbox" name="batterylessHotkey" value="left"> &larr;</label><label><input type="checkbox" name="batterylessHotkey" value="right"> &rarr;</label><label><input type="checkbox" name="batterylessHotkey" value="a"> A</label><label><input type="checkbox" name="batterylessHotkey" value="b"> B</label><div><span>Buttons to push at the same time</span></div></div>
+            </fieldset>
+            <fieldset id="last-block-options" class="sub-options"><legend>Storage Layout</legend>
+              <div class="inline-group stacked-mobile"><span>Last 256 KiB Block:</span><label><input type="radio" name="batterylessLastBlock" value="usable" checked> Usable</label><label><input type="radio" name="batterylessLastBlock" value="keep-empty"> Keep empty</label><div></div>
+            </fieldset>
+          </section>
+        </div>
       </form>
 
       <section class="panel rom-panel" aria-labelledby="roms-title">
@@ -85,7 +96,7 @@
     </main>
 
     <footer>
-      <div><b>GBA Save Type Patcher v1.4</b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a> · Developed with assistance from GPT-5.5</small></div>
+      <div><b>GBA Save Type Patcher v1.4</b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a></small></div>
       <div>
         Portions partly based on:<br>
         <a href="https://web.archive.org/web/20070225124322/http://www.gbadat.altervista.org/tools.htm" target="_blank" rel="noopener noreferrer">GBATA SRAM Patcher</a> by coolhj<br>

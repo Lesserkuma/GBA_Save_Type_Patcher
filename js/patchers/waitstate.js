@@ -29,7 +29,7 @@
  * writes the selected WAITCNT value before continuing to the previous entrypoint.
  */
 
-import { copyBytes, findBytes, readU16, readU32, writeU32 } from "../core/binary.js";
+import { asciiBytes, copyBytes, findBytes, readU16, readU32, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
 import { applyPatchHeaderMarker, hasWaitstatePatch, makePatchHeaderFlags, readPatchFlags, updateGbaHeaderChecksum } from "./patch-state.js";
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
@@ -44,6 +44,8 @@ const GBA_HEADER_VERSION_OFFSET = 0xbc;
 
 const SUPERFW_DB_SIGNATURE = 0x31424450; // "PDB1"
 const SUPERFW_DB_VERSION = 0x00010000;
+const WAITCNT_ENTRYPOINT_MARKER = "lk_waitcnt_bootstrap";
+const WAITCNT_SWI_RESTORE_MARKER = "lk_swi_waitcnt_restore";
 const SUPERFW_PATCH_DB_BASE64 = [
   'UERCMQAAAQBTCwAALgAAADIwMjUxMTMwYTM4YzEzZmZnaXRodWItZGF2aWRnZm5ldC1hdXRvbWF0aW9uAAAAAAAAAAAAAAAAAAAA',
   'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -2340,6 +2342,18 @@ function makeWaitstatePayload(waitstateValue, nextEntrypoint) {
   return payload;
 }
 
+function writeRomMarker(bytes, operations, offset, size, span, markerText, label, codeName) {
+  const marker = asciiBytes(markerText);
+  const markerOffset = offset + size;
+  const markerEnd = markerOffset + marker.length;
+  const paddingEnd = offset + span;
+  if (markerEnd > paddingEnd || markerEnd > bytes.length) return false;
+  if (!isFreeRegion(bytes, markerOffset, marker.length)) return false;
+  copyBytes(bytes, markerOffset, marker);
+  addOperation(operations, label, markerOffset, marker.length, { codeName });
+  return true;
+}
+
 function armLdrLiteralTarget(instruction, instructionAddress) {
   if ((instruction & 0x0c100000) !== 0x04100000) return null;
   if (((instruction >>> 16) & 0xf) !== 15) return null;
@@ -2471,7 +2485,31 @@ export function applyWaitstatePatch(rom, operations, warnings, waitstateValue = 
     writeU32(work, 0, entrypointBranch);
     addOperation(localOperations, "Waitstate Entrypoint", 0, 4, { codeName: "waitstate_entrypoint", value: entrypointBranch });
     copyBytes(work, payloadOffset, payload);
-    addOperation(localOperations, "Waitstate Payload", payloadOffset, payload.length, { codeName: "waitstate_payload", value: waitstateValue & 0xffff });
+    addOperation(localOperations, "WAITCNT entrypoint block", payloadOffset, payload.length, { codeName: "waitcnt_entrypoint", value: waitstateValue & 0xffff });
+
+    writeRomMarker(
+      work,
+      localOperations,
+      payloadOffset,
+      payload.length,
+      alignedPayloadSpan(payload.length),
+      WAITCNT_ENTRYPOINT_MARKER,
+      "WAITCNT entrypoint ROM marker",
+      "waitcnt_entrypoint_rom_marker",
+    );
+
+    for (const relocation of superfwWaitstate?.program_relocations || []) {
+      writeRomMarker(
+        work,
+        localOperations,
+        relocation.newOffset,
+        relocation.size,
+        relocation.span,
+        WAITCNT_SWI_RESTORE_MARKER,
+        "WAITCNT SWI restore ROM marker",
+        "waitcnt_swi_restore_rom_marker",
+      );
+    }
   } catch (error) {
     localWarnings.push(`Waitstate: ${error.message}`);
     warnings.push(...localWarnings);

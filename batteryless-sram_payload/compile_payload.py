@@ -17,10 +17,20 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = ROOT
 DEFAULT_BUILD_DIR = RUNTIME_DIR / "build"
 DEFAULT_DATA_FILE = ROOT / ".." / "js" / "patchers" / "sram-data.js"
+DEFAULT_DEVKITARM_BIN = ROOT / ".." / "tools" / "devkitPro" / "devkitARM" / "bin"
 
 COUNTDOWN_MARKER = bytes.fromhex("01bc0047ffb400b56622002a02d1")
+PAYLOAD_SIGNATURE = b"thx Maniac\x00\x00lk_batteryless"
 PAYLOAD_HEX_EXPORT_RE = re.compile(
-    r'^export const BATTERYLESS_PAYLOAD_HEX = (?P<value>(?:.|\n)*?);$',
+    r'^export const BATTERYLESS_PAYLOAD_HEX\s*=\s*(?P<value>(?:.|\n)*?);$',
+    re.MULTILINE,
+)
+PAYLOAD_GBATA_HEX_EXPORT_RE = re.compile(
+    r'^export const BATTERYLESS_PAYLOAD_GBATA_HEX\s*=\s*(?P<value>(?:.|\n)*?);$',
+    re.MULTILINE,
+)
+SIGNATURE_HEX_EXPORT_RE = re.compile(
+    r'^export const BATTERYLESS_SIGNATURE_HEX = (?P<value>".*?");$',
     re.MULTILINE,
 )
 SRAM_CONSTANTS_RE = re.compile(
@@ -35,6 +45,7 @@ PAYLOAD_WORD_CONSTANTS = {
     0x18: "BATTERYLESS_WRITE_FLASH_PATCHED",
     0x1C: "BATTERYLESS_WRITE_EEPROM_V111_POSTHOOK",
     0x20: "BATTERYLESS_SRAM_BANK_SELECT_PATCHED",
+    0x2C: "BATTERYLESS_FLUSH_SRAM",
 }
 
 
@@ -72,6 +83,9 @@ def find_tool(name: str) -> Path:
     found = shutil.which(name) or shutil.which(exe)
     if found:
         return Path(found)
+    local = DEFAULT_DEVKITARM_BIN / exe
+    if local.exists():
+        return local
 
     raise SystemExit(f"{name} not found. Expected in PATH.")
 
@@ -81,7 +95,7 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def compile_payload(build_dir: Path) -> Path:
+def compile_payload(build_dir: Path, *, gbata: bool = False) -> Path:
     source = RUNTIME_DIR / "payload.c"
     linker_script = RUNTIME_DIR / "payload.ld"
     if not source.exists():
@@ -96,16 +110,20 @@ def compile_payload(build_dir: Path) -> Path:
     gcc = find_tool("arm-none-eabi-gcc")
     objcopy = find_tool("arm-none-eabi-objcopy")
 
-    run(
+    cmd = [
+        str(gcc),
+        "-mcpu=arm7tdmi",
+        "-nostartfiles",
+        "-nodefaultlibs",
+        "-mthumb",
+        "-fPIE",
+        "-Os",
+        "-fno-toplevel-reorder",
+    ]
+    if gbata:
+        cmd.append("-DSRAM_BANK_SWITCH_STYLE=SRAM_BANK_SWITCH_STYLE_GBATA")
+    cmd.extend(
         [
-            str(gcc),
-            "-mcpu=arm7tdmi",
-            "-nostartfiles",
-            "-nodefaultlibs",
-            "-mthumb",
-            "-fPIE",
-            "-Os",
-            "-fno-toplevel-reorder",
             str(source),
             "-T",
             str(linker_script),
@@ -113,6 +131,7 @@ def compile_payload(build_dir: Path) -> Path:
             str(elf_path),
         ]
     )
+    run(cmd)
     run([str(objcopy), "-O", "binary", str(elf_path), str(bin_path)])
     return bin_path
 
@@ -122,7 +141,7 @@ def read_payload(args: argparse.Namespace) -> tuple[Path, bytes]:
     if not bin_path.exists():
         raise SystemExit(f"payload.bin not found: {bin_path}")
     payload = bin_path.read_bytes()
-    if len(payload) < 0x2C:
+    if len(payload) < 0x30:
         raise SystemExit(f"payload.bin is too small: 0x{len(payload):x} bytes")
     return bin_path, payload
 
@@ -160,8 +179,28 @@ def js_string_literal_chunks(hex_payload: str, chunk_size: int = 128) -> str:
     return "\n" + "\n".join(lines)
 
 
-def embed_payload(data_file: Path, payload: bytes) -> int:
+def js_payload_export(name: str, payload_literal: str) -> str:
+    if payload_literal.startswith("\n"):
+        return f"export const {name} ={payload_literal};"
+    return f"export const {name} = {payload_literal};"
+
+
+def validate_gbata_constants(payload: bytes, gbata_payload: bytes) -> None:
+    modern_constants: dict = {}
+    gbata_constants: dict = {}
+    update_constants(modern_constants, payload)
+    update_constants(gbata_constants, gbata_payload)
+    if modern_constants != gbata_constants:
+        raise SystemExit("Modern and GBATA Batteryless payload config offsets differ.")
+
+
+def embed_payload(data_file: Path, payload: bytes, gbata_payload: bytes) -> int:
     text = data_file.read_text(encoding="utf-8")
+    if payload.count(PAYLOAD_SIGNATURE) != 1:
+        raise SystemExit(f"Batteryless signature must appear exactly once: {PAYLOAD_SIGNATURE!r}")
+    if gbata_payload.count(PAYLOAD_SIGNATURE) != 1:
+        raise SystemExit(f"GBATA Batteryless signature must appear exactly once: {PAYLOAD_SIGNATURE!r}")
+    validate_gbata_constants(payload, gbata_payload)
 
     constants_match = SRAM_CONSTANTS_RE.search(text)
     if not constants_match:
@@ -180,12 +219,38 @@ def embed_payload(data_file: Path, payload: bytes) -> int:
 
     payload_literal = js_string_literal_chunks(payload.hex())
     text, payload_replacements = PAYLOAD_HEX_EXPORT_RE.subn(
-        f"export const BATTERYLESS_PAYLOAD_HEX = {payload_literal};",
+        js_payload_export("BATTERYLESS_PAYLOAD_HEX", payload_literal),
         text,
         count=1,
     )
     if payload_replacements != 1:
         raise SystemExit("BATTERYLESS_PAYLOAD_HEX export was not updated exactly once.")
+
+    gbata_payload_literal = js_string_literal_chunks(gbata_payload.hex())
+    gbata_export = js_payload_export("BATTERYLESS_PAYLOAD_GBATA_HEX", gbata_payload_literal)
+    if PAYLOAD_GBATA_HEX_EXPORT_RE.search(text):
+        text, gbata_replacements = PAYLOAD_GBATA_HEX_EXPORT_RE.subn(
+            gbata_export,
+            text,
+            count=1,
+        )
+        if gbata_replacements != 1:
+            raise SystemExit("BATTERYLESS_PAYLOAD_GBATA_HEX export was not updated exactly once.")
+    else:
+        text = PAYLOAD_HEX_EXPORT_RE.sub(
+            lambda match: match.group(0) + "\n" + gbata_export,
+            text,
+            count=1,
+        )
+
+    signature_hex = json.dumps(PAYLOAD_SIGNATURE.hex())
+    text, signature_replacements = SIGNATURE_HEX_EXPORT_RE.subn(
+        f"export const BATTERYLESS_SIGNATURE_HEX = {signature_hex};",
+        text,
+        count=1,
+    )
+    if signature_replacements != 1:
+        raise SystemExit("BATTERYLESS_SIGNATURE_HEX export was not updated exactly once.")
 
     data_file.write_text(text, encoding="utf-8", newline="\n")
     return countdown_offset
@@ -203,7 +268,14 @@ def main() -> int:
     if args.no_embed:
         return 0
 
-    embedded_countdown_offset = embed_payload(args.data_file, payload)
+    if args.payload_bin:
+        raise SystemExit("--payload-bin cannot be embedded because the GBATA variant also needs to be generated.")
+    gbata_bin_path = compile_payload(args.build_dir.with_name(args.build_dir.name + "_gbata"), gbata=True)
+    gbata_payload = gbata_bin_path.read_bytes()
+    print(f"gbata_payload: {gbata_bin_path}")
+    print(f"gbata_payload_len: 0x{len(gbata_payload):x}")
+
+    embedded_countdown_offset = embed_payload(args.data_file, payload, gbata_payload)
     print(f"updated: {args.data_file}")
     print(f"embedded: {len(payload)} bytes")
     print(f"embedded_countdown_offset: 0x{embedded_countdown_offset:x}")

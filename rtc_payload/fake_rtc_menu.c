@@ -22,31 +22,28 @@ extern uint32_t rtc_state_is_initialized(void);
 
 #define REG_DISPCNT (*(volatile uint16_t*)0x04000000)
 #define REG_VCOUNT   (*(volatile uint16_t*)0x04000006)
-#define REG_BG0CNT   (*(volatile uint16_t*)0x04000008)
-#define REG_BG0HOFS  (*(volatile uint16_t*)0x04000010)
-#define REG_BG0VOFS  (*(volatile uint16_t*)0x04000012)
 #define REG_KEYINPUT (*(volatile uint16_t*)0x04000130)
 #define REG_SOUNDCNT_L (*(volatile uint16_t*)0x04000080)
 #define REG_SOUNDCNT_H (*(volatile uint16_t*)0x04000082)
+#define REG_DMA0CNT_H (*(volatile uint16_t*)0x040000BA)
+#define REG_DMA1CNT_H (*(volatile uint16_t*)0x040000C6)
+#define REG_DMA2CNT_H (*(volatile uint16_t*)0x040000D2)
+#define REG_DMA3CNT_H (*(volatile uint16_t*)0x040000DE)
+#define REG_TM0CNT_H (*(volatile uint16_t*)0x04000102)
+#define REG_TM1CNT_H (*(volatile uint16_t*)0x04000106)
 
 #define MEM_BG_PALETTE  ((volatile uint16_t*)0x05000000)
 #define MEM_OBJ_PALETTE ((volatile uint16_t*)0x05000200)
-#define MEM_VRAM_BG     ((volatile uint16_t*)0x06000000)
 #define MEM_VRAM_OBJ    ((volatile uint16_t*)0x06010000)
 #define MEM_OAM         ((volatile ObjAttr*)0x07000000)
 
+#define BG_MODE_MASK 0x0007
+#define BG_MODE_BITMAP_FIRST 3u
+#define BG_MODE_BITMAP_LAST 5u
 #define MODE_0       0x0000
 #define FORCED_BLANK 0x0080
-#define BG0_ON       0x0100
 #define OBJ_ON       0x1000
 #define OBJ_1D_MAP   0x0040
-
-#define BG_COLOR_16     0x0000
-#define BG_CHAR_BASE(n) (((n) & 3) << 2)
-#define BG_SCREEN_BASE(n) (((n) & 31) << 8)
-#define BG_SIZE_0 0x0000
-#define BG_PRIORITY_0 0x0000
-#define MENU_BG_SCREENBLOCK 28u
 
 #define KEY_A     0x0001
 #define KEY_B     0x0002
@@ -56,17 +53,41 @@ extern uint32_t rtc_state_is_initialized(void);
 #define KEY_LEFT  0x0020
 #define KEY_UP    0x0040
 #define KEY_DOWN  0x0080
+#define KEY_R     0x0100
+#define KEY_L     0x0200
+#define KEY_MENU_COMBO (KEY_L | KEY_R | KEY_SELECT | KEY_START)
 
 #define ATTR0_4BPP   0x0000
 #define ATTR0_SQUARE 0x0000
+#define ATTR0_WIDE   0x4000
 #define ATTR0_TALL   0x8000
 #define ATTR0_HIDE   0x0200
+#define ATTR0_MODE_MASK 0x0300
+#define ATTR0_COLOR_256 0x2000
 #define ATTR1_SIZE_8 0x0000
+#define ATTR1_SIZE_32x16 (2u << 14)
 #define ATTR2_PRIO0  0x0000
+#define ATTR2_PRIO3  0x0C00
 #define ATTR2_PALBANK(n) (((n) & 15) << 12)
+#define ATTR2_TILE_MASK 0x03FF
+
+#define OBJ_TILE_COUNT 1024u
+#define OBJ_TILE_BITMAP_MODE_MIN 512u
+#define OBJ_TILE_HALFWORDS 16u
+#define MENU_RUNTIME_OBJ_TILES_COUNT (MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS / OBJ_TILE_HALFWORDS)
+#define MENU_RUNTIME_OBJ_TILE_BASE_ALIGNMENT 8u
+#define MENU_RUNTIME_OBJ_TILE_BASE_INVALID 0xFFFFu
 
 #define SOUNDCNT_H_DMA_OUTPUT_MASK 0x3300u
 #define SOUNDCNT_H_FIFO_RESET_MASK 0x8800u
+#define SOUNDCNT_H_FIFO_A_OUTPUT_MASK 0x0300u
+#define SOUNDCNT_H_FIFO_B_OUTPUT_MASK 0x3000u
+#define SOUNDCNT_H_FIFO_A_TIMER_1 0x0400u
+#define SOUNDCNT_H_FIFO_B_TIMER_1 0x4000u
+#define DMA_ENABLE 0x8000u
+#define DMA_START_TIMING_MASK 0x3000u
+#define DMA_START_SPECIAL 0x3000u
+#define TIMER_ENABLE 0x0080u
 
 typedef struct {
     uint16_t attr0;
@@ -91,6 +112,17 @@ typedef struct {
     uint16_t soundcnt_h;
 } AudioBackup;
 
+typedef struct {
+    uint16_t dispcnt;
+    uint16_t soundcnt_l;
+    uint16_t soundcnt_h;
+    uint16_t sound_timer_mask;
+    uint16_t timer_cnt_h[2];
+    uint16_t dma_cnt_h[4];
+    uint16_t obj_palette[16];
+    ObjAttr oam[128];
+} RuntimeBackup;
+
 static const uint8_t kDaysPerMonth[2][12] = {
     {31,28,31,30,31,30,31,31,30,31,30,31},
     {31,29,31,30,31,30,31,31,30,31,30,31},
@@ -112,6 +144,18 @@ static const uint16_t kSpeedCharX[3] = {189, 197, 205};
 static const uint16_t kFieldArrowX[7] = {48, 72, 97, 120, 144, 168, 209};
 static const uint16_t kTextY = 79;
 static const uint16_t kArrowY = 70;
+static const uint8_t kObjWidthTiles[3][4] = {
+    {1, 2, 4, 8},
+    {2, 4, 4, 8},
+    {1, 1, 2, 4},
+};
+static const uint8_t kObjHeightTiles[3][4] = {
+    {1, 2, 4, 8},
+    {1, 1, 2, 4},
+    {2, 4, 4, 8},
+};
+
+static void wait_vblank(void);
 
 enum {
     FIELD_YEAR = 0,
@@ -172,6 +216,11 @@ static void mem_copy16(volatile uint16_t *dst, const uint16_t *src, uint32_t hal
     for (i = 0; i < halfwords; ++i) dst[i] = src[i];
 }
 
+static void mem_copy16_from_volatile(uint16_t *dst, volatile const uint16_t *src, uint32_t halfwords) {
+    uint32_t i;
+    for (i = 0; i < halfwords; ++i) dst[i] = src[i];
+}
+
 
 static void mem_fill16(volatile uint16_t *dst, uint16_t value, uint32_t halfwords) {
     uint32_t i;
@@ -189,6 +238,13 @@ static void obj_set_hide(volatile ObjAttr *oam, uint32_t index) {
 static void obj_set_8x8(volatile ObjAttr *oam, uint32_t index, uint16_t x, uint16_t y, uint16_t tile_index) {
     oam[index].attr0 = (uint16_t)((y & 0x00FFu) | ATTR0_4BPP | ATTR0_SQUARE);
     oam[index].attr1 = (uint16_t)((x & 0x01FFu) | ATTR1_SIZE_8);
+    oam[index].attr2 = (uint16_t)((tile_index & 0x03FFu) | ATTR2_PRIO0 | ATTR2_PALBANK(0));
+    oam[index].pad = 0;
+}
+
+static void obj_set_32x16_bg(volatile ObjAttr *oam, uint32_t index, uint16_t x, uint16_t y, uint16_t tile_index) {
+    oam[index].attr0 = (uint16_t)((y & 0x00FFu) | ATTR0_4BPP | ATTR0_WIDE);
+    oam[index].attr1 = (uint16_t)((x & 0x01FFu) | ATTR1_SIZE_32x16);
     oam[index].attr2 = (uint16_t)((tile_index & 0x03FFu) | ATTR2_PRIO0 | ATTR2_PALBANK(0));
     oam[index].pad = 0;
 }
@@ -262,26 +318,13 @@ static GlyphTilePair glyph_pair_for_char(char c) {
     }
 }
 
-static void draw_glyph(volatile ObjAttr *oam, uint16_t *sprite_index, uint16_t x, uint16_t y, char c) {
+static void draw_glyph(volatile ObjAttr *oam, uint16_t *sprite_index, uint16_t x, uint16_t y, uint16_t tile_base, char c) {
     GlyphTilePair pair = glyph_pair_for_char(c);
     if (pair.top != MENU_OBJ_TILE_NONE) {
-        obj_set_8x8(oam, (*sprite_index)++, x, y, pair.top);
+        obj_set_8x8(oam, (*sprite_index)++, x, y, (uint16_t)(tile_base + pair.top));
     }
     if (pair.bottom != MENU_OBJ_TILE_NONE) {
-        obj_set_8x8(oam, (*sprite_index)++, x, (uint16_t)(y + 8u), pair.bottom);
-    }
-}
-
-static void copy_bg_map_active(void) {
-    volatile uint16_t *screen = MEM_VRAM_BG + (MENU_BG_SCREENBLOCK * 2048u / 2u);
-    uint32_t y;
-    mem_fill16(screen, MENU_BG_BLANK_TILE_INDEX, 32u * 32u);
-    for (y = 0; y < MENU_BG_MAP_ACTIVE_H; ++y) {
-        mem_copy16(
-            screen + ((MENU_BG_MAP_ACTIVE_Y + y) * 32u) + MENU_BG_MAP_ACTIVE_X,
-            &menu_bg_map_active[y * MENU_BG_MAP_ACTIVE_W],
-            MENU_BG_MAP_ACTIVE_W
-        );
+        obj_set_8x8(oam, (*sprite_index)++, x, (uint16_t)(y + 8u), (uint16_t)(tile_base + pair.bottom));
     }
 }
 
@@ -298,24 +341,229 @@ static void audio_restore(const AudioBackup *backup) {
     REG_SOUNDCNT_L = backup->soundcnt_l;
 }
 
-static void draw_background(void) {
-    /* Force blank while touching VRAM/palette/OAM, and reset scroll so the
-       tiled background matches the mockup even if the game had BG0 scrolled. */
-    REG_DISPCNT = FORCED_BLANK;
-    REG_BG0HOFS = 0;
-    REG_BG0VOFS = 0;
-    mem_copy16(MEM_BG_PALETTE, menu_bg_palette, 16);
+static void oam_backup(ObjAttr *dst) {
+    uint32_t i;
+    for (i = 0; i < 128u; ++i) {
+        dst[i].attr0 = MEM_OAM[i].attr0;
+        dst[i].attr1 = MEM_OAM[i].attr1;
+        dst[i].attr2 = MEM_OAM[i].attr2;
+        dst[i].pad = MEM_OAM[i].pad;
+    }
+}
+
+static void oam_restore(const ObjAttr *src) {
+    uint32_t i;
+    for (i = 0; i < 128u; ++i) {
+        MEM_OAM[i].attr0 = src[i].attr0;
+        MEM_OAM[i].attr1 = src[i].attr1;
+        MEM_OAM[i].attr2 = src[i].attr2;
+        MEM_OAM[i].pad = src[i].pad;
+    }
+}
+
+static uint8_t obj_range_overlaps(uint16_t start_a, uint16_t count_a, uint16_t start_b, uint16_t count_b) {
+    uint32_t end_a = (uint32_t)start_a + count_a;
+    uint32_t end_b = (uint32_t)start_b + count_b;
+    return (uint8_t)(start_a < end_b && start_b < end_a);
+}
+
+static uint16_t obj_tile_span(const ObjAttr *obj, uint16_t dispcnt) {
+    uint16_t attr0 = obj->attr0;
+    uint16_t attr1 = obj->attr1;
+    uint16_t shape = (uint16_t)(attr0 >> 14);
+    uint16_t size = (uint16_t)(attr1 >> 14);
+    uint16_t width_tiles;
+    uint16_t height_tiles;
+    uint16_t depth = (attr0 & ATTR0_COLOR_256) ? 2u : 1u;
+
+    if (shape >= 3u) return 0;
+    width_tiles = kObjWidthTiles[shape][size];
+    height_tiles = kObjHeightTiles[shape][size];
+
+    if (dispcnt & OBJ_1D_MAP) {
+        return (uint16_t)(width_tiles * height_tiles * depth);
+    }
+
+    return (uint16_t)(((height_tiles - 1u) * 32u) + (width_tiles * depth));
+}
+
+static uint8_t runtime_tile_window_overlaps_oam(const RuntimeBackup *backup, uint16_t tile_base) {
+    uint32_t i;
+    uint16_t tile_count = (uint16_t)MENU_RUNTIME_OBJ_TILES_COUNT;
+    for (i = 0; i < 128u; ++i) {
+        uint16_t attr0 = backup->oam[i].attr0;
+        uint16_t obj_tile;
+        uint16_t obj_span;
+
+        if ((attr0 & ATTR0_MODE_MASK) == ATTR0_HIDE) continue;
+
+        obj_tile = (uint16_t)(backup->oam[i].attr2 & ATTR2_TILE_MASK);
+        obj_span = obj_tile_span(&backup->oam[i], backup->dispcnt);
+        if (obj_span == 0) continue;
+        if (obj_range_overlaps(tile_base, tile_count, obj_tile, obj_span)) return 1;
+    }
+    return 0;
+}
+
+static uint8_t obj_vram_window_is_zero(uint16_t tile_base) {
+    volatile const uint16_t *src = MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS);
+    uint32_t i;
+    for (i = 0; i < MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS; ++i) {
+        if (src[i] != 0) return 0;
+    }
+    return 1;
+}
+
+static uint16_t runtime_obj_tile_min_base(uint16_t dispcnt) {
+    uint16_t mode = (uint16_t)(dispcnt & BG_MODE_MASK);
+    if (mode >= BG_MODE_BITMAP_FIRST && mode <= BG_MODE_BITMAP_LAST) return OBJ_TILE_BITMAP_MODE_MIN;
+    return 0;
+}
+
+static uint16_t select_runtime_obj_tile_base(const RuntimeBackup *backup) {
+    uint16_t tile_count = (uint16_t)MENU_RUNTIME_OBJ_TILES_COUNT;
+    uint16_t align = MENU_RUNTIME_OBJ_TILE_BASE_ALIGNMENT;
+    uint16_t min_base = runtime_obj_tile_min_base(backup->dispcnt);
+    uint16_t max_base;
+    uint16_t tile_base;
+
+    if (tile_count > (uint16_t)(OBJ_TILE_COUNT - min_base)) return MENU_RUNTIME_OBJ_TILE_BASE_INVALID;
+
+    max_base = (uint16_t)(OBJ_TILE_COUNT - tile_count);
+    max_base = (uint16_t)(max_base & (uint16_t)~(align - 1u));
+    tile_base = max_base;
+
+    for (;;) {
+        if (
+            !runtime_tile_window_overlaps_oam(backup, tile_base)
+            && obj_vram_window_is_zero(tile_base)
+        ) {
+            return tile_base;
+        }
+        if ((uint16_t)(tile_base - min_base) < align) break;
+        tile_base = (uint16_t)(tile_base - align);
+    }
+
+    return MENU_RUNTIME_OBJ_TILE_BASE_INVALID;
+}
+
+static uint8_t is_direct_sound_dma(uint32_t channel, uint16_t cnt_h) {
+    return (uint8_t)(
+        (channel == 1u || channel == 2u)
+        && (cnt_h & DMA_ENABLE)
+        && ((cnt_h & DMA_START_TIMING_MASK) == DMA_START_SPECIAL)
+    );
+}
+
+static uint16_t direct_sound_timer_mask(uint16_t soundcnt_h) {
+    uint16_t mask = 0;
+
+    if (soundcnt_h & SOUNDCNT_H_FIFO_A_OUTPUT_MASK) {
+        mask |= (soundcnt_h & SOUNDCNT_H_FIFO_A_TIMER_1) ? 2u : 1u;
+    }
+    if (soundcnt_h & SOUNDCNT_H_FIFO_B_OUTPUT_MASK) {
+        mask |= (soundcnt_h & SOUNDCNT_H_FIFO_B_TIMER_1) ? 2u : 1u;
+    }
+
+    return mask;
+}
+
+static void runtime_backup_and_pause(RuntimeBackup *backup) {
+    backup->dispcnt = REG_DISPCNT;
+    backup->soundcnt_l = REG_SOUNDCNT_L;
+    backup->soundcnt_h = (uint16_t)(REG_SOUNDCNT_H & ~SOUNDCNT_H_FIFO_RESET_MASK);
+    backup->sound_timer_mask = direct_sound_timer_mask(backup->soundcnt_h);
+    backup->timer_cnt_h[0] = REG_TM0CNT_H;
+    backup->timer_cnt_h[1] = REG_TM1CNT_H;
+    backup->dma_cnt_h[0] = REG_DMA0CNT_H;
+    backup->dma_cnt_h[1] = REG_DMA1CNT_H;
+    backup->dma_cnt_h[2] = REG_DMA2CNT_H;
+    backup->dma_cnt_h[3] = REG_DMA3CNT_H;
+
+    REG_SOUNDCNT_H = (uint16_t)(backup->soundcnt_h & ~SOUNDCNT_H_DMA_OUTPUT_MASK);
+    REG_SOUNDCNT_L = 0;
+    if (backup->sound_timer_mask & 1u) REG_TM0CNT_H = (uint16_t)(backup->timer_cnt_h[0] & ~TIMER_ENABLE);
+    if (backup->sound_timer_mask & 2u) REG_TM1CNT_H = (uint16_t)(backup->timer_cnt_h[1] & ~TIMER_ENABLE);
+
+    REG_DMA0CNT_H = 0;
+    if (!is_direct_sound_dma(1u, backup->dma_cnt_h[1])) REG_DMA1CNT_H = 0;
+    if (!is_direct_sound_dma(2u, backup->dma_cnt_h[2])) REG_DMA2CNT_H = 0;
+    REG_DMA3CNT_H = 0;
+
+    wait_vblank();
+    mem_copy16_from_volatile(backup->obj_palette, MEM_OBJ_PALETTE, 16);
+    oam_backup(backup->oam);
+}
+
+static void runtime_restore(const RuntimeBackup *backup, uint16_t tile_base) {
+    wait_vblank();
+    if (tile_base != MENU_RUNTIME_OBJ_TILE_BASE_INVALID) {
+        mem_fill16(MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS), 0, MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS);
+    }
+    mem_copy16(MEM_OBJ_PALETTE, backup->obj_palette, 16);
+    oam_restore(backup->oam);
+
+    REG_DMA0CNT_H = backup->dma_cnt_h[0];
+    if (!is_direct_sound_dma(1u, backup->dma_cnt_h[1])) REG_DMA1CNT_H = backup->dma_cnt_h[1];
+    if (!is_direct_sound_dma(2u, backup->dma_cnt_h[2])) REG_DMA2CNT_H = backup->dma_cnt_h[2];
+    REG_DMA3CNT_H = backup->dma_cnt_h[3];
+
+    if (backup->sound_timer_mask & 1u) REG_TM0CNT_H = backup->timer_cnt_h[0];
+    if (backup->sound_timer_mask & 2u) REG_TM1CNT_H = backup->timer_cnt_h[1];
+    REG_SOUNDCNT_H = backup->soundcnt_h;
+    REG_SOUNDCNT_L = backup->soundcnt_l;
+    REG_DISPCNT = backup->dispcnt;
+}
+
+static uint16_t runtime_menu_dispcnt(uint16_t game_dispcnt) {
+    return (uint16_t)((game_dispcnt | OBJ_ON | OBJ_1D_MAP) & (uint16_t)~FORCED_BLANK);
+}
+
+static uint16_t draw_runtime_background(uint16_t tile_base, uint16_t sprite_index) {
+    uint32_t row;
+    uint32_t col;
+
     mem_copy16(MEM_OBJ_PALETTE, menu_obj_palette, 16);
-    mem_copy16(MEM_VRAM_BG, (const uint16_t*)menu_bg_tiles, MENU_BG_TILES_SIZE_HALFWORDS);
-    copy_bg_map_active();
-    mem_copy16(MEM_VRAM_OBJ, (const uint16_t*)menu_obj_tiles, MENU_OBJ_TILES_SIZE_HALFWORDS);
-    REG_BG0CNT = (uint16_t)(BG_PRIORITY_0 | BG_CHAR_BASE(0) | BG_SCREEN_BASE(MENU_BG_SCREENBLOCK) | BG_COLOR_16 | BG_SIZE_0);
-    REG_DISPCNT = (uint16_t)(MODE_0 | BG0_ON | OBJ_ON | OBJ_1D_MAP);
+    mem_copy16(
+        MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS),
+        menu_obj_tiles,
+        MENU_OBJ_TILES_SIZE_HALFWORDS
+    );
+    mem_copy16(
+        MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS) + MENU_OBJ_TILES_SIZE_HALFWORDS,
+        menu_runtime_bg_tiles,
+        MENU_RUNTIME_BG_TILES_SIZE_HALFWORDS
+    );
+
+    for (row = 0; row < MENU_RUNTIME_BG_ROWS; ++row) {
+        for (col = 0; col < MENU_RUNTIME_BG_COLS; ++col) {
+            uint32_t map_index = row * MENU_RUNTIME_BG_COLS + col;
+            uint16_t tile_start = menu_runtime_bg_tile_starts[map_index];
+            if (tile_start == MENU_OBJ_TILE_NONE) continue;
+            obj_set_32x16_bg(
+                MEM_OAM,
+                sprite_index++,
+                (uint16_t)(col * 32u),
+                (uint16_t)(row * 16u),
+                (uint16_t)(tile_base + tile_start)
+            );
+        }
+    }
+
+    return sprite_index;
 }
 
 static void clear_oam(void) {
     uint32_t i;
     for (i = 0; i < 128u; ++i) obj_set_hide(MEM_OAM, i);
+}
+
+static void draw_background(void) {
+    REG_DISPCNT = FORCED_BLANK;
+    clear_oam();
+    mem_copy16(MEM_BG_PALETTE, menu_obj_palette, 16);
+    draw_runtime_background(0, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
+    REG_DISPCNT = (uint16_t)(MODE_0 | OBJ_ON | OBJ_1D_MAP);
 }
 
 static void wait_vblank(void) {
@@ -327,11 +575,22 @@ static uint16_t read_keys(void) {
     return (uint16_t)(~REG_KEYINPUT) & 0x03FFu;
 }
 
-static void render_menu(const RtcFields *f, uint8_t selected_field) {
+static void wait_keys_release(uint16_t key_mask) {
+    while (read_keys() & key_mask) {
+        wait_vblank();
+    }
+}
+
+static void wait_hotkey_release(void) {
+    while ((read_keys() & KEY_MENU_COMBO) == KEY_MENU_COMBO) {
+        wait_vblank();
+    }
+}
+
+static void render_menu_from_index(const RtcFields *f, uint8_t selected_field, uint16_t sprite_index, uint16_t tile_base, uint16_t sprite_limit) {
     volatile ObjAttr *oam = MEM_OAM;
     char datetime_chars[18];
     uint32_t i;
-    uint16_t sprite_index = 0;
     datetime_chars[0]  = (char)('0' + ((f->year / 1000u) % 10u));
     datetime_chars[1]  = (char)('0' + ((f->year / 100u) % 10u));
     datetime_chars[2]  = (char)('0' + ((f->year / 10u) % 10u));
@@ -352,7 +611,7 @@ static void render_menu(const RtcFields *f, uint8_t selected_field) {
     datetime_chars[17] = (char)('0' + (f->second % 10u));
 
     for (i = 0; i < 18u; ++i) {
-        draw_glyph(oam, &sprite_index, kDateCharX[i], kTextY, datetime_chars[i]);
+        draw_glyph(oam, &sprite_index, kDateCharX[i], kTextY, tile_base, datetime_chars[i]);
     }
     {
         uint8_t speed = f->speed;
@@ -368,18 +627,21 @@ static void render_menu(const RtcFields *f, uint8_t selected_field) {
         }
 
         if (digit_start == 0u) {
-            draw_glyph(oam, &sprite_index, kSpeedCharX[0], kTextY, (char)('0' + hundreds));
+            draw_glyph(oam, &sprite_index, kSpeedCharX[0], kTextY, tile_base, (char)('0' + hundreds));
         }
         if (digit_start <= 1u) {
-            draw_glyph(oam, &sprite_index, kSpeedCharX[1], kTextY, (char)('0' + tens));
+            draw_glyph(oam, &sprite_index, kSpeedCharX[1], kTextY, tile_base, (char)('0' + tens));
         }
-        draw_glyph(oam, &sprite_index, kSpeedCharX[2], kTextY, (char)('0' + ones));
+        draw_glyph(oam, &sprite_index, kSpeedCharX[2], kTextY, tile_base, (char)('0' + ones));
 
-        /* The multiplier glyph is visually one pixel too high in the source strip. */
-        draw_glyph(oam, &sprite_index, 213u, (uint16_t)(kTextY + 1u), 'x');
+        draw_glyph(oam, &sprite_index, 213u, kTextY, tile_base, 'x');
     }
-    obj_set_8x8(oam, sprite_index++, (uint16_t)(kFieldArrowX[selected_field] - 4u), kArrowY, GLYPH_ARROW);
-    for (; sprite_index < 128u; ++sprite_index) obj_set_hide(oam, sprite_index);
+    obj_set_8x8(oam, sprite_index++, (uint16_t)(kFieldArrowX[selected_field] - 4u), kArrowY, (uint16_t)(tile_base + GLYPH_ARROW));
+    for (; sprite_index < sprite_limit; ++sprite_index) obj_set_hide(oam, sprite_index);
+}
+
+static void render_menu(const RtcFields *f, uint8_t selected_field) {
+    render_menu_from_index(f, selected_field, 0, 0, 128u);
 }
 
 static void apply_delta(RtcFields *f, uint8_t selected_field, int delta) {
@@ -424,15 +686,9 @@ static void apply_delta(RtcFields *f, uint8_t selected_field, int delta) {
     }
 }
 
-void fake_rtc_menu_run(void) {
-    uint16_t prev_keys = 0;
-    uint16_t hold_up = 0;
-    uint16_t hold_down = 0;
-    RtcFields fields;
-    AudioBackup audio_backup;
+static void load_menu_fields(RtcFields *fields) {
     uint32_t menu_timestamp = FAKE_RTC_DEFAULT_TIMESTAMP;
     uint8_t menu_speed = (uint8_t)(FAKE_RTC_DEFAULT_SPEED & 0xFFu);
-    uint8_t selected = 0;
     uint32_t runtime_timestamp = 0;
     uint32_t runtime_speed = 0xFFFFFFFFu;
 
@@ -441,11 +697,19 @@ void fake_rtc_menu_run(void) {
         runtime_state_for_menu(runtime_timestamp, runtime_speed, &menu_timestamp, &menu_speed);
     }
 
-    audio_backup_and_mute(&audio_backup);
-    draw_background();
-    clear_oam();
-    timestamp_to_fields(menu_timestamp, menu_speed, &fields);
-    render_menu(&fields, selected);
+    timestamp_to_fields(menu_timestamp, menu_speed, fields);
+}
+
+static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint8_t wait_for_hotkey_release, uint16_t tile_base, uint16_t sprite_limit, uint8_t initial_rendered, RtcFields fields) {
+    uint16_t prev_keys = 0;
+    uint16_t hold_up = 0;
+    uint16_t hold_down = 0;
+    uint32_t menu_timestamp = FAKE_RTC_DEFAULT_TIMESTAMP;
+    uint8_t menu_speed = (uint8_t)(FAKE_RTC_DEFAULT_SPEED & 0xFFu);
+    uint8_t selected = 0;
+
+    if (!initial_rendered) render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
+    if (wait_for_hotkey_release) wait_hotkey_release();
 
     for (;;) {
         uint16_t keys;
@@ -478,19 +742,50 @@ void fake_rtc_menu_run(void) {
             hold_down = 0;
         }
 
-        render_menu(&fields, selected);
+        render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
 
-        if ((keys & (KEY_A | KEY_START)) && !(prev_keys & (KEY_A | KEY_START))) {
+        if ((keys & KEY_A) && !(prev_keys & KEY_A)) {
             menu_speed = (uint8_t)(fields.speed & 0xFFu);
             menu_timestamp = fields_to_timestamp(&fields);
             rtc_state_write(
                 menu_timestamp - ((uint32_t)menu_speed * FAKE_RTC_TICK_SECONDS),
                 menu_speed
             );
-            audio_restore(&audio_backup);
+            wait_keys_release(KEY_A);
             break;
         }
 
         prev_keys = keys;
     }
+}
+
+void fake_rtc_menu_run(void) {
+    AudioBackup audio_backup;
+    RtcFields fields;
+
+    load_menu_fields(&fields);
+    audio_backup_and_mute(&audio_backup);
+    draw_background();
+    fake_rtc_menu_loop(0, 0, 0, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 0, fields);
+    audio_restore(&audio_backup);
+}
+
+void fake_rtc_menu_run_runtime(void) {
+    RuntimeBackup backup;
+    RtcFields fields;
+    uint16_t tile_base;
+
+    load_menu_fields(&fields);
+    runtime_backup_and_pause(&backup);
+    tile_base = select_runtime_obj_tile_base(&backup);
+    if (tile_base == MENU_RUNTIME_OBJ_TILE_BASE_INVALID) {
+        runtime_restore(&backup, tile_base);
+        return;
+    }
+    wait_vblank();
+    draw_runtime_background(tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
+    render_menu_from_index(&fields, 0, 0, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
+    REG_DISPCNT = runtime_menu_dispcnt(backup.dispcnt);
+    fake_rtc_menu_loop(0, 1, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 1, fields);
+    runtime_restore(&backup, tile_base);
 }
