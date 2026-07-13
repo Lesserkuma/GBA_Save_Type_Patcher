@@ -1,0 +1,56 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+:root {
+  color-scheme: dark;
+  --bg: #0d0f1a;
+  --bg2: #151829;
+  --bg3: #1c2039;
+  --bg4: #252a4a;
+  --accent: #7c5cfc;
+  --accent2: #5e8cfc;
+  --accent-glow: rgba(124, 92, 252, .25);
+  --accent-glow-soft: rgba(124, 92, 252, .1);
+  --accent-border: rgba(124, 92, 252, .3);
+  --accent-surface: rgba(124, 92, 252, .18);
+  --accent2-weak: rgba(94, 140, 252, .12);
+  --accent2-border-soft: rgba(94, 140, 252, .22);
+  --accent2-surface: rgba(94, 140, 252, .25);
+  --accent2-border: rgba(94, 140, 252, .28);
+  --accent2-badge-border: rgba(94, 140, 252, .34);
+  --accent2-selected: rgba(94, 140, 252, .42);
+  --accent2-selected-hover: rgba(94, 140, 252, .55);
+  --accent2-hover-border: rgba(94, 140, 252, .62);
+  --accent2-active-border: rgba(94, 140, 252, .7);
+  --focus-border: rgba(139, 184, 255, .8);
+  --green: #3fdc8e;
+  --green-surface-soft: rgba(63, 220, 142, .1);
+  --green-surface: rgba(63, 220, 142, .12);
+  --green-border-soft: rgba(63, 220, 142, .3);
+  --green-badge-border: rgba(63, 220, 142, .34);
+  --green-border: rgba(63, 220, 142, .35);
+  --red: #fc5c7c;
+  --red-surface: rgba(252, 92, 124, .12);
+  --red-border-soft: rgba(252, 92, 124, .3);
+  --red-border: rgba(252, 92, 124, .35);
+  --yellow: #fcd34d;
+  --yellow-surface: rgba(252, 211, 77, .12);
+  --yellow-border-soft: rgba(252, 211, 77, .3);
+  --yellow-border: rgba(252, 211, 77, .35);
+  --text: #e2e8f0;
+  --text2: #94a3b8;
+  --text3: #64748b;
+  --focus: #8bb8ff;
+  --white: #fff;
+  --white-04: rgba(255, 255, 255, .04);
+  --white-06: rgba(255, 255, 255, .06);
+  --white-15: rgba(255, 255, 255, .15);
+  --surface-panel: rgba(21, 24, 41, .84);
+  --surface-card: rgba(28, 32, 57, .86);
+  --surface-deep-66: rgba(13, 15, 26, .66);
+  --surface-deep-72: rgba(13, 15, 26, .72);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 4px 24px rgba(0, 0, 0, .4);
+  --transition: color .25s cubic-bezier(.4, 0, .2, 1), background-color .25s cubic-bezier(.4, 0, .2, 1), border-color .25s cubic-bezier(.4, 0, .2, 1), opacity .25s cubic-bezier(.4, 0, .2, 1), transform .25s cubic-bezier(.4, 0, .2, 1), box-shadow .25s cubic-bezier(.4, 0, .2, 1);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif
+}

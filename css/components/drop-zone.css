@@ -1,0 +1,144 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+button:focus-visible,
+input:focus-visible,
+.drop-zone:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px
+}
+
+.drop-panel {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  margin-top: .8rem
+}
+
+.drop-zone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 10rem;
+  align-items: center;
+  justify-content: center;
+  gap: .9rem;
+  overflow: hidden;
+  padding: 2.5rem 1rem;
+  border: 2px dashed var(--bg4);
+  border-radius: var(--radius);
+  background: linear-gradient(145deg, var(--bg2), var(--bg3));
+  text-align: center;
+  transition: var(--transition);
+  cursor: pointer
+}
+
+.drop-zone * {
+  cursor: pointer
+}
+
+.drop-zone::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, var(--accent-glow), transparent 70%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .4s
+}
+
+.drop-zone:hover,
+.drop-zone[data-drag=true] {
+  border-color: var(--accent);
+  transform: translateY(-2px)
+}
+
+.drop-zone:hover::before,
+.drop-zone[data-drag=true]::before {
+  opacity: 1
+}
+
+.drop-icon {
+  position: relative;
+  z-index: 1;
+  color: var(--text2);
+  font-size: 2.5rem;
+  line-height: 1;
+  opacity: .55;
+  transition: var(--transition)
+}
+
+.drop-zone:hover .drop-icon,
+.drop-zone[data-drag=true] .drop-icon {
+  color: var(--accent2);
+  opacity: 1;
+  transform: scale(1.1)
+}
+
+.drop-zone h2,
+.drop-zone p {
+  position: relative;
+  z-index: 1
+}
+
+.drop-zone h2 {
+  margin-bottom: .25rem;
+  font-size: 1rem
+}
+
+.drop-zone p {
+  color: var(--text2);
+  font-size: .8rem
+}
+
+.import-progress {
+  display: grid;
+  gap: .45rem;
+  margin-top: .7rem;
+  padding: .7rem .85rem;
+  border: 1px solid var(--accent2-border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+  color: var(--text2);
+  font-size: .76rem
+}
+
+.import-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem
+}
+
+.import-progress progress {
+  width: 100%;
+  height: .55rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg3);
+  accent-color: var(--accent2)
+}
+
+.import-progress progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--bg3)
+}
+
+.import-progress progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2))
+}
+
+.import-progress progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2))
+}
+
+.drop-zone[data-importing=true] {
+  border-color: var(--accent2-active-border)
+}
+
+.drop-zone,
+.drop-zone * {
+  cursor: pointer
+}

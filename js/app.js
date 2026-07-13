@@ -1,77 +1,180 @@
-import { addFilesToState, clearRoms, isRomPatchable, removeRom } from "./files.js";
-import { state, clearZipUrl } from "./state.js";
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import {
+  addFilesToState,
+  isRomPatchable,
+  removeRom,
+  saveFileMatchesRom,
+} from "./files.js";
+import {
+  clearFiles,
+  clearZipUrl,
+  removeSave,
+  replaceZipUrl,
+  setImporting,
+  state,
+  updateRom,
+} from "./state.js";
 import { makeOutputName } from "./core/rom.js";
+import { PatchError } from "./core/errors.js";
+import { PATCH_MODES, PATCH_STATUS } from "./domain/constants.js";
+import { UI_TEXT, uiMessage } from "./domain/messages.js";
+import { assertRetainedOutputBudget } from "./core/memory-budget.js";
 import { createZipBlob } from "./zip-writer.js";
 import { patchRomInWorker } from "./worker-client.js";
-import { bindElements, getElements, hideImportProgress, markPatching, readValidatedOptions, renderOptions, renderRomList, setImportProgress, setStatus, syncOptionsFromForm } from "./ui.js";
+import {
+  bindElements,
+  getElements,
+  hideImportProgress,
+  markPatching,
+  readValidatedOptions,
+  renderOptions,
+  renderRomList,
+  setImportProgress,
+  setStatus,
+  syncOptionsFromForm,
+} from "./ui.js";
+
 function triggerDownload(blob, fileName) {
-  clearZipUrl();
-  state.lastZipUrl = URL.createObjectURL(blob);
+  replaceZipUrl(URL.createObjectURL(blob));
   const link = document.createElement("a");
   link.href = state.lastZipUrl;
   link.download = fileName;
   document.body.append(link);
   link.click();
   link.remove();
+  // The URL remains alive until the next download or explicit list clear so
+  // browsers have enough time to consume it after the synthetic click.
 }
-async function handleFiles(files) {
-  const fileList = [...files];
-  if (!fileList.length || state.isImporting) return;
 
-  state.isImporting = true;
+async function handleFiles(fileInput) {
+  const files = [...fileInput];
+  if (!files.length || state.isImporting) return;
+  setImporting(state, true);
   renderRomList(state);
-  setStatus("Adding files...", "neutral");
+  setStatus(UI_TEXT.ADDING_FILES, "neutral");
 
-  let result = null;
-  let importError = null;
   try {
-    result = await addFilesToState(fileList, state, { onProgress: setImportProgress });
+    const result = await addFilesToState(files, state, { onProgress: setImportProgress });
+    renderRomList(state, { addedIds: new Set(result.addedRomIds) });
+    setImportProgress({ current: files.length, total: files.length });
+    hideImportProgress(600);
+    if (result.saveConflicts.length) {
+      setStatus(uiMessage.conflictingSaves(result.saveConflicts), "warning");
+    } else if (result.ignored.length) {
+      setStatus(uiMessage.ignoredFiles(result.ignored), "warning");
+    } else if (result.addedRoms) {
+      setStatus(uiMessage.romsAdded(result.addedRoms), "success");
+    } else {
+      setStatus(UI_TEXT.SAVE_FILES_CACHED, "success");
+    }
   } catch (error) {
-    importError = error;
-  } finally {
-    state.isImporting = false;
-  }
-
-  if (importError) {
     hideImportProgress();
+    setStatus(error.message || String(error), "error", true);
+  } finally {
+    setImporting(state, false);
     renderRomList(state);
-    setStatus(importError.message || String(importError), "error");
-    return;
   }
-
-  renderRomList(state, { addedIds: new Set(result.addedRomIds) });
-  setImportProgress({ current: fileList.length, total: fileList.length });
-  hideImportProgress(600);
-  if (result.ignored.length) setStatus(`Ignored unsupported files: ${result.ignored.join(", ")}`, "warning");
-  else if (result.addedRoms) setStatus(`${result.addedRoms} ROM file(s) added.`, "success");
-  else setStatus("Save file(s) cached for Batteryless SRAM mode.", "success");
 }
-function updateOptionsFromUi() { const wasBatteryless = state.options.patchMode === "batteryless-sram"; syncOptionsFromForm(state); renderOptions(state); const isBatteryless = state.options.patchMode === "batteryless-sram"; if (wasBatteryless !== isBatteryless) renderRomList(state); }
+
+function updateOptionsFromUi() {
+  const wasBatteryless = state.options.patchMode === PATCH_MODES.BATTERYLESS_SRAM;
+  syncOptionsFromForm(state);
+  renderOptions(state);
+  if (wasBatteryless !== (state.options.patchMode === PATCH_MODES.BATTERYLESS_SRAM)) renderRomList(state);
+}
+
 function resultWarningText(result) {
   return [...new Set((result?.warnings || []).filter((warning) => typeof warning === "string" && warning.trim()))].join("\n");
 }
-function patchResultStatus(result, changed, hasWarnings) {
-  const alreadyCompatible = result.status === "already_compatible";
-  const alreadyPatched = result.status?.startsWith("already")
-    || result.waitstate?.status === "already_patched"
-    || result.batteryless?.status === "already_patched"
-    || result.rtc?.status === "already_patched";
-  let status;
-  if (changed) status = result.save_embedded ? "Patched + save embedded" : "Patched";
-  else if (alreadyCompatible) status = "Already compatible";
-  else if (alreadyPatched) status = "Already patched";
-  else status = hasWarnings ? "Skipped" : "No changes";
-  return hasWarnings ? `${status} + warning` : status;
+
+function patchResultStatusCode(result, changed, hasWarnings) {
+  if (changed || result.statusCode === PATCH_STATUS.CHANGED) return PATCH_STATUS.CHANGED;
+  return hasWarnings ? PATCH_STATUS.SKIPPED : PATCH_STATUS.UNCHANGED;
 }
+
+async function readRomBuffer(rom) {
+  if (rom.cachedBytes instanceof Uint8Array) return rom.cachedBytes.slice().buffer;
+  return rom.file.arrayBuffer();
+}
+
+async function patchOneRom(romEntry, options, zipEntries) {
+  let rom = romEntry;
+  if (!rom.isHeaderValid) {
+    updateRom(state, rom.id, {
+      error: rom.error || UI_TEXT.INVALID_GBA_HEADER,
+      statusCode: PATCH_STATUS.INVALID,
+    });
+    return;
+  }
+  if (!isRomPatchable(rom)) {
+    return;
+  }
+
+  updateRom(state, rom.id, {
+    statusCode: PATCH_STATUS.PATCHING,
+    error: null,
+    warning: null,
+  });
+  renderRomList(state);
+  const romBuffer = await readRomBuffer(rom);
+  updateRom(state, rom.id, { cachedBytes: null });
+  rom = { ...rom, cachedBytes: null };
+  let saveBuffer = null;
+  if (options.patchMode === PATCH_MODES.BATTERYLESS_SRAM) {
+    if (state.saveConflictsByBaseName.has(rom.baseName)) {
+      throw new PatchError(UI_TEXT.SAVE_BASENAME_CONFLICT, {
+        code: "SAVE_BASENAME_CONFLICT",
+        stage: "fileValidation",
+        context: { baseName: rom.baseName },
+        isRecoverable: true,
+      });
+    }
+    const saveRecord = state.saveFilesByBaseName.get(rom.baseName);
+    if (saveRecord && !saveFileMatchesRom(saveRecord, rom)) {
+      throw new PatchError(
+        uiMessage.exactSaveSize(saveRecord.name || saveRecord.file.name, rom.saveSizeBytes),
+        {
+          code: "SAVE_SIZE_MISMATCH",
+          stage: "fileValidation",
+          context: {
+            fileName: saveRecord.name || saveRecord.file.name,
+            expectedBytes: rom.saveSizeBytes,
+            actualBytes: saveRecord.size ?? saveRecord.file.size,
+          },
+          isRecoverable: true,
+        },
+      );
+    }
+    if (saveRecord) saveBuffer = await saveRecord.file.arrayBuffer();
+  }
+  const response = await patchRomInWorker({
+    romId: rom.id,
+    romBuffer,
+    saveBuffer,
+    outputFileName: makeOutputName(rom.name),
+    options,
+  });
+  const warning = resultWarningText(response.result) || null;
+  const changed = (response.result.operations?.length || 0) > 0;
+  updateRom(state, rom.id, {
+    result: response.result,
+    warning,
+    statusCode: patchResultStatusCode(response.result, changed, Boolean(warning)),
+  });
+  if (changed) {
+    const outputBytes = new Uint8Array(response.patchedBuffer);
+    const retainedBytes = zipEntries.reduce((total, entry) => total + entry.bytes.byteLength, 0);
+    assertRetainedOutputBudget(retainedBytes, outputBytes.byteLength);
+    zipEntries.push({ name: response.outputFileName, bytes: outputBytes });
+  }
+}
+
 async function patchAllRoms() {
   if (state.isPatching) return;
   const patchableRoms = state.roms.filter(isRomPatchable);
   if (!patchableRoms.length) {
-    if (state.roms.some((rom) => rom.validHeader && rom.alreadyPatched)) {
-      setStatus("All valid ROMs are already patched.", "success");
-    } else {
-      setStatus("Add at least one valid ROM first.", "error");
-    }
+    setStatus(UI_TEXT.ADD_FILES_FIRST, "error");
     return;
   }
 
@@ -79,104 +182,127 @@ async function patchAllRoms() {
   try {
     options = readValidatedOptions(state);
   } catch (error) {
-    setStatus(error.message, "error");
+    setStatus(error.message || String(error), "error", true);
     return;
   }
 
-  markPatching(state, true);
-  setStatus("Patching ROMs…", "neutral");
   const zipEntries = [];
-  for (const rom of state.roms) {
-    if (!rom.validHeader) {
-      rom.error = rom.error || "Invalid GBA header.";
-      renderRomList(state);
-      continue;
-    }
-    if (!isRomPatchable(rom)) {
-      rom.status = "Already patched";
-      rom.error = null;
-      rom.warning = null;
-      renderRomList(state);
-      continue;
-    }
-    try {
-      rom.status = "Patching";
-      rom.error = null;
-      rom.warning = null;
-      renderRomList(state);
-      const romBuffer = await rom.file.arrayBuffer();
-      let saveBuffer = null;
-      if (options.patchMode === "batteryless-sram" && state.saveFilesByBaseName.has(rom.baseName)) {
-        saveBuffer = await state.saveFilesByBaseName.get(rom.baseName).file.arrayBuffer();
+  markPatching(state, true);
+  setStatus(UI_TEXT.PATCHING_ROMS, "neutral");
+  try {
+    for (const rom of state.roms) {
+      try {
+        await patchOneRom(rom, options, zipEntries);
+      } catch (error) {
+        updateRom(state, rom.id, {
+          error: error.message || String(error),
+          warning: null,
+          statusCode: PATCH_STATUS.FAILED,
+        });
       }
-      const response = await patchRomInWorker({ id: rom.id, romBuffer, saveBuffer, outputName: makeOutputName(rom.name), options });
-      rom.result = response.result;
-      rom.warning = resultWarningText(response.result) || null;
-      const changed = (response.result.operations?.length || 0) > 0;
-      rom.status = patchResultStatus(response.result, changed, Boolean(rom.warning));
-      if (changed) zipEntries.push({ name: response.outputName, bytes: new Uint8Array(response.patchedBuffer) });
-    } catch (error) {
-      rom.error = error.message || String(error);
-      rom.warning = null;
-      rom.status = "Error";
+      renderRomList(state);
     }
-    renderRomList(state);
+  } finally {
+    markPatching(state, false);
   }
 
-  markPatching(state, false);
-  const hasErrors = state.roms.some((rom) => rom.status === "Error");
+  const hasErrors = state.roms.some((rom) => rom.statusCode === PATCH_STATUS.FAILED);
   const hasWarnings = state.roms.some((rom) => Boolean(rom.warning));
   if (!zipEntries.length) {
-    if (hasErrors) setStatus("No ROMs could be patched. Check the errors in the ROM list.", "error");
-    else if (hasWarnings) setStatus("No ROM output was produced. Optional patches were skipped; check the warnings in the ROM list.", "warning");
-    else setStatus("No changes were necessary; the selected patch(es) were already present or the ROMs are already compatible.", "success");
+    if (hasErrors) setStatus(UI_TEXT.NO_PATCH_OUTPUT_ERROR, "error");
+    else if (hasWarnings) setStatus(UI_TEXT.NO_PATCH_OUTPUT_WARNING, "warning");
+    else setStatus(UI_TEXT.NO_CHANGES, "success");
     return;
   }
   if (zipEntries.length === 1) {
     triggerDownload(new Blob([zipEntries[0].bytes], { type: "application/octet-stream" }), zipEntries[0].name);
     setStatus(
-      hasErrors || hasWarnings ? "Patched ROM downloaded with warnings. Check the ROM list." : "Patched ROM downloaded.",
+      hasErrors || hasWarnings ? UI_TEXT.DOWNLOAD_WITH_WARNINGS : UI_TEXT.DOWNLOAD_COMPLETE,
       hasErrors || hasWarnings ? "warning" : "success",
     );
     return;
   }
   triggerDownload(createZipBlob(zipEntries), "GBA-ROM-Save-Patcher-output.zip");
   setStatus(
-    hasErrors || hasWarnings
-      ? `${zipEntries.length} patched ROM(s) added to the ZIP with warnings. Check the ROM list.`
-      : `${zipEntries.length} patched ROM(s) added to GBA-ROM-Save-Patcher-output.zip.`,
+    uiMessage.zipComplete(zipEntries.length, hasErrors || hasWarnings),
     hasErrors || hasWarnings ? "warning" : "success",
   );
 }
-function setupDropZone() { const { dropZone, fileInput } = getElements(); dropZone.addEventListener("click", () => fileInput.click()); dropZone.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); fileInput.click(); } }); fileInput.addEventListener("change", async () => { await handleFiles(fileInput.files); fileInput.value = ""; }); for (const name of ["dragenter", "dragover"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.dataset.drag = "true"; }); for (const name of ["dragleave", "drop"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.dataset.drag = "false"; }); dropZone.addEventListener("drop", async (event) => { await handleFiles(event.dataTransfer.files); }); }
+
+function setupDropZone() {
+  const { dropZone, fileInput } = getElements();
+  dropZone.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    fileInput.click();
+  });
+  fileInput.addEventListener("change", async () => {
+    await handleFiles(fileInput.files);
+    fileInput.value = "";
+  });
+  for (const eventName of ["dragenter", "dragover"]) {
+    dropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropZone.dataset.drag = "true";
+    });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    dropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropZone.dataset.drag = "false";
+    });
+  }
+  dropZone.addEventListener("drop", (event) => handleFiles(event.dataTransfer.files));
+}
+
 function setupListActions() {
   getElements().romList.addEventListener("click", (event) => {
     const removeButton = event.target.closest("[data-remove-rom]");
     if (removeButton) {
       const card = removeButton.closest(".rom-card");
+      const nextFocusId = card?.nextElementSibling?.dataset.id || card?.previousElementSibling?.dataset.id;
       const romId = removeButton.dataset.removeRom;
       if (!card || state.isPatching) return;
-      card.classList.add("is-removing");
-      let removed = false;
-      const finishRemoval = () => {
-        if (removed) return;
-        removed = true;
-        removeRom(state, romId);
-        renderRomList(state);
-        setStatus("ROM removed.", "neutral");
-      };
-      card.addEventListener("animationend", finishRemoval, { once: true });
-      window.setTimeout(finishRemoval, 260);
+      removeRom(state, romId);
+      renderRomList(state);
+      if (nextFocusId) getElements().romList.querySelector(`[data-id="${CSS.escape(nextFocusId)}"] [data-remove-rom]`)?.focus();
+      else getElements().dropZone.focus();
+      setStatus(UI_TEXT.ROM_REMOVED, "neutral");
       return;
     }
 
     const saveBadge = event.target.closest("[data-save-base]");
     if (saveBadge) {
-      state.saveFilesByBaseName.delete(saveBadge.dataset.saveBase);
+      const cardId = saveBadge.closest(".rom-card")?.dataset.id;
+      removeSave(state, saveBadge.dataset.saveBase);
       renderRomList(state);
-      setStatus("Matching save file removed.", "success");
+      if (cardId) getElements().romList.querySelector(`[data-id="${CSS.escape(cardId)}"] [data-remove-rom]`)?.focus();
+      setStatus(UI_TEXT.SAVE_REMOVED, "success");
     }
   });
 }
-function setupControls() { const { optionsForm, patchButton, clearButton } = getElements(); optionsForm.addEventListener("input", updateOptionsFromUi); optionsForm.addEventListener("change", updateOptionsFromUi); patchButton.addEventListener("click", patchAllRoms); clearButton.addEventListener("click", () => { clearRoms(state); state.saveFilesByBaseName.clear(); clearZipUrl(); renderRomList(state); setStatus("List cleared.", "neutral"); }); }
-bindElements(); syncOptionsFromForm(state); setupDropZone(); setupListActions(); setupControls(); renderOptions(state); renderRomList(state); setStatus("Drop ROMs and optional .sav files to begin.", "neutral");
+
+function setupControls() {
+  const { optionsForm, clearButton } = getElements();
+  optionsForm.addEventListener("input", updateOptionsFromUi);
+  optionsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    patchAllRoms();
+  });
+  clearButton.addEventListener("click", () => {
+    clearFiles(state);
+    clearZipUrl();
+    renderRomList(state);
+    setStatus(UI_TEXT.LIST_CLEARED, "neutral");
+    getElements().dropZone.focus();
+  });
+}
+
+bindElements();
+syncOptionsFromForm(state);
+setupDropZone();
+setupListActions();
+setupControls();
+renderOptions(state);
+renderRomList(state);
+setStatus(UI_TEXT.READY_PROMPT, "neutral");

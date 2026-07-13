@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+.import-progress[hidden] {
+  display: none !important
+}
+
+.save-badge[hidden] {
+  display: none !important
+}
+
+.small-copy[hidden],
+.field-label[hidden],
+fieldset[hidden] {
+  display: none !important
+}
+
+.library-badge[hidden] {
+  display: none !important
+}
+
+.save-type-badge[hidden] {
+  display: none !important
+}

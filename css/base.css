@@ -1,0 +1,90 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0
+}
+
+html {
+  font-size: 15px;
+  scroll-behavior: smooth;
+  background: var(--bg)
+}
+
+body {
+  min-height: 100vh;
+  background: radial-gradient(ellipse at top, var(--accent-glow-soft), transparent 34rem), var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  line-height: 1.6;
+  cursor: default
+}
+
+button,
+input {
+  font: inherit
+}
+
+h1 {
+  margin: 0;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  font-weight: 800;
+  letter-spacing: -.04em;
+  line-height: 1.05
+}
+
+h2 {
+  color: var(--text);
+  font-size: .95rem;
+  font-weight: 700
+}
+
+#import-progress-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
+#import-progress-count {
+  flex: 0 0 auto;
+  color: var(--accent2);
+  font-weight: 800;
+  letter-spacing: .03em
+}
+
+footer {
+  padding: 2rem 0;
+  color: var(--text3);
+  text-align: center;
+  font-size: .7rem
+}
+
+footer div {
+  margin-bottom: .25rem
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg)
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--bg4)
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent)
+}

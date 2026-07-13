@@ -1,0 +1,95 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+@media(max-width:700px) {
+  .page-shell {
+    width: min(100% - 1.5rem, 720px)
+  }
+
+  .action-bar {
+    align-items: stretch;
+    text-align: center
+  }
+
+  .primary-button {
+    width: 100%
+  }
+}
+
+@media(max-width:520px) {
+  .hero {
+    padding-top: 1.2rem
+  }
+
+  .drop-zone {
+    flex-direction: column;
+    min-height: 9rem;
+    padding: 1.8rem .9rem
+  }
+
+  .panel-heading {
+    align-items: flex-start;
+    flex-direction: column
+  }
+
+  .rom-card {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center
+  }
+
+  .inline-group.stacked-mobile {
+    align-items: flex-start;
+    flex-direction: column
+  }
+}
+
+@media(prefers-reduced-motion:reduce) {
+  html {
+    scroll-behavior: auto
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important
+  }
+}
+
+@media(max-width:700px) {
+  .settings-grid {
+    grid-template-columns: 1fr
+  }
+
+  .settings-grid>.panel,
+  .settings-side-column {
+    height: auto
+  }
+
+  .settings-side-column {
+    grid-template-rows: auto
+  }
+
+  .option-copy {
+    display: block
+  }
+
+  .option-line {
+    align-items: flex-start;
+    flex-wrap: nowrap
+  }
+
+  .option-hint {
+    display: block
+  }
+
+}
+
+@media(max-width:520px) {
+  .library-badge,
+  .save-type-badge {
+    grid-column: 1 / -2;
+    justify-self: start
+  }
+
+}

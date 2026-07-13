@@ -1,4 +1,6 @@
-import { asciiBytes, readU32, startsWithBytes } from "../core/binary.js";
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import { asciiBytes, readU16, readU32, startsWithBytes } from "../core/binary.js";
 import { KNOWN_SAVE_TYPES } from "./sram-data.js";
 
 const GBA_ROM_BASE = 0x08000000;
@@ -18,19 +20,24 @@ function patternsByFirstByte(values) {
 const KNOWN_SAVE_TYPE_PATTERNS = patternsByFirstByte(KNOWN_SAVE_TYPES);
 const SAVE_TYPE_PREFIX_PATTERNS = patternsByFirstByte(SAVE_TYPE_PREFIXES);
 
-export function findSaveType(bytes) {
-  let genericSaveType = null;
+const MAX_GENERIC_SAVE_TYPE_LENGTH = 32;
+
+export function findSaveTypeCandidates(bytes) {
+  const candidates = [];
+  const seen = new Set();
   for (let pos = 0; pos < bytes.length; pos += 1) {
     const firstByte = bytes[pos];
 
     const knownCandidates = KNOWN_SAVE_TYPE_PATTERNS[firstByte];
     if (knownCandidates) {
       for (const candidate of knownCandidates) {
-        if (startsWithBytes(bytes, pos, candidate.bytes)) return candidate.value;
+        if (startsWithBytes(bytes, pos, candidate.bytes) && !seen.has(candidate.value)) {
+          seen.add(candidate.value);
+          candidates.push({ library: candidate.value, offset: pos, evidence: "knownSignature" });
+        }
       }
     }
 
-    if (genericSaveType !== null) continue;
     const prefixCandidates = SAVE_TYPE_PREFIX_PATTERNS[firstByte];
     if (!prefixCandidates) continue;
     for (const candidate of prefixCandidates) {
@@ -39,22 +46,27 @@ export function findSaveType(bytes) {
       if (versionOffset + 2 > bytes.length || bytes[versionOffset] !== 0x5f || bytes[versionOffset + 1] !== 0x56) continue;
 
       let end = versionOffset + 2;
-      while (end < bytes.length) {
+      while (end < bytes.length && end - pos < MAX_GENERIC_SAVE_TYPE_LENGTH) {
         const ch = bytes[end];
         const ok = (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || ch === 95;
         if (!ok) break;
         end += 1;
       }
-      genericSaveType = String.fromCharCode(...bytes.subarray(pos, end));
+      let genericSaveType = "";
+      for (let offset = pos; offset < end; offset += 1) genericSaveType += String.fromCharCode(bytes[offset]);
+      if (!seen.has(genericSaveType)) {
+        seen.add(genericSaveType);
+        candidates.push({ library: genericSaveType, offset: pos, evidence: "genericVersionSignature" });
+      }
       break;
     }
   }
-  return genericSaveType;
+  return candidates;
 }
 
-function readU16(bytes, offset) {
-  if (offset < 0 || offset + 2 > bytes.length) return null;
-  return (bytes[offset] | (bytes[offset + 1] << 8)) >>> 0;
+export function findSaveType(bytes) {
+  const candidates = findSaveTypeCandidates(bytes);
+  return candidates.length === 1 ? candidates[0].library : null;
 }
 
 function isEepromConfigTable(bytes, offset) {
@@ -119,7 +131,7 @@ function findIdentifyEepromFunctions(bytes, tableOffsets) {
     });
     if (tableOffset === undefined) continue;
 
-    const previous = readU16(bytes, core - 2);
+    const previous = core >= 2 ? readU16(bytes, core - 2) : null;
     const start = previous !== null && (previous & 0xff00) === 0xb500 ? core - 2 : core;
     functions.push(start);
   }
@@ -138,9 +150,10 @@ function decodeThumbBlTarget(bytes, offset) {
 
 function identifyEepromCallArguments(bytes, functionOffsets) {
   const argumentsFound = [];
+  const functionOffsetSet = new Set(functionOffsets);
   for (let offset = 2; offset + 4 <= bytes.length; offset += 2) {
     const target = decodeThumbBlTarget(bytes, offset);
-    if (target === null || !functionOffsets.includes(target)) continue;
+    if (target === null || !functionOffsetSet.has(target)) continue;
 
     const previous = readU16(bytes, offset - 2);
     if (previous !== null && (previous & 0xff00) === 0x2000) argumentsFound.push(previous & 0xff);
@@ -164,8 +177,18 @@ export function detectEepromSize(bytes) {
   return distinct[0] === 4 ? 512 : 8192;
 }
 
-export function detectRomSaveMetadata(bytes, saveType = findSaveType(bytes)) {
-  if (!saveType) return { library: null, medium: "none", size: null, label: "Unknown" };
+export function detectRomSaveMetadata(bytes, explicitSaveType) {
+  const candidates = explicitSaveType
+    ? [{ library: explicitSaveType, offset: null, evidence: "explicit" }]
+    : findSaveTypeCandidates(bytes);
+  const saveType = candidates.length === 1 ? candidates[0].library : null;
+  const evidence = candidates.map((candidate) => ({ ...candidate }));
+  const ambiguousCandidates = candidates.length > 1
+    ? candidates.map((candidate) => candidate.library)
+    : [];
+  const confidence = candidates.length === 1 ? "high" : candidates.length > 1 ? "ambiguous" : "unknown";
+  const common = { confidence, evidence, ambiguousCandidates };
+  if (!saveType) return { library: null, medium: "none", size: null, label: "Unknown", ...common };
 
   if (saveType.startsWith("EEPROM")) {
     const size = detectEepromSize(bytes);
@@ -174,16 +197,17 @@ export function detectRomSaveMetadata(bytes, saveType = findSaveType(bytes)) {
       medium: "eeprom",
       size,
       label: size === 512 ? "4K EEPROM" : size === 8192 ? "64K EEPROM" : "4K or 64K EEPROM",
+      ...common,
     };
   }
   if (saveType.startsWith("SRAM")) {
-    return { library: saveType, medium: "sram", size: 32768, label: "SRAM" };
+    return { library: saveType, medium: "sram", size: 32768, label: "SRAM", ...common };
   }
   if (saveType.startsWith("FLASH1M")) {
-    return { library: saveType, medium: "flash", size: 131072, label: "1M FLASH" };
+    return { library: saveType, medium: "flash", size: 131072, label: "1M FLASH", ...common };
   }
   if (saveType.startsWith("FLASH512") || saveType.startsWith("FLASH")) {
-    return { library: saveType, medium: "flash", size: 65536, label: "512K FLASH" };
+    return { library: saveType, medium: "flash", size: 65536, label: "512K FLASH", ...common };
   }
-  return { library: saveType, medium: "none", size: null, label: "Unknown" };
+  return { library: saveType, medium: "none", size: null, label: "Unknown", ...common };
 }

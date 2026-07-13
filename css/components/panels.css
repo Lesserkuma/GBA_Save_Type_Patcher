@@ -1,0 +1,76 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+.panel {
+  background: var(--bg2);
+  border: 1px solid var(--bg3);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  transition: var(--transition)
+}
+
+.panel:hover {
+  border-color: var(--bg4)
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  margin-bottom: .75rem;
+  padding-bottom: .5rem;
+  border-bottom: 1px solid var(--bg3)
+}
+
+.panel-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .85rem;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--text2)
+}
+
+.panel-heading h2::before {
+  content: "";
+  display: none;
+  width: 3px;
+  height: 1em;
+  border-radius: 2px;
+  background: var(--accent)
+}
+
+.small-copy {
+  margin-bottom: .75rem;
+  font-size: .75rem
+}
+
+.empty-state {
+  padding: 1.2rem 0;
+  font-size: .75rem;
+  font-style: italic;
+  text-align: center
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 1rem;
+  margin-top: 1.5rem
+}
+
+.settings-side-column {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: 1rem
+}
+
+.settings-grid>.panel,
+.settings-side-column {
+  height: 100%;
+  min-height: 0
+}

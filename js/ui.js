@@ -1,6 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import { DEFAULT_OPTIONS, PATCH_MODES, PATCH_STATUS } from "./domain/constants.js";
+import { statusMessage, UI_TEXT, uiMessage } from "./domain/messages.js";
+import { PatchError } from "./core/errors.js";
+import { saveFileMatchesRom } from "./files.js";
+import { replaceOptions, setPatching } from "./state.js";
+
 const elements = {};
 let importProgressHideTimer = null;
-const DEFAULT_BATTERYLESS_HOTKEY = ["select", "l"];
+const DEFAULT_BATTERYLESS_HOTKEY = [...DEFAULT_OPTIONS.batteryless.hotkey];
 const BATTERYLESS_HOTKEY_BITS = {
   a: 0x0001,
   b: 0x0002,
@@ -15,30 +23,34 @@ const BATTERYLESS_HOTKEY_BITS = {
 };
 
 export function bindElements() {
+  const requireElement = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) throw new Error(`Required DOM element ${selector} is missing.`);
+    return element;
+  };
   Object.assign(elements, {
-    dropZone: document.querySelector("#drop-zone"),
-    fileInput: document.querySelector("#file-input"),
-    importProgress: document.querySelector("#import-progress"),
-    importProgressBar: document.querySelector("#import-progress-bar"),
-    importProgressText: document.querySelector("#import-progress-text"),
-    importProgressCount: document.querySelector("#import-progress-count"),
-    romList: document.querySelector("#rom-list"),
-    emptyState: document.querySelector("#empty-state"),
-    saveSummary: document.querySelector("#save-summary"),
-    optionsForm: document.querySelector("#patch-options"),
-    optionsPanel: document.querySelector("#save-options-panel"),
-    batterylessOptions: document.querySelector("#batteryless-options"),
-    flash512kOptions: document.querySelector("#flash512k-options"),
-    sharedHotkeyOptions: document.querySelector("#shared-hotkey-options"),
-    countdownField: document.querySelector("#countdown-field"),
-    batterylessCountdownIndicator: document.querySelector("#batteryless-countdown-indicator"),
-    batterylessAutoFlushCopy: document.querySelector("#batteryless-auto-flush-copy"),
-    sramOptions: document.querySelector("#sram-options"),
-    customFlashOptions: document.querySelector("#custom-flash-options"),
-    waitstateOptions: document.querySelector("#waitstate-options"),
-    patchButton: document.querySelector("#patch-button"),
-    clearButton: document.querySelector("#clear-button"),
-    statusRegion: document.querySelector("#status-region"),
+    dropZone: requireElement("#drop-zone"),
+    fileInput: requireElement("#file-input"),
+    importProgress: requireElement("#import-progress"),
+    importProgressBar: requireElement("#import-progress-bar"),
+    importProgressText: requireElement("#import-progress-text"),
+    importProgressCount: requireElement("#import-progress-count"),
+    romList: requireElement("#rom-list"),
+    emptyState: requireElement("#empty-state"),
+    saveSummary: requireElement("#save-summary"),
+    optionsForm: requireElement("#patch-options"),
+    optionsPanel: requireElement("#save-options-panel"),
+    batterylessOptions: requireElement("#batteryless-options"),
+    flash512kOptions: requireElement("#flash512k-options"),
+    sharedHotkeyOptions: requireElement("#shared-hotkey-options"),
+    countdownField: requireElement("#countdown-field"),
+    batterylessCountdownIndicator: requireElement("#batteryless-countdown-indicator"),
+    batterylessAutoFlushCopy: requireElement("#batteryless-auto-flush-copy"),
+    sramOptions: requireElement("#sram-options"),
+    customFlashOptions: requireElement("#custom-flash-options"),
+    patchButton: requireElement("#patch-button"),
+    clearButton: requireElement("#clear-button"),
+    statusRegion: requireElement("#status-region"),
   });
   return elements;
 }
@@ -47,9 +59,10 @@ export function getElements() {
   return elements;
 }
 
-export function setStatus(message, tone = "neutral") {
+export function setStatus(message, tone = "neutral", focus = false) {
   elements.statusRegion.textContent = message;
   elements.statusRegion.dataset.tone = tone;
+  if (focus) elements.statusRegion.focus();
 }
 
 function setImportProgressHidden(hidden) {
@@ -66,7 +79,9 @@ function setImportProgressHidden(hidden) {
   }
 }
 
-export function setImportProgress({ current, total, fileName } = {}) {
+/** @param {{current?: number, total?: number, fileName?: string}} [progress] */
+export function setImportProgress(progress = {}) {
+  const { current, total, fileName } = progress;
   if (!elements.importProgress || !Number.isFinite(total) || total <= 0) return;
   if (importProgressHideTimer) {
     window.clearTimeout(importProgressHideTimer);
@@ -77,8 +92,8 @@ export function setImportProgress({ current, total, fileName } = {}) {
   setImportProgressHidden(false);
   elements.importProgressBar.max = total;
   elements.importProgressBar.value = safeCurrent;
-  elements.importProgressText.textContent = fileName ? `Adding ${fileName}` : "Adding files...";
-  elements.importProgressCount.textContent = `${safeCurrent} / ${total}`;
+  elements.importProgressText.textContent = uiMessage.addingFile(fileName);
+  elements.importProgressCount.textContent = uiMessage.progressCount(safeCurrent, total);
 }
 
 export function hideImportProgress(delayMs = 0) {
@@ -88,7 +103,7 @@ export function hideImportProgress(delayMs = 0) {
     setImportProgressHidden(true);
     if (elements.importProgressBar) elements.importProgressBar.value = 0;
     if (elements.importProgressCount) elements.importProgressCount.textContent = "0 / 0";
-    if (elements.importProgressText) elements.importProgressText.textContent = "Adding files...";
+    if (elements.importProgressText) elements.importProgressText.textContent = UI_TEXT.ADDING_FILES;
   };
   if (delayMs > 0) importProgressHideTimer = window.setTimeout(hide, delayMs);
   else hide();
@@ -98,105 +113,143 @@ export function renderOptions(state) {
   const isSram = state.options.patchMode === "sram";
   const isBatteryless = state.options.patchMode === "batteryless-sram";
   const isFlash512k = state.options.patchMode === "flash512k";
+  const isCustomFlash = state.options.patchMode === "custom-flash";
   const isRtc = state.options.rtc.enabled;
   elements.batterylessOptions.hidden = !isBatteryless;
-  if (elements.flash512kOptions) elements.flash512kOptions.hidden = !isFlash512k;
+  if (elements.flash512kOptions) elements.flash512kOptions.hidden = !(isFlash512k || isCustomFlash);
   if (elements.sharedHotkeyOptions) elements.sharedHotkeyOptions.hidden = !(isBatteryless || isRtc);
   if (elements.sramOptions) elements.sramOptions.hidden = !(isSram || isBatteryless);
   elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
-  if (elements.waitstateOptions) elements.waitstateOptions.hidden = !state.options.waitstate.enabled;
   const isAutoModeEnabled = state.options.batteryless.mode === "auto";
   const isBatterylessAutoMode = isBatteryless && isAutoModeEnabled;
   if (elements.batterylessCountdownIndicator) {
     elements.batterylessCountdownIndicator.disabled = !isAutoModeEnabled;
-    if (!isAutoModeEnabled && elements.batterylessCountdownIndicator.checked) {
-      elements.optionsForm.elements.indicator.value = "save";
-      state.options.batteryless.indicator = "save";
-    }
+    elements.batterylessCountdownIndicator.closest("label")?.classList.toggle("is-disabled", !isAutoModeEnabled);
+  }
+  for (const hotkey of formControlsToArray(elements.optionsForm.elements.batterylessHotkey)) {
+    hotkey.closest("label")?.classList.toggle("is-checked", hotkey.checked);
   }
   elements.countdownField.hidden = !isBatterylessAutoMode;
   if (elements.batterylessAutoFlushCopy) elements.batterylessAutoFlushCopy.hidden = !isBatterylessAutoMode;
   elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "none");
 }
 
+function createRomCard() {
+  const item = document.createElement("li");
+  item.className = "rom-card";
+
+  const fileColumn = document.createElement("div");
+  fileColumn.className = "rom-file-column";
+  const nameWrap = document.createElement("div");
+  nameWrap.className = "rom-title";
+  const icon = document.createElement("span");
+  icon.className = "rom-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "\u{1F3AE}";
+  const name = document.createElement("span");
+  name.className = "rom-name";
+  name.dataset.role = "name";
+  const saveBadge = document.createElement("button");
+  saveBadge.type = "button";
+  saveBadge.className = "save-badge";
+  saveBadge.textContent = UI_TEXT.SAVE_BADGE;
+  saveBadge.hidden = true;
+  saveBadge.title = UI_TEXT.REMOVE_MATCHING_SAVE;
+  saveBadge.dataset.role = "save";
+  nameWrap.append(icon, name, saveBadge);
+  const errorMessage = document.createElement("div");
+  errorMessage.className = "rom-error-message";
+  errorMessage.dataset.role = "error";
+  fileColumn.append(nameWrap, errorMessage);
+
+  const libraryBadge = document.createElement("span");
+  libraryBadge.className = "library-badge";
+  libraryBadge.dataset.role = "library";
+  const saveTypeBadge = document.createElement("span");
+  saveTypeBadge.className = "save-type-badge";
+  saveTypeBadge.dataset.role = "saveType";
+  const status = document.createElement("span");
+  status.className = "rom-status";
+  status.dataset.role = "status";
+  const removeButton = document.createElement("button");
+  removeButton.type = "button";
+  removeButton.className = "ghost-button small";
+  removeButton.dataset.role = "remove";
+  removeButton.textContent = UI_TEXT.REMOVE;
+
+  item.append(fileColumn, libraryBadge, saveTypeBadge, status, removeButton);
+  return item;
+}
+
+function updateRomCard(item, rom, state, isAdded) {
+  item.dataset.id = rom.id;
+  item.classList.toggle("is-added", isAdded);
+  delete item.dataset.state;
+  if (rom.error || rom.statusCode === PATCH_STATUS.FAILED) item.dataset.state = "error";
+  else if (rom.warning) item.dataset.state = "warning";
+  else if (rom.statusCode === PATCH_STATUS.CHANGED) {
+    item.dataset.state = "success";
+  }
+
+  item.querySelector('[data-role="name"]').textContent = rom.name;
+  const saveBadge = item.querySelector('[data-role="save"]');
+  const saveRecord = state.saveFilesByBaseName.get(rom.baseName);
+  const hasSave = state.options.patchMode === PATCH_MODES.BATTERYLESS_SRAM
+    && !state.saveConflictsByBaseName.has(rom.baseName)
+    && saveFileMatchesRom(saveRecord, rom);
+  saveBadge.hidden = !hasSave;
+  if (hasSave) saveBadge.dataset.saveBase = rom.baseName;
+  else delete saveBadge.dataset.saveBase;
+
+  const errorMessage = item.querySelector('[data-role="error"]');
+  errorMessage.hidden = !rom.error;
+  errorMessage.textContent = rom.error || "";
+
+  const libraryBadge = item.querySelector('[data-role="library"]');
+  libraryBadge.textContent = rom.saveType || UI_TEXT.UNKNOWN_LIBRARY;
+  libraryBadge.hidden = !rom.saveType;
+
+  const saveTypeBadge = item.querySelector('[data-role="saveType"]');
+  saveTypeBadge.textContent = rom.saveTypeLabel || UI_TEXT.UNKNOWN_SAVE_TYPE;
+  saveTypeBadge.hidden = !rom.isHeaderValid;
+
+  const status = item.querySelector('[data-role="status"]');
+  const displayStatus = rom.error ? statusMessage(PATCH_STATUS.FAILED) : statusMessage(rom.statusCode);
+  status.textContent = rom.warning ? uiMessage.statusWithWarning(displayStatus) : displayStatus;
+  status.title = rom.error || rom.warning || displayStatus;
+  if (rom.error) status.setAttribute("aria-label", uiMessage.ariaError(rom.error));
+  else if (rom.warning) status.setAttribute("aria-label", uiMessage.ariaWarning(rom.warning));
+  else status.removeAttribute("aria-label");
+
+  const removeButton = item.querySelector('[data-role="remove"]');
+  removeButton.dataset.removeRom = rom.id;
+  removeButton.disabled = state.isPatching;
+}
+
 export function renderRomList(state, options = {}) {
-  elements.romList.innerHTML = "";
   elements.emptyState.hidden = state.roms.length > 0;
   elements.clearButton.disabled = state.isPatching || state.isImporting || state.roms.length === 0;
   elements.patchButton.disabled = state.isPatching || state.isImporting || state.roms.length === 0;
-  if (elements.saveSummary) {
-    elements.saveSummary.hidden = true;
-    elements.saveSummary.textContent = "";
+  elements.romList.setAttribute("aria-busy", state.isPatching || state.isImporting ? "true" : "false");
+
+  const summaryParts = [];
+  if (state.saveFilesByBaseName.size) summaryParts.push(uiMessage.matchingSaves(state.saveFilesByBaseName.size));
+  if (state.saveConflictsByBaseName.size) {
+    summaryParts.push(uiMessage.saveConflictsSummary(state.saveConflictsByBaseName.size));
   }
+  elements.saveSummary.hidden = summaryParts.length === 0;
+  elements.saveSummary.textContent = summaryParts.join(". ");
 
+  const existing = new Map(
+    [...elements.romList.querySelectorAll(".rom-card")].map((item) => [item.dataset.id, item]),
+  );
+  const activeIds = new Set(state.roms.map((rom) => rom.id));
+  for (const [id, item] of existing) {
+    if (!activeIds.has(id)) item.remove();
+  }
   for (const rom of state.roms) {
-    const item = document.createElement("li");
-    item.className = "rom-card";
-    if (options.addedIds?.has(rom.id)) item.classList.add("is-added");
-    item.dataset.id = rom.id;
-    if (rom.error) item.dataset.state = "error";
-    else if (rom.warning) item.dataset.state = "warning";
-    else if (["patched", "already"].some((prefix) => rom.status.toLowerCase().startsWith(prefix))) item.dataset.state = "success";
-
-    const fileColumn = document.createElement("div");
-    fileColumn.className = "rom-file-column";
-
-    const nameWrap = document.createElement("div");
-    nameWrap.className = "rom-title";
-
-    const icon = document.createElement("span");
-    icon.className = "rom-icon";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = "🎮";
-
-    const name = document.createElement("span");
-    name.className = "rom-name";
-    name.textContent = rom.name;
-    nameWrap.append(icon, name);
-
-    if (state.options.patchMode === "batteryless-sram" && state.saveFilesByBaseName.has(rom.baseName)) {
-      const saveBadge = document.createElement("button");
-      saveBadge.type = "button";
-      saveBadge.className = "save-badge";
-      saveBadge.textContent = "+SAVE";
-      saveBadge.dataset.saveBase = rom.baseName;
-      saveBadge.title = "Remove this matching .sav file";
-      nameWrap.append(saveBadge);
-    }
-
-    fileColumn.append(nameWrap);
-    if (rom.error) {
-      const errorMessage = document.createElement("div");
-      errorMessage.className = "rom-error-message";
-      errorMessage.textContent = rom.error;
-      fileColumn.append(errorMessage);
-    }
-
-    const libraryBadge = document.createElement("span");
-    libraryBadge.className = "library-badge";
-    libraryBadge.textContent = rom.saveType || "UNKNOWN";
-    libraryBadge.hidden = !rom.saveType;
-
-    const saveTypeBadge = document.createElement("span");
-    saveTypeBadge.className = "save-type-badge";
-    saveTypeBadge.textContent = rom.saveTypeLabel || "Unknown";
-    saveTypeBadge.hidden = !(rom.headerValid ?? rom.validHeader);
-
-    const status = document.createElement("span");
-    status.className = "rom-status";
-    status.textContent = rom.error ? "Error" : rom.status;
-    status.title = rom.error || rom.warning || rom.status;
-    if (rom.error) status.setAttribute("aria-label", `Error: ${rom.error}`);
-    else if (rom.warning) status.setAttribute("aria-label", `Warning: ${rom.warning}`);
-
-    const removeButton = document.createElement("button");
-    removeButton.type = "button";
-    removeButton.className = "ghost-button small";
-    removeButton.dataset.removeRom = rom.id;
-    removeButton.disabled = state.isPatching;
-    removeButton.textContent = "Remove";
-
-    item.append(fileColumn, libraryBadge, saveTypeBadge, status, removeButton);
+    const item = existing.get(rom.id) || createRomCard();
+    updateRomCard(item, rom, state, options.addedIds?.has(rom.id) ?? false);
     elements.romList.append(item);
   }
 }
@@ -238,49 +291,69 @@ export function syncOptionsFromForm(state) {
     if (String(parsedDelay) === delayInput.value.trim() && clampedDelay !== parsedDelay) delayInput.value = String(clampedDelay);
   }
 
-  state.options.patchMode = f.elements.patchMode.value;
-  state.options.batteryless.mode = f.elements.batterylessMode.value;
+  const options = structuredClone(state.options);
+  options.patchMode = f.elements.patchMode.value;
+  options.batteryless.mode = f.elements.batterylessMode.value;
   const sharedHotkey = checkedValues(f.elements.batterylessHotkey);
-  state.options.batteryless.hotkey = sharedHotkey;
-  state.options.batteryless.countdownFrames = Number.parseInt(delayInput.value, 10);
-  state.options.batteryless.indicator = f.elements.indicator.value;
-  state.options.batteryless.lastBlock = f.elements.batterylessLastBlock?.value || "usable";
-  state.options.flash512k = state.options.flash512k || {};
-  state.options.flash512k.countdownFrames = Number.parseInt(f.elements.flash512kCountdownFrames.value, 10);
-  state.options.flash512k.indicator = f.elements.flash512kIndicator.value;
-  state.options.customFlash.saveChipType = f.elements.saveChipType.value;
-  state.options.sram.flash1mBankSwitchStyle = f.elements.flash1mBankSwitchStyle?.value || "modern";
-  state.options.waitstate.enabled = f.elements.waitstateEnabled.checked;
-  state.options.waitstate.mode = "supercard_exact";
-  state.options.rtc.enabled = f.elements.rtcEnabled.checked;
+  options.batteryless.hotkey = sharedHotkey;
+  options.batteryless.countdownFrames = Number.parseInt(delayInput.value, 10);
+  options.batteryless.indicator = f.elements.indicator.value;
+  if (options.batteryless.mode !== "auto" && options.batteryless.indicator === "countdown") {
+    options.batteryless.indicator = "save";
+    f.elements.indicator.value = "save";
+  }
+  options.batteryless.lastBlock = f.elements.batterylessLastBlock?.value || "usable";
+  options.flash512k ||= {};
+  options.flash512k.countdownFrames = Number.parseInt(f.elements.flash512kCountdownFrames.value, 10);
+  options.flash512k.indicator = f.elements.flash512kIndicator.value;
+  options.customFlash.saveChipModel = f.elements.saveChipModel.value;
+  options.sram.flash1mBankSwitchStyle = f.elements.flash1mBankSwitchStyle?.value || "modern";
+  options.waitstate.enabled = f.elements.waitstateEnabled.checked;
+  options.waitstate.mode = "supercard_exact";
+  options.rtc.enabled = f.elements.rtcEnabled.checked;
+  replaceOptions(state, options);
 }
 
 export function readValidatedOptions(state) {
   const options = structuredClone(state.options);
-  const supportedPatchModes = new Set(["none", "sram", "batteryless-sram", "flash512k", "custom-flash"]);
+  const supportedPatchModes = new Set(Object.values(PATCH_MODES));
+  const optionError = (message, field) => new PatchError(message, {
+    code: "OPTIONS_INVALID",
+    stage: "optionValidation",
+    context: { field },
+    isRecoverable: true,
+  });
   if (!supportedPatchModes.has(options.patchMode)) {
-    throw new Error(`Unsupported patch mode: ${options.patchMode}.`);
+    throw optionError(uiMessage.unsupportedPatchMode(options.patchMode), "patchMode");
   }
 
   if (options.patchMode === "batteryless-sram" && options.batteryless.mode === "auto") {
     if (!Number.isInteger(options.batteryless.countdownFrames) || options.batteryless.countdownFrames < 0 || options.batteryless.countdownFrames > 255) {
-      throw new Error("Delay Value must be a number from 0 to 255.");
+      throw optionError(UI_TEXT.BATTERYLESS_DELAY_INVALID, "batteryless.countdownFrames");
     }
   } else {
-    options.batteryless.countdownFrames = 102;
+    options.batteryless.countdownFrames = DEFAULT_OPTIONS.batteryless.countdownFrames;
   }
   if (options.batteryless.mode !== "auto" && options.batteryless.indicator === "countdown") options.batteryless.indicator = "save";
 
-  options.flash512k = options.flash512k || { countdownFrames: 100, indicator: "save" };
-  if (options.patchMode === "flash512k") {
+  options.flash512k ||= structuredClone(DEFAULT_OPTIONS.flash512k);
+  if (["flash512k", "custom-flash"].includes(options.patchMode)) {
     if (!Number.isInteger(options.flash512k.countdownFrames) || options.flash512k.countdownFrames < 1 || options.flash512k.countdownFrames > 255) {
-      throw new Error("512K FLASH Delay must be a number from 1 to 255.");
+      throw optionError(UI_TEXT.JOURNAL_DELAY_INVALID, "flash512k.countdownFrames");
     }
     if (!["save", "countdown", "off"].includes(options.flash512k.indicator)) {
-      options.flash512k.indicator = "save";
+      throw optionError(UI_TEXT.JOURNAL_INDICATOR_INVALID, "flash512k.indicator");
     }
   } else {
-    options.flash512k.countdownFrames = 100;
+    options.flash512k.countdownFrames = DEFAULT_OPTIONS.flash512k.countdownFrames;
+  }
+
+  options.customFlash = options.customFlash || {};
+  if (options.patchMode === "custom-flash") {
+    const chipTypeByModel = { sst25vf064cFamily: 1, sst39vf6401b: 2 };
+    const chipType = chipTypeByModel[options.customFlash.saveChipModel];
+    if (!chipType) throw optionError(UI_TEXT.CUSTOM_FLASH_MODEL_INVALID, "customFlash.saveChipModel");
+    options.customFlash.saveChipType = chipType;
   }
 
   options.sram = options.sram || {};
@@ -290,7 +363,7 @@ export function readValidatedOptions(state) {
   options.batteryless.hotkey = normalizeHotkeyKeys(options.batteryless.hotkey);
   const needsHotkey = options.patchMode === "batteryless-sram" || options.rtc?.enabled;
   if (!options.batteryless.hotkey.length) {
-    if (needsHotkey) throw new Error("Select at least one Hotkey button.");
+    if (needsHotkey) throw optionError(UI_TEXT.HOTKEY_REQUIRED, "batteryless.hotkey");
     options.batteryless.hotkey = DEFAULT_BATTERYLESS_HOTKEY;
   }
   options.batteryless.hotkeyMask = hotkeyMaskFromKeys(options.batteryless.hotkey);
@@ -302,14 +375,14 @@ export function readValidatedOptions(state) {
   options.rtc = { enabled: options.rtc?.enabled === true };
 
   if (options.patchMode === "none" && !options.waitstate.enabled && !options.rtc.enabled) {
-    throw new Error("Select an Other Patch or choose a save type patch mode.");
+    throw optionError(UI_TEXT.PATCH_SELECTION_REQUIRED, "patchMode");
   }
 
   return options;
 }
 
 export function markPatching(state, isPatching) {
-  state.isPatching = isPatching;
+  setPatching(state, isPatching);
   renderRomList(state);
-  elements.patchButton.textContent = isPatching ? "Patching…" : "Patch ROMs";
+  elements.patchButton.textContent = isPatching ? UI_TEXT.PATCHING : UI_TEXT.PATCH_ROMS;
 }

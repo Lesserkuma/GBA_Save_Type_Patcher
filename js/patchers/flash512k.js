@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-or-later AND MIT
+
 import {
   asciiBytes,
-  copyBytes,
   findBytes,
   hexToBytes,
-  readU32,
   writeU32,
 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { stagePatchOperation, stageRomExpansion } from "../patch-engine/draft.js";
 import {
   GBA_MAX_ROM_SIZE,
   PATCH_BLOCK_ALIGNMENT,
@@ -15,25 +17,21 @@ import {
   isFreeRegion,
   overlapsPowerOfTwoTailBlock,
   rangesOverlap,
-  resizeRom,
 } from "./payload-placement.js";
 import {
   applyPatchHeaderMarker,
-  hasBatterylessPatch,
-  hasFlashSaveType,
   makePatchHeaderFlags,
   PATCH_SAVE_MEDIUM,
-  readPatchFlags,
-  readPatchHeaderSaveSize,
 } from "./patch-state.js";
-import { containsBatterylessSignature, findSaveType, patchSramBytes } from "./sram.js";
+import { findSaveType, patchSramBytes } from "./sram.js";
 import * as FLASH512K_DATA from "./flash512k-data.js";
 import {
-  addFlash512kOperation,
   applyFlash512kDetectedHooks,
+  DIRECT_SRAM_SAVE_TYPES,
+  detectFlash512kDirectSramHookSet,
   detectFlash512kHookSet,
+  detectFlash512kEepromV11xHookSet,
   flash512kTargetAddress,
-  inspectInstalledFlash512kPayload,
   logicalFlash512kSaveSize,
   validateFlash512kPayloadDescriptor,
 } from "./flash512k-common.js";
@@ -43,12 +41,12 @@ const C = FLASH512K_DATA.FLASH512K_CONSTANTS;
 const PAYLOAD = hexToBytes(FLASH512K_DATA.FLASH512K_PAYLOAD_HEX);
 const SIGNATURE = hexToBytes(FLASH512K_DATA.FLASH512K_SIGNATURE_HEX);
 const FLASH1M_MARKER = asciiBytes("FLASH1M_");
-const JOURNAL_RESERVED_SIZE = 0x40000;
-const JOURNAL_ACTIVE_SIZE = 0x10000;
+const JOURNAL_RESERVED_SIZE = requiredConstant("FLASH512K_RESERVED_SIZE");
+const JOURNAL_ACTIVE_SIZE = requiredConstant("FLASH512K_ACTIVE_SIZE");
 const FLASH1M_BANK_SELECT_ROM_OFFSET = 0x01000000;
-const DEFAULT_COUNTDOWN_FRAMES = 100;
+const DEFAULT_COUNTDOWN_FRAMES = requiredConstant("FLASH512K_DEFAULT_COUNTDOWN");
 const INDICATOR_MODE_VALUES = { off: 0, countdown: 1, save: 2 };
-
+const DIRECT_EEPROM_SAVE_TYPES = new Set(["EEPROM_V110", "EEPROM_V111"]);
 
 function requiredConstant(...names) {
   for (const name of names) {
@@ -69,50 +67,92 @@ const ABI = {
   flushEntry: requiredConstant("FLASH512K_FLUSH_ENTRY"),
 };
 
-const DESCRIPTOR = {
-  payload: PAYLOAD,
-  signature: SIGNATURE,
-  payloadSize: ABI.payloadSize,
-  signatureOffset: ABI.signatureOffset,
-  gbaRomBase: ABI.gbaRomBase,
-  eepromMetaOffset: null,
-  mutableRanges: [
-    [ABI.journalBaseConfigOffset, ABI.journalBaseConfigOffset + 4],
-    [ABI.logicalSaveSizeConfigOffset, ABI.logicalSaveSizeConfigOffset + 4],
-    [ABI.layoutConfigOffset, ABI.layoutConfigOffset + 4],
-    [ABI.countdownConfigOffset, ABI.countdownConfigOffset + 4],
-    [ABI.indicatorConfigOffset, ABI.indicatorConfigOffset + 4],
-  ],
-  entries: {
-    sramWrite: requiredConstant("FLASH512K_WRITE_SRAM_ENTRY"),
-    eepromWrite: requiredConstant("FLASH512K_WRITE_EEPROM_ENTRY"),
-    sramRead: requiredConstant("FLASH512K_READ_SRAM_ENTRY"),
-    eepromRead: requiredConstant("FLASH512K_READ_EEPROM_ENTRY"),
-    sramVerify: requiredConstant("FLASH512K_VERIFY_SRAM_ENTRY"),
-    eepromVerify: requiredConstant("FLASH512K_VERIFY_EEPROM_ENTRY"),
-  },
-};
+export function defineJournalDescriptor(rawData, spec = {}) {
+  const constants = rawData.FLASH512K_CONSTANTS;
+  const required = (...names) => {
+    for (const name of names) if (Number.isInteger(constants?.[name])) return constants[name];
+    throw new Error(`${spec.label || "Journal"} payload constant is missing (${names.join(" / ")}).`);
+  };
+  const requiredText = (name) => {
+    if (typeof constants?.[name] === "string" && constants[name].length > 0) return constants[name];
+    throw new Error(`${spec.label || "Journal"} payload constant is missing (${name}).`);
+  };
+  const generatedId = requiredText("JOURNAL_VARIANT_ID");
+  if (spec.id !== undefined && spec.id !== generatedId) {
+    throw new Error(`${spec.label || "Journal"} payload ID does not match its generated ABI.`);
+  }
+  const payload = hexToBytes(rawData.FLASH512K_PAYLOAD_HEX);
+  const signature = hexToBytes(rawData.FLASH512K_SIGNATURE_HEX);
+  const configFields = {
+    journalBase: required("FLASH512K_BASE_CONFIG_OFFSET"),
+    logicalSaveSize: required("FLASH512K_LOGICAL_SIZE_CONFIG_OFFSET"),
+    layout: required("FLASH512K_LAYOUT_CONFIG_OFFSET"),
+    countdown: required("FLASH512K_COUNTDOWN_CONFIG_OFFSET"),
+    indicator: required("FLASH512K_INDICATOR_CONFIG_OFFSET"),
+  };
+  if (Number.isInteger(constants.FLASH512K_SAVE_CHIP_TYPE_CONFIG_OFFSET)) {
+    configFields.saveChipType = constants.FLASH512K_SAVE_CHIP_TYPE_CONFIG_OFFSET;
+  }
+  const descriptor = {
+    id: generatedId,
+    label: spec.label ?? "Journal",
+    abiVersion: required("JOURNAL_ABI_VERSION"),
+    payload,
+    signature,
+    payloadSize: required("FLASH512K_PAYLOAD_SIZE"),
+    signatureOffset: required("FLASH512K_SIGNATURE_OFFSET"),
+    gbaRomBase: required("GBA_ROM_BASE"),
+    eepromMetaOffset: null,
+    configFields,
+    mutableRanges: Object.values(configFields).map((offset) => [offset, offset + 4]),
+    entries: {
+      sramWrite: required("FLASH512K_WRITE_SRAM_ENTRY"),
+      eepromWrite: required("FLASH512K_WRITE_EEPROM_ENTRY"),
+      sramRead: required("FLASH512K_READ_SRAM_ENTRY"),
+      eepromRead: required("FLASH512K_READ_EEPROM_ENTRY"),
+      sramVerify: required("FLASH512K_VERIFY_SRAM_ENTRY"),
+      eepromVerify: required("FLASH512K_VERIFY_EEPROM_ENTRY"),
+      flush: required("FLASH512K_FLUSH_ENTRY"),
+    },
+    families: {
+      sram: { logicalSaveSize: 0x8000, layout: 0 },
+      eeprom: { logicalSaveSize: 0x2000, layout: 1 },
+    },
+    placement: {
+      blockSize: PATCH_BLOCK_ALIGNMENT,
+      activeSize: required("FLASH512K_ACTIVE_SIZE"),
+      reservedSize: required("FLASH512K_RESERVED_SIZE"),
+      forbiddenRomOffsets: [FLASH1M_BANK_SELECT_ROM_OFFSET],
+      maxRomSize: GBA_MAX_ROM_SIZE,
+    },
+    target: { medium: "flash", saveType: "FLASH512", saveSize: 0x10000, bankSwitch: false },
+  };
+  validateFlash512kPayloadDescriptor(descriptor, descriptor.label);
+  if (descriptor.target?.bankSwitch !== false) throw new Error(`${descriptor.label} must disable bank switching.`);
+  return Object.freeze(descriptor);
+}
+
+export const STANDARD_JOURNAL_DESCRIPTOR = defineJournalDescriptor(FLASH512K_DATA, {
+  id: "standard-journal-v2",
+  label: "512K FLASH",
+});
+
+const DESCRIPTOR = STANDARD_JOURNAL_DESCRIPTOR;
 
 validateFlash512kPayloadDescriptor(DESCRIPTOR, "512K FLASH");
-if (requiredConstant("FLASH512K_ACTIVE_SIZE") !== JOURNAL_ACTIVE_SIZE) {
-  throw new Error("512K FLASH active-size ABI does not match the host layout.");
-}
-if (requiredConstant("FLASH512K_RESERVED_SIZE") !== JOURNAL_RESERVED_SIZE) {
-  throw new Error("512K FLASH reserved-size ABI does not match the host layout.");
-}
 
 
-function normalizeCountdownFrames(value) {
+function normalizeCountdownFrames(value, label = "512K FLASH") {
   const countdown = value ?? DEFAULT_COUNTDOWN_FRAMES;
   if (!Number.isInteger(countdown) || countdown < 1 || countdown > 255) {
-    throw new PatchError("512K FLASH: delay value must be an integer between 1 and 255.");
+    throw new PatchError(`${label}: delay value must be an integer between 1 and 255.`);
   }
   return countdown;
 }
 
-function normalizeIndicatorMode(value) {
+function normalizeIndicatorMode(value, label = "512K FLASH") {
   const mode = value ?? "save";
-  if (!(mode in INDICATOR_MODE_VALUES)) throw new PatchError("512K FLASH: unknown indicator mode.");
+  if (!(mode in INDICATOR_MODE_VALUES)) throw new PatchError(`${label}: unknown indicator mode.`);
   return mode;
 }
 
@@ -128,16 +168,17 @@ function lastNonEmptyBlockStart(bytes) {
   return null;
 }
 
-function journalRangeHitsFlash1mBankSelect(journalOffset) {
-  return journalOffset <= FLASH1M_BANK_SELECT_ROM_OFFSET
-    && FLASH1M_BANK_SELECT_ROM_OFFSET < journalOffset + JOURNAL_RESERVED_SIZE;
-}
-
 /**
  * Locate a payload tail followed immediately by its complete 256 KiB journal
  * reservation. The returned offsets are ROM file offsets, not CPU addresses.
  */
-export function findFlash512kRegion(bytes, payloadSize = PAYLOAD.length, addonPrefixSize = 0, placementExcludedRanges = [], keepLastBlockEmpty = false) {
+export function findJournalRegion(bytes, descriptor, {
+  addonPrefixSize = 0,
+  placementExcludedRanges = [],
+  keepLastBlockEmpty = false,
+} = {}) {
+  const payloadSize = descriptor.payloadSize;
+  const reservedSize = descriptor.placement.reservedSize;
   if (
     payloadSize <= 0
     || payloadSize % 4 !== 0
@@ -152,7 +193,7 @@ export function findFlash512kRegion(bytes, payloadSize = PAYLOAD.length, addonPr
 
   for (
     let blockStart = firstBlock;
-    blockStart + PATCH_BLOCK_ALIGNMENT + JOURNAL_RESERVED_SIZE <= bytes.length;
+    blockStart + PATCH_BLOCK_ALIGNMENT + reservedSize <= bytes.length;
     blockStart += PATCH_BLOCK_ALIGNMENT
   ) {
     const blockEnd = blockStart + PATCH_BLOCK_ALIGNMENT;
@@ -160,217 +201,199 @@ export function findFlash512kRegion(bytes, payloadSize = PAYLOAD.length, addonPr
     const addonPrefixBase = payloadBase - addonPrefixSize;
     const journalOffset = blockEnd;
     if (addonPrefixBase < blockStart || payloadBase % 4 !== 0) continue;
-    if (journalRangeHitsFlash1mBankSelect(journalOffset)) continue;
+    if (descriptor.placement.forbiddenRomOffsets.some(
+      (offset) => journalOffset <= offset && offset < journalOffset + reservedSize
+    )) continue;
     if (
       keepLastBlockEmpty
-      && overlapsPowerOfTwoTailBlock(addonPrefixBase, journalOffset + JOURNAL_RESERVED_SIZE, PATCH_BLOCK_ALIGNMENT)
+      && overlapsPowerOfTwoTailBlock(addonPrefixBase, journalOffset + reservedSize, PATCH_BLOCK_ALIGNMENT)
     ) continue;
     if (rangesOverlap(addonPrefixBase, payloadBase, placementExcludedRanges)) continue;
     if (rangesOverlap(payloadBase, blockEnd, placementExcludedRanges)) continue;
-    if (rangesOverlap(journalOffset, journalOffset + JOURNAL_ACTIVE_SIZE, placementExcludedRanges)) continue;
+    if (rangesOverlap(journalOffset, journalOffset + reservedSize, placementExcludedRanges)) continue;
     if (addonPrefixSize && !isFreeRegion(bytes, addonPrefixBase, addonPrefixSize)) continue;
     if (!isFreeRegion(bytes, payloadBase, payloadSize)) continue;
-    if (!isFreeRegion(bytes, journalOffset, JOURNAL_RESERVED_SIZE)) continue;
+    if (!isFreeRegion(bytes, journalOffset, reservedSize)) continue;
     return {
       payloadBase,
       addonPrefixBase,
       addonPrefixSize,
       journalOffset,
-      reservedRange: [journalOffset, journalOffset + JOURNAL_RESERVED_SIZE],
+      reservedRange: [journalOffset, journalOffset + reservedSize],
     };
   }
   return null;
 }
 
-function ensureFlash512kRegion(rom, operations, warnings, addonPrefixSize = 0, placementExcludedRanges = [], keepLastBlockEmpty = false) {
+function ensureJournalRegion(rom, operations, warnings, descriptor, addonPrefixSize = 0, placementExcludedRanges = [], keepLastBlockEmpty = false) {
   while (true) {
     if (rom.bytes.length > GBA_MAX_ROM_SIZE) {
-      warnings.push("512K FLASH: ROM is larger than 32 MiB.");
+      warnings.push(`${descriptor.label}: ROM is larger than 32 MiB.`);
       return null;
     }
-    const region = findFlash512kRegion(rom.bytes, PAYLOAD.length, addonPrefixSize, placementExcludedRanges, keepLastBlockEmpty);
+    const region = findJournalRegion(rom.bytes, descriptor, { addonPrefixSize, placementExcludedRanges, keepLastBlockEmpty });
     if (region !== null) return region;
     if (rom.bytes.length >= GBA_MAX_ROM_SIZE) {
-      warnings.push("512K FLASH: no free payload-plus-reserve area and ROM is already 32 MiB.");
+      warnings.push(`${descriptor.label}: no free payload-plus-reserve area and ROM is already 32 MiB.`);
       return null;
     }
 
     const oldSize = rom.bytes.length;
     const newSize = Math.min(alignUp(oldSize, PATCH_BLOCK_ALIGNMENT) + PATCH_BLOCK_ALIGNMENT, GBA_MAX_ROM_SIZE);
     if (newSize <= oldSize) {
-      warnings.push("512K FLASH: ROM could not be expanded.");
+      warnings.push(`${descriptor.label}: ROM could not be expanded.`);
       return null;
     }
-    resizeRom(rom, newSize, 0xff);
-    addFlash512kOperation(operations, "512K FLASH ROM expansion", oldSize, newSize - oldSize, { value: newSize });
+    const byteLength = newSize - oldSize;
+    const erasedBytes = new Uint8Array(byteLength).fill(0xff);
+    stageRomExpansion(rom, operations, {
+      id: `flash-journal-expand-${operations.length}`,
+      kind: PATCH_OPERATION_KIND.ROM_EXPAND,
+      component: "flashJournal",
+      offset: oldSize,
+      byteLength,
+      expectedBefore: erasedBytes,
+      replacement: new Uint8Array(erasedBytes),
+      labelKey: "operation.romExpand",
+      metadata: {
+        name: `${descriptor.label} ROM expansion`,
+        value: newSize,
+      },
+    });
   }
 }
 
-function familyConfig(family) {
-  if (family === "sram") return { logicalSaveSize: 32768, layout: 0 };
-  if (family === "eeprom") return { logicalSaveSize: 8192, layout: 1 };
+function familyConfig(family, descriptor = DESCRIPTOR) {
+  if (descriptor.families?.[family]) return descriptor.families[family];
   throw new PatchError(`512K FLASH: unsupported hook family ${family}.`);
 }
 
-function configurePayload(payloadBase, journalOffset, family, countdownFrames, indicatorMode) {
-  const payload = new Uint8Array(PAYLOAD);
-  const config = familyConfig(family);
-  writeU32(payload, ABI.journalBaseConfigOffset, journalOffset >>> 0);
-  writeU32(payload, ABI.logicalSaveSizeConfigOffset, config.logicalSaveSize >>> 0);
-  writeU32(payload, ABI.layoutConfigOffset, config.layout >>> 0);
-  writeU32(payload, ABI.countdownConfigOffset, countdownFrames >>> 0);
-  writeU32(payload, ABI.indicatorConfigOffset, INDICATOR_MODE_VALUES[indicatorMode] >>> 0);
-  return { payload, ...config, payloadBase, journalOffset };
-}
-
-function installedJournalDetails(bytes, installed) {
-  const payloadBase = installed.payloadBase;
-  const journalOffset = payloadBase + PAYLOAD.length;
-  const expected = familyConfig(installed.family);
-  if (journalOffset % PATCH_BLOCK_ALIGNMENT !== 0) {
-    throw new PatchError("512K FLASH payload is not installed at a 256 KiB block end.");
-  }
-  if (journalRangeHitsFlash1mBankSelect(journalOffset)) {
-    throw new PatchError("512K FLASH reserve overlaps the FLASH1M bank-select ROM offset.");
-  }
-  if (journalOffset + JOURNAL_RESERVED_SIZE > bytes.length) {
-    throw new PatchError("512K FLASH reserve is truncated.");
-  }
-  for (let offset = journalOffset + JOURNAL_ACTIVE_SIZE; offset < journalOffset + JOURNAL_RESERVED_SIZE; offset += 1) {
-    if (bytes[offset] !== 0xff) {
-      throw new PatchError("512K FLASH unused reserve tail is no longer empty.");
-    }
-  }
-  if (readU32(bytes, payloadBase + ABI.journalBaseConfigOffset) !== (journalOffset >>> 0)) {
-    throw new PatchError("512K FLASH base configuration is damaged.");
-  }
-  if (readU32(bytes, payloadBase + ABI.logicalSaveSizeConfigOffset) !== expected.logicalSaveSize) {
-    throw new PatchError("512K FLASH save-size configuration is damaged.");
-  }
-  if (readU32(bytes, payloadBase + ABI.layoutConfigOffset) !== expected.layout) {
-    throw new PatchError("512K FLASH save-layout configuration is damaged.");
-  }
-  const countdownFrames = readU32(bytes, payloadBase + ABI.countdownConfigOffset);
-  if (countdownFrames < 1 || countdownFrames > 255) {
-    throw new PatchError("512K FLASH countdown configuration is damaged.");
-  }
-  const indicatorValue = readU32(bytes, payloadBase + ABI.indicatorConfigOffset);
-  const indicatorMode = Object.keys(INDICATOR_MODE_VALUES).find((key) => INDICATOR_MODE_VALUES[key] === indicatorValue);
-  if (!indicatorMode) throw new PatchError("512K FLASH indicator configuration is damaged.");
-  return { journalOffset, countdownFrames, indicatorMode, ...expected };
-}
-
-function makeJournalMetadata(payloadBase, family, counts, config, status) {
-  const flushEntry = flash512kTargetAddress(payloadBase, ABI.flushEntry, ABI.gbaRomBase);
-  const reservedRange = [config.journalOffset, config.journalOffset + JOURNAL_RESERVED_SIZE];
-  const runtimeWriteRange = [config.journalOffset, config.journalOffset + JOURNAL_ACTIVE_SIZE];
+function configurePayload(payloadBase, journalOffset, family, countdownFrames, indicatorMode, descriptor, saveChipType = null) {
+  const payload = new Uint8Array(descriptor.payload);
+  const config = familyConfig(family, descriptor);
+  const fields = descriptor.configFields;
+  writeU32(payload, fields.journalBase, journalOffset >>> 0);
+  writeU32(payload, fields.logicalSaveSize, config.logicalSaveSize >>> 0);
+  writeU32(payload, fields.layout, config.layout >>> 0);
+  writeU32(payload, fields.countdown, countdownFrames >>> 0);
+  writeU32(payload, fields.indicator, INDICATOR_MODE_VALUES[indicatorMode] >>> 0);
+  if (Number.isInteger(fields.saveChipType)) writeU32(payload, fields.saveChipType, saveChipType >>> 0);
   return {
-    requested: true,
-    status,
-    variant: "patched",
-    family,
-    payload_offset: payloadBase,
-    payload_size: PAYLOAD.length,
-    hook_counts: counts,
-    journal: {
-      offset: config.journalOffset,
-      reserved_size: JOURNAL_RESERVED_SIZE,
-      active_size: JOURNAL_ACTIVE_SIZE,
-      // The remainder of the reservation must stay erased for validation,
-      // but is not modified by the runtime.
-      runtime_write_ranges: [runtimeWriteRange],
-      countdown_frames: config.countdownFrames,
-      indicator_mode: config.indicatorMode,
-      flush_entry: flushEntry,
-      reserved_ranges: [reservedRange],
-    },
+    payload,
+    ...config,
+    payloadBase,
+    journalOffset,
+    saveChipType: Number.isInteger(fields.saveChipType) ? saveChipType : null,
   };
 }
 
-function baseResult(bytes, saveType, status, operations = [], warnings = [], flash512k = null, reservedRanges = []) {
+function makeJournalMetadata(payloadBase, family, counts, config, status, descriptor = DESCRIPTOR) {
+  const flushEntry = flash512kTargetAddress(payloadBase, descriptor.entries.flush, descriptor.gbaRomBase);
+  const reservedRange = [config.journalOffset, config.journalOffset + descriptor.placement.reservedSize];
+  const runtimeWriteRange = [config.journalOffset, config.journalOffset + descriptor.placement.activeSize];
+  return {
+    requested: true,
+    status,
+    variantId: descriptor.id,
+    variant: "patched",
+    family,
+    payloadOffset: payloadBase,
+    payloadSize: descriptor.payloadSize,
+    hookCounts: counts,
+    journal: {
+      offset: config.journalOffset,
+      reservedSize: descriptor.placement.reservedSize,
+      activeSize: descriptor.placement.activeSize,
+      // The remainder of the reservation must stay erased for validation,
+      // but is not modified by the runtime.
+      runtimeWriteRanges: [runtimeWriteRange],
+      countdownFrames: config.countdownFrames,
+      indicatorMode: config.indicatorMode,
+      flushEntry,
+      reservedRanges: [reservedRange],
+    },
+    config: Number.isInteger(config.saveChipType) ? { saveChipType: config.saveChipType } : {},
+  };
+}
+
+function baseResult(bytes, saveType, status, operations = [], warnings = [], journalPatch = null, reservedRanges = []) {
   return {
     bytes,
     result: {
       mode: "flash512k",
       status,
-      save_type: saveType,
-      source_save_type: saveType,
-      target_save_type: "FLASH512",
-      logical_save_size: logicalFlash512kSaveSize(saveType, flash512k?.family),
-      flash512k,
-      reserved_ranges: reservedRanges,
+      saveType,
+      sourceSaveType: saveType,
+      targetSaveType: "FLASH512",
+      logicalSaveSizeBytes: logicalFlash512kSaveSize(saveType, journalPatch?.family),
+      targetSaveSizeBytes: 65536,
+      bankSwitchMode: "none",
+      flashJournal: journalPatch?.journal ? journalPatch : null,
+      reservedRanges,
       operations,
       warnings,
     },
   };
 }
 
-export function patchFlash512kBytes(inputBytes, options = {}) {
-  const input = new Uint8Array(inputBytes);
+function validatedFlashOptions(input, options) {
+  const descriptor = options.descriptor || DESCRIPTOR;
+  const saveChipType = options.saveChipType ?? null;
+  if (Number.isInteger(descriptor.configFields.saveChipType) && ![1, 2].includes(saveChipType)) {
+    throw new PatchError(`${descriptor.label}: save chip type must be integer 1 or 2.`);
+  }
   if (input.length < 0xc0 || input[0xb2] !== 0x96) throw new PatchError("Invalid GBA header.");
   if (input.length > GBA_MAX_ROM_SIZE) throw new PatchError("512K FLASH: ROM is larger than 32 MiB.");
-  const countdownFrames = normalizeCountdownFrames(options.countdownFrames);
-  const indicatorMode = normalizeIndicatorMode(options.indicatorMode);
   const addonPrefixSize = options.addonPrefixSize ?? 0;
   if (!Number.isInteger(addonPrefixSize) || addonPrefixSize < 0 || addonPrefixSize % 4 !== 0) {
     throw new PatchError("512K FLASH: add-on prefix size must be a non-negative 4-byte multiple.");
   }
-  if (addonPrefixSize + PAYLOAD.length > PATCH_BLOCK_ALIGNMENT) {
+  if (addonPrefixSize + descriptor.payloadSize > PATCH_BLOCK_ALIGNMENT) {
     throw new PatchError("512K FLASH: add-on prefix and payload do not fit in one 256 KiB code block.");
   }
   const placementExcludedRanges = options.placementExcludedRanges ?? [];
   if (!Array.isArray(placementExcludedRanges)) {
     throw new PatchError("512K FLASH: placement exclusions must be an array of ranges.");
   }
-  const keepLastBlockEmpty = options.keepLastBlockEmpty === true;
+  return {
+    descriptor,
+    saveChipType,
+    countdownFrames: normalizeCountdownFrames(options.countdownFrames, descriptor.label),
+    indicatorMode: normalizeIndicatorMode(options.indicatorMode, descriptor.label),
+    addonPrefixSize,
+    placementExcludedRanges,
+    keepLastBlockEmpty: options.keepLastBlockEmpty === true,
+  };
+}
 
+function nativeFlashResult(input, sourceSaveType) {
+  const flash512k = {
+    requested: true,
+    status: "unchanged",
+    variant: "native",
+    family: "flash",
+    payloadOffset: null,
+    payloadSize: 0,
+    hookCounts: {},
+    journal: null,
+  };
+  return baseResult(
+    new Uint8Array(input),
+    sourceSaveType,
+    "unchanged",
+    [],
+    [],
+    flash512k,
+  );
+}
+
+function validateFlashSource(input) {
   const sourceSaveType = findSaveType(input);
-  const existingFlags = readPatchFlags(input);
-  const installed = inspectInstalledFlash512kPayload(input, DESCRIPTOR, "512K FLASH");
-  if (installed) {
-    const config = installedJournalDetails(input, installed);
-    const bytes = new Uint8Array(input);
-    const operations = [];
-    const flash512k = makeJournalMetadata(installed.payloadBase, installed.family, installed.counts, config, "already_patched");
-    if (!options.deferHeaderFinalization) {
-      const headerFlags = makePatchHeaderFlags(bytes, {
-        saveMedium: PATCH_SAVE_MEDIUM.FLASH,
-        saveSize: 65536,
-        batteryless: false,
-      });
-      applyPatchHeaderMarker(bytes, operations, headerFlags);
-    }
-    const status = operations.length ? "patched" : "already_patched";
-    flash512k.status = status;
-    return baseResult(
-      bytes,
-      sourceSaveType,
-      status,
-      operations,
-      [],
-      flash512k,
-      flash512k.journal.reserved_ranges,
-    );
-  }
-  if (hasFlashSaveType(existingFlags)) throw new PatchError("FLASH save-type header marker exists, but no coherent 512K FLASH payload could be validated.");
-  if (hasBatterylessPatch(existingFlags) || containsBatterylessSignature(input)) {
-    throw new PatchError("512K FLASH cannot be applied to a Batteryless SRAM patched ROM.");
-  }
-  if (findBytes(input, FLASH1M_MARKER) >= 0 || sourceSaveType?.startsWith("FLASH1M") || readPatchHeaderSaveSize(existingFlags) === 131072) {
+  if (findBytes(input, FLASH1M_MARKER) >= 0 || sourceSaveType?.startsWith("FLASH1M")) {
     throw new PatchError("512K FLASH is incompatible with 1M FLASH / 128 KiB save games.");
   }
   if (sourceSaveType?.startsWith("FLASH512") || sourceSaveType?.startsWith("FLASH_")) {
-    const flash512k = {
-      requested: true,
-      status: "already_compatible",
-      variant: "native",
-      family: "flash",
-      payload_offset: null,
-      payload_size: 0,
-      hook_counts: {},
-      journal: null,
-    };
-    return baseResult(new Uint8Array(input), sourceSaveType, "already_compatible", [], [], flash512k);
+    return { sourceSaveType, output: nativeFlashResult(input, sourceSaveType) };
   }
   if (!sourceSaveType || (!sourceSaveType.startsWith("SRAM") && !sourceSaveType.startsWith("EEPROM"))) {
     throw new PatchError(
@@ -379,7 +402,38 @@ export function patchFlash512kBytes(inputBytes, options = {}) {
         : "512K FLASH could not detect a supported SRAM or EEPROM save type.",
     );
   }
+  return { sourceSaveType, output: null };
+}
 
+function normalizeFlashSource(input, sourceSaveType, descriptor) {
+  if (DIRECT_EEPROM_SAVE_TYPES.has(sourceSaveType)) {
+    const normalized = {
+      bytes: new Uint8Array(input),
+      result: { status: "patched", operations: [], warnings: [] },
+    };
+    return {
+      normalized,
+      hooks: detectFlash512kEepromV11xHookSet(
+        normalized.bytes,
+        sourceSaveType,
+        descriptor.label,
+      ),
+    };
+  }
+  if (DIRECT_SRAM_SAVE_TYPES.has(sourceSaveType)) {
+    const normalized = {
+      bytes: new Uint8Array(input),
+      result: { status: "patched", operations: [], warnings: [] },
+    };
+    return {
+      normalized,
+      hooks: detectFlash512kDirectSramHookSet(
+        normalized.bytes,
+        sourceSaveType,
+        descriptor.label,
+      ),
+    };
+  }
   const normalized = patchSramBytes(input, {
     batteryless: false,
     waitstate: { enabled: false },
@@ -387,82 +441,150 @@ export function patchFlash512kBytes(inputBytes, options = {}) {
     deferHeaderFinalization: true,
   });
   if (normalized.result.status === "unsupported") {
-    throw new PatchError(normalized.result.warnings?.[0] || `${sourceSaveType} could not be normalized to SRAM.`);
+    throw new PatchError(
+      normalized.result.warnings?.[0] || `${sourceSaveType} could not be normalized to SRAM.`,
+    );
   }
+  return {
+    normalized,
+    hooks: detectFlash512kHookSet(normalized.bytes, descriptor.label),
+  };
+}
 
-  // EEPROM normalization deliberately yields stable SRAM-like Write/Read
-  // wrappers. Some SDK versions (including EEPROM_V124) no longer retain an
-  // IdentifyEeprom marker here, so the runtime uses the fixed 8 KiB native
-  // EEPROM-file layout instead of requiring an otherwise unused metadata hook.
-  const hooks = detectFlash512kHookSet(normalized.bytes, "512K FLASH");
+function installFlashJournal(normalizedSource, config) {
+  const { normalized, hooks } = normalizedSource;
   const rom = { bytes: normalized.bytes };
   const operations = [...(normalized.result.operations || [])];
   const warnings = [...(normalized.result.warnings || [])];
-  const region = ensureFlash512kRegion(rom, operations, warnings, addonPrefixSize, placementExcludedRanges, keepLastBlockEmpty);
-  if (region === null) throw new PatchError(warnings.find((warning) => warning.startsWith("512K FLASH:")) || "512K FLASH payload could not be placed.");
-
+  const region = ensureJournalRegion(
+    rom,
+    operations,
+    warnings,
+    config.descriptor,
+    config.addonPrefixSize,
+    config.placementExcludedRanges,
+    config.keepLastBlockEmpty,
+  );
+  if (region === null) {
+    throw new PatchError(
+      warnings.find((warning) => warning.startsWith(`${config.descriptor.label}:`))
+        || `${config.descriptor.label} payload could not be placed.`,
+    );
+  }
   const configured = configurePayload(
     region.payloadBase,
     region.journalOffset,
     hooks.family,
-    countdownFrames,
-    indicatorMode,
+    config.countdownFrames,
+    config.indicatorMode,
+    config.descriptor,
+    config.saveChipType,
   );
-  rom.bytes.fill(0xff, region.journalOffset, region.journalOffset + JOURNAL_RESERVED_SIZE);
-  addFlash512kOperation(
-    operations,
-    "512K FLASH reserve initialized",
-    region.journalOffset,
-    JOURNAL_RESERVED_SIZE,
-    { value: 0xff, codeName: "flash512k_reserve" },
-  );
-  copyBytes(rom.bytes, region.payloadBase, configured.payload);
-  addFlash512kOperation(
-    operations,
-    "512K FLASH payload",
-    region.payloadBase,
-    configured.payload.length,
-    { codeName: "flash512k_payload" },
-  );
+  const reserveSize = config.descriptor.placement.reservedSize;
+  stagePatchOperation(rom.bytes, operations, {
+    id: `flash-journal-${operations.length}`,
+    kind: PATCH_OPERATION_KIND.CONFIG_WRITE,
+    component: "flashJournal",
+    offset: region.journalOffset,
+    byteLength: reserveSize,
+    expectedBefore: rom.bytes.slice(region.journalOffset, region.journalOffset + reserveSize),
+    replacement: new Uint8Array(reserveSize).fill(0xff),
+    labelKey: "operation.flashJournal",
+    metadata: {
+      name: `${config.descriptor.label} reserve initialized`,
+      value: 0xff,
+      codeName: "journal_reserve",
+    },
+  });
+  stagePatchOperation(rom.bytes, operations, {
+    id: `flash-journal-${operations.length}`,
+    kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
+    component: "flashJournal",
+    offset: region.payloadBase,
+    byteLength: configured.payload.length,
+    expectedBefore: rom.bytes.slice(region.payloadBase, region.payloadBase + configured.payload.length),
+    replacement: configured.payload,
+    labelKey: "operation.flashJournal",
+    metadata: {
+      name: `${config.descriptor.label} payload`,
+      codeName: "journal_payload",
+      variantId: config.descriptor.id,
+    },
+  });
   const hookCounts = applyFlash512kDetectedHooks(
     rom.bytes,
     operations,
     hooks,
     region.payloadBase,
-    DESCRIPTOR,
-    "512K FLASH",
+    config.descriptor,
+    config.descriptor.label,
   );
-  const flash512k = makeJournalMetadata(
-    region.payloadBase,
-    hooks.family,
-    hookCounts,
-    { ...configured, countdownFrames, indicatorMode },
+  return { rom, operations, warnings, region, configured, hooks, hookCounts };
+}
+
+function flashJournalOutput(installed, sourceSaveType, config, options) {
+  const journal = makeJournalMetadata(
+    installed.region.payloadBase,
+    installed.hooks.family,
+    installed.hookCounts,
+    {
+      ...installed.configured,
+      countdownFrames: config.countdownFrames,
+      indicatorMode: config.indicatorMode,
+    },
     "patched",
+    config.descriptor,
   );
   if (!options.deferHeaderFinalization) {
-    const headerFlags = makePatchHeaderFlags(rom.bytes, {
+    const flags = makePatchHeaderFlags({
       saveMedium: PATCH_SAVE_MEDIUM.FLASH,
       saveSize: 65536,
       batteryless: false,
     });
-    applyPatchHeaderMarker(rom.bytes, operations, headerFlags);
+    applyPatchHeaderMarker(installed.rom.bytes, installed.operations, flags);
   }
-
-  return baseResult(
-    rom.bytes,
+  const output = baseResult(
+    installed.rom.bytes,
     sourceSaveType,
     "patched",
-    operations,
-    warnings,
-    flash512k,
-    flash512k.journal.reserved_ranges,
+    installed.operations,
+    installed.warnings,
+    journal,
+    journal.journal.reservedRanges,
   );
+  output.result.targetSaveSizeBytes = config.descriptor.target.saveSize;
+  output.result.bankSwitchMode = "none";
+  if (Number.isInteger(options.saveChipType)) output.result.saveChipType = options.saveChipType;
+  return output;
+}
+
+export function patchFlash512kBytes(inputBytes, options = {}) {
+  const input = new Uint8Array(inputBytes);
+  const config = validatedFlashOptions(input, options);
+  const source = validateFlashSource(input);
+  if (source.output) return source.output;
+  const normalized = normalizeFlashSource(input, source.sourceSaveType, config.descriptor);
+  const installed = installFlashJournal(normalized, config);
+  return flashJournalOutput(installed, source.sourceSaveType, config, options);
+}
+
+export function patchJournalConvertedSave(inputBytes, options, descriptor) {
+  const output = patchFlash512kBytes(inputBytes, { ...options, descriptor });
+  output.result.mode = descriptor.id === DESCRIPTOR.id ? "flash512k" : "custom-flash";
+  output.result.targetSaveSizeBytes = descriptor.target.saveSize;
+  output.result.bankSwitchMode = "none";
+  if (Number.isInteger(options?.saveChipType)) output.result.saveChipType = options.saveChipType;
+  return output;
+}
+
+export function planJournalHooks(bytes, descriptor, label = descriptor.label) {
+  return detectFlash512kHookSet(bytes, label);
 }
 
 export const FLASH512K_LAYOUT = Object.freeze({
-  block_size: PATCH_BLOCK_ALIGNMENT,
-  payload_size: PAYLOAD.length,
-  reserved_size: JOURNAL_RESERVED_SIZE,
-  active_size: JOURNAL_ACTIVE_SIZE,
-  flash1m_bank_select_offset: FLASH1M_BANK_SELECT_ROM_OFFSET,
+  blockSize: PATCH_BLOCK_ALIGNMENT,
+  payloadSize: PAYLOAD.length,
+  reservedSize: JOURNAL_RESERVED_SIZE,
+  activeSize: JOURNAL_ACTIVE_SIZE,
+  flash1mBankSelectOffset: FLASH1M_BANK_SELECT_ROM_OFFSET,
 });

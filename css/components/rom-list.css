@@ -1,0 +1,236 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+.hero-copy,
+.small-copy,
+.empty-state,
+.rom-status {
+  color: var(--text2)
+}
+
+.rom-panel,
+.options-panel {
+  padding: 1rem;
+  min-height: 80px
+}
+
+.rom-list {
+  display: grid;
+  gap: .3rem;
+  list-style: none
+}
+
+.rom-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: .5rem;
+  justify-content: space-between;
+  padding: .45rem .55rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  border-color: var(--white-04);
+  background: var(--surface-card);
+  font-size: .75rem;
+  transition: var(--transition);
+  animation: none
+}
+
+.rom-card:hover {
+  background: var(--bg4);
+  transform: translateX(2px)
+}
+
+.rom-card[data-state=success] {
+  border-color: var(--green-border-soft)
+}
+
+.rom-card[data-state=error] {
+  border-color: var(--red-border-soft)
+}
+
+.rom-title {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  min-width: 0;
+  font-weight: 700
+}
+
+.rom-title>span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
+.rom-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.4rem;
+  margin: 0;
+  padding: .1rem .45rem;
+  border: 1px solid var(--bg4);
+  border-radius: 999px;
+  background: var(--surface-deep-72);
+  color: var(--text2);
+  font-size: .62rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase
+}
+
+.rom-card[data-state=success] .rom-status {
+  border-color: var(--green-border);
+  background: var(--green-surface);
+  color: var(--green)
+}
+
+.rom-card[data-state=error] .rom-status {
+  border-color: var(--red-border);
+  background: var(--red-surface);
+  color: var(--red)
+}
+
+.save-badge {
+  display: inline-block;
+  flex: 0 0 auto;
+  padding: .1rem .3rem;
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  background: var(--accent-surface);
+  color: var(--accent2);
+  font-size: .55rem;
+  font-weight: 800;
+  line-height: 1.2;
+  vertical-align: middle;
+  cursor: pointer
+}
+
+.save-badge:hover {
+  border-color: var(--accent2);
+  background: var(--accent2-surface)
+}
+
+.rom-card:hover .ghost-button.small {
+  opacity: 1
+}
+
+.waitstate-panel,
+.other-settings-panel,
+.rom-panel,
+.options-panel {
+  padding: 1rem;
+  min-height: 80px
+}
+
+.rom-panel {
+  margin-top: 1rem
+}
+
+.rom-icon {
+  flex: 0 0 auto;
+  opacity: .72;
+  font-size: .85rem
+}
+
+.rom-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
+.rom-card[data-state=warning] {
+  border-color: var(--yellow-border-soft)
+}
+
+.rom-card[data-state=warning] .rom-status {
+  border-color: var(--yellow-border);
+  background: var(--yellow-surface);
+  color: var(--yellow)
+}
+
+.rom-title,
+.rom-name {
+  font-weight: 400 !important
+}
+
+.library-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: .1rem .42rem;
+  border: 1px solid var(--accent2-badge-border);
+  border-radius: 999px;
+  background: var(--accent2-weak);
+  color: var(--accent2);
+  font-size: .58rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase
+}
+
+.save-type-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: .1rem .42rem;
+  border: 1px solid var(--green-badge-border);
+  border-radius: 999px;
+  background: var(--green-surface-soft);
+  color: var(--green);
+  font-size: .58rem;
+  font-weight: 800;
+  letter-spacing: .02em
+}
+
+.rom-card.is-added {
+  animation: slideIn .22s cubic-bezier(.4, 0, .2, 1) both;
+}
+
+.rom-card.is-removing {
+  pointer-events: none;
+  animation: slideOut .18s cubic-bezier(.4, 0, .2, 1) both;
+}
+
+.rom-file-column {
+  min-width: 0;
+  display: grid;
+  gap: .18rem
+}
+
+.rom-error-message {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--red);
+  font-size: .68rem;
+  line-height: 1.35
+}
+
+.rom-card[data-state=error],
+.rom-card[data-state=warning] {
+  align-items: start
+}
+
+.rom-card[data-state=error] .library-badge,
+.rom-card[data-state=error] .save-type-badge,
+.rom-card[data-state=error] .rom-status,
+.rom-card[data-state=error] .ghost-button.small,
+.rom-card[data-state=warning] .library-badge,
+.rom-card[data-state=warning] .save-type-badge,
+.rom-card[data-state=warning] .rom-status,
+.rom-card[data-state=warning] .ghost-button.small {
+  margin-top: .08rem
+}

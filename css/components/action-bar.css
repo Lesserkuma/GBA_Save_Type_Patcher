@@ -1,0 +1,154 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px)
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0)
+  }
+}
+
+.action-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .65rem;
+  margin: 1.5rem auto 1rem;
+  text-align: center
+}
+
+.action-bar .primary-button {
+  align-self: center;
+  min-width: min(100%, 260px)
+}
+
+.primary-button,
+.ghost-button {
+  border: 0;
+  border-radius: var(--radius);
+  font-weight: 700;
+  transition: var(--transition)
+}
+
+.primary-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  min-height: 3rem;
+  overflow: hidden;
+  padding: .7rem 2rem;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 4px 20px var(--accent-glow);
+  color: var(--white);
+  font-size: .95rem
+}
+
+.primary-button::before {
+  content: "⚡"
+}
+
+.primary-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--white-15), transparent);
+  transform: translateX(-100%)
+}
+
+.primary-button:not(:disabled):hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px var(--accent-glow)
+}
+
+.primary-button:not(:disabled):hover::after {
+  animation: shimmer .8s ease-in-out
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%)
+  }
+}
+
+.ghost-button {
+  min-height: 2.1rem;
+  padding: .35rem .8rem;
+  border: 1px solid var(--bg4);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: .75rem
+}
+
+.ghost-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text)
+}
+
+.ghost-button.small {
+  flex: 0 0 auto;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  overflow: hidden;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--red);
+  font-size: 0;
+  opacity: .65
+}
+
+.ghost-button.small::before {
+  content: "×";
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: .4;
+  transform: none !important;
+  box-shadow: none !important
+}
+
+.status-region {
+  max-width: 48rem;
+  color: var(--text2);
+  font-size: .78rem
+}
+
+.status-region[data-tone=success] {
+  color: var(--green)
+}
+
+.status-region[data-tone=error] {
+  color: var(--red)
+}
+
+.status-region[data-tone=warning] {
+  color: var(--yellow)
+}
+
+.action-bar .status-region {
+  text-align: center
+}
+
+@keyframes slideOut {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}

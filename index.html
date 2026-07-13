@@ -1,10 +1,12 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GBA Save Type Patcher</title>
-  <link rel="stylesheet" href="css/app.css?2">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; worker-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
+  <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
   <div class="page-shell">
@@ -15,13 +17,13 @@
 
     <main>
       <section class="drop-panel" aria-labelledby="drop-title">
-        <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-describedby="drop-help">
-          <div class="drop-icon" aria-hidden="true">📂</div>
+        <label id="drop-zone" class="drop-zone" for="file-input" aria-describedby="drop-help" tabindex="0">
+          <div class="drop-icon" aria-hidden="true">&#128194;</div>
           <div>
             <h2 id="drop-title">Drop files here or click to browse</h2>
-            <p id="drop-help">ROM files (.gba, .bin, .srl) · Save Data files (.sav)</p>
+            <p id="drop-help">ROM files (.gba, .bin, .srl) &middot; Save data files (.sav)</p>
           </div>
-        </div>
+        </label>
         <div id="import-progress" class="import-progress" role="status" aria-live="polite" aria-hidden="true" hidden>
           <div class="import-progress-row">
             <span id="import-progress-text">Adding files...</span>
@@ -34,41 +36,41 @@
 
       <form id="patch-options" class="settings-grid">
         <section id="save-options-panel" class="panel options-panel" aria-labelledby="options-title">
-          <div class="panel-heading compact"><h2 id="options-title">💾 Save Type Patch</h2></div>
+          <div class="panel-heading compact"><h2 id="options-title"><span aria-hidden="true">&#128190;</span> Save Type Patch</h2></div>
           <fieldset aria-label="Save type patch mode">
             <label class="option-line"><input type="radio" name="patchMode" value="none"> <span class="option-copy"><span class="option-label">None</span></span></label>
             <label class="option-line"><input type="radio" name="patchMode" value="sram" checked><span class="option-copy"><span class="option-label">SRAM</span><span class="option-hint">(for SRAM-based cartridges with battery)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy"><span class="option-label">Batteryless SRAM</span><span class="option-hint">(for SRAM-based cartridges without battery, experimental)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="flash512k"><span class="option-copy"><span class="option-label">512K FLASH</span><span class="option-hint">(for cartridges with a SST-compatible FLASH save chip, experimental)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy"><span class="option-label">Custom 512K/1M FLASH</span><span class="option-hint">(for cartridges with a non-standard FLASH save chip)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy"><span class="option-label">Batteryless SRAM</span><span class="option-hint">(for SRAM-based cartridges without battery)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="flash512k"><span class="option-copy"><span class="option-label">512K FLASH</span><span class="option-hint">(for cartridges with a genuine SST 512K FLASH save chip)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy"><span class="option-label">Off-spec 512K/1M FLASH</span><span class="option-hint">(for cartridges with a non-standard FLASH save chip)</span></span></label>
           </fieldset>
 
           <fieldset id="sram-options" class="sub-options"><legend>SRAM Options</legend>
             <div class="inline-group stacked-mobile"><span>1M Bank Switch:</span><label><input type="radio" name="flash1mBankSwitchStyle" value="modern" checked> Repro Cart Method</label><label><input type="radio" name="flash1mBankSwitchStyle" value="gbata"> GBATA Method</label></div>
           </fieldset>
 
-          <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
+          <fieldset id="batteryless-options" class="sub-options" hidden><legend>Off-spec SRAM options</legend>
             <div class="inline-group"><span>Auto Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Enabled</label><label><input type="radio" name="batterylessMode" value="keypad"> Disabled (less invasive)</label></div>
             <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input id="batteryless-countdown-indicator" type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
             <label id="countdown-field" class="field-label">Flush Delay: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"> VBlank frames</label>
             <p id="batteryless-auto-flush-copy" class="small-copy">Pending save data is flushed automatically after the configured delay.</p>
           </fieldset>
 
-          <fieldset id="flash512k-options" class="sub-options" hidden><legend>512K FLASH options</legend>
+          <fieldset id="flash512k-options" class="sub-options" hidden><legend>EEPROM and SRAM Journal Options</legend>
             <label class="field-label">Flush Delay: <input type="number" name="flash512kCountdownFrames" min="1" max="255" step="1" value="100" inputmode="numeric"> VBlank frames</label>
             <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="flash512kIndicator" value="save" checked> While saving</label><label><input type="radio" name="flash512kIndicator" value="countdown"> While delaying</label><label><input type="radio" name="flash512kIndicator" value="off"> Off</label></div>
-            <p class="small-copy">Pending journal data is flushed automatically after the configured delay.</p>
+            <p class="small-copy">Pending SRAM/EEPROM journal data is flushed automatically after the configured delay.</p>
           </fieldset>
 
-          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Custom FLASH options</legend><div class="choice-stack"><span>Flash Chip Type:</span><label><input type="radio" name="saveChipType" value="1" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipType" value="2"> SST39VF6401B</label></div></fieldset>
+          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Non-standard Flash options</legend><div class="choice-stack"><span>Flash chip model:</span><label><input type="radio" name="saveChipModel" value="sst25vf064cFamily" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipModel" value="sst39vf6401b"> SST39VF6401B</label></div></fieldset>
         </section>
 
         <div class="settings-side-column">
           <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
-            <div class="panel-heading compact"><h2 id="waitstate-title">🧩 Other Patches</h2></div>
+            <div class="panel-heading compact"><h2 id="waitstate-title"><span aria-hidden="true">&#129513;</span> Other Patches</h2></div>
             <fieldset class="waitstate-toggle">
               <label class="option-line">
-                <input type="checkbox" name="rtcEnabled"><span class="option-copy"><span class="option-label">Fake RTC</span><span class="option-hint">(for RTC games on non-RTC cartridges, experimental)</span></span>
+                <input type="checkbox" name="rtcEnabled"><span class="option-copy"><span class="option-label">Fake RTC</span><span class="option-hint">(for RTC games on non-RTC cartridges)</span></span>
               </label>
               <label class="option-line">
                 <input type="checkbox" name="waitstateEnabled"><span class="option-copy"><span class="option-label">Waitstate</span><span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
@@ -77,7 +79,7 @@
           </section>
 
           <section id="other-settings-panel" class="panel other-settings-panel" aria-labelledby="other-settings-title">
-            <div class="panel-heading compact"><h2 id="other-settings-title">⚙️ Other Settings</h2></div>
+            <div class="panel-heading compact"><h2 id="other-settings-title"><span aria-hidden="true">&#9881;</span> Other Settings</h2></div>
             <fieldset id="shared-hotkey-options" class="sub-options" hidden><legend>Global Hotkey</legend>
               <div class="inline-group hotkey-badge-group"><label><input type="checkbox" name="batterylessHotkey" value="start"> START</label><label><input type="checkbox" name="batterylessHotkey" value="select" checked> SELECT</label><label><input type="checkbox" name="batterylessHotkey" value="l" checked> L</label><label><input type="checkbox" name="batterylessHotkey" value="r"> R</label><label><input type="checkbox" name="batterylessHotkey" value="up"> &uarr;</label><label><input type="checkbox" name="batterylessHotkey" value="down"> &darr;</label><label><input type="checkbox" name="batterylessHotkey" value="left"> &larr;</label><label><input type="checkbox" name="batterylessHotkey" value="right"> &rarr;</label><label><input type="checkbox" name="batterylessHotkey" value="a"> A</label><label><input type="checkbox" name="batterylessHotkey" value="b"> B</label><div><span>Buttons to push at the same time</span></div></div>
             </fieldset>
@@ -89,17 +91,17 @@
       </form>
 
       <section class="panel rom-panel" aria-labelledby="roms-title">
-        <div class="panel-heading"><h2 id="roms-title">🎮 Game ROMs</h2><button id="clear-button" class="ghost-button" type="button">Clear list</button></div>
+        <div class="panel-heading"><h2 id="roms-title"><span aria-hidden="true">&#127918;</span> Game ROMs</h2><button id="clear-button" class="ghost-button" type="button">Clear list</button></div>
         <p id="save-summary" class="small-copy" hidden></p>
         <p id="empty-state" class="empty-state">No ROMs added yet.</p>
-        <ul id="rom-list" class="rom-list" aria-live="polite"></ul>
+        <ul id="rom-list" class="rom-list"></ul>
       </section>
 
-      <section class="action-bar" aria-label="Patch and download"><button id="patch-button" type="button" class="primary-button">Patch ROMs</button><div id="status-region" class="status-region" aria-live="polite">&nbsp;</div></section>
+      <section class="action-bar" aria-label="Patch and download"><button id="patch-button" type="submit" form="patch-options" class="primary-button">Patch ROMs</button><div id="status-region" class="status-region" role="status" aria-live="polite" tabindex="-1">&nbsp;</div></section>
     </main>
 
     <footer>
-      <div><b>GBA Save Type Patcher v1.5</b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a></small></div>
+      <div><b>GBA Save Type Patcher v<span id="app-version"></span></b> by Lesserkuma<br><small>Source code available on <a href="https://github.com/Lesserkuma/GBA_Save_Type_Patcher" target="_blank" rel="noopener noreferrer">GitHub</a></small></div>
       <div>
         Portions partly based on:<br>
         <a href="https://web.archive.org/web/20070225124322/http://www.gbadat.altervista.org/tools.htm" target="_blank" rel="noopener noreferrer">GBATA SRAM Patcher</a> by coolhj<br>
@@ -110,33 +112,6 @@
       </div>
     </footer>
   </div>
-  <script type="module">
-    async function startApp() {
-      if ("serviceWorker" in navigator) {
-        try {
-          await navigator.serviceWorker.register("./service-worker.js", {
-            updateViaCache: "none",
-          });
-          await navigator.serviceWorker.ready;
-
-          if (!navigator.serviceWorker.controller) {
-            await new Promise((resolve) => {
-              const timeout = window.setTimeout(resolve, 1000);
-              navigator.serviceWorker.addEventListener("controllerchange", () => {
-                window.clearTimeout(timeout);
-                resolve();
-              }, { once: true });
-            });
-          }
-        } catch {
-          // Keep the app usable when service workers are unavailable.
-        }
-      }
-
-      await import("./js/app.js?2");
-    }
-
-    startApp();
-  </script>
+  <script type="module" src="js/bootstrap.js"></script>
 </body>
 </html>

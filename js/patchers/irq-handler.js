@@ -1,13 +1,15 @@
-import { asciiBytes, copyBytes, findBytes, hexToBytes, readU32, startsWithBytes, writeU32 } from "../core/binary.js";
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import { asciiBytes, findBytes, hexToBytes, readU16, readU32, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { stagePatchOperation } from "../patch-engine/draft.js";
 import { alignedPayloadSpan, ensureDirectPayloadRegion, isFreeRegion } from "./payload-placement.js";
 import { IRQ_HANDLER_CONSTANTS, IRQ_HANDLER_PAYLOAD_HEX } from "./irq-handler-data.js";
 
 const C = IRQ_HANDLER_CONSTANTS;
 const GBA_ROM_BASE = 0x08000000;
 const IRQ_HANDLER_PAYLOAD = hexToBytes(IRQ_HANDLER_PAYLOAD_HEX);
-const IRQ_HANDLER_MARKER = IRQ_HANDLER_PAYLOAD.slice(C.IRQ_CONFIG_MAGIC_OFFSET, C.IRQ_CONFIG_MAGIC_OFFSET + 4);
-const IRQ_HANDLER_CODE_MARKER = IRQ_HANDLER_PAYLOAD.slice(C.IRQ_BOOTSTRAP_OFFSET, C.IRQ_BOOTSTRAP_OFFSET + 16);
 const IRQ_HANDLER_ROM_MARKER_TEXT = "lk_irq_shared";
 const IRQ_HANDLER_ROM_MARKER = asciiBytes(IRQ_HANDLER_ROM_MARKER_TEXT);
 const IRQ_SAVE_FLUSH_ENTRY_OFFSET = C.IRQ_SAVE_FLUSH_ENTRY_OFFSET;
@@ -19,11 +21,22 @@ const ORIGINAL_IRQ_SLOT = hexToBytes("f47f0003");
 
 export const IRQ_HANDLER_PAYLOAD_SIZE = C.IRQ_HANDLER_SIZE;
 
-function addOperation(operations, name, offset, size, details = {}) {
-  const operation = { name, offset, size };
-  if (details.codeName !== undefined) operation.code_name = details.codeName;
-  if (details.value !== undefined) operation.value = details.value;
-  operations.push(operation);
+function stageIrqWrite(bytes, operations, name, offset, replacement, details = {}) {
+  return stagePatchOperation(bytes, operations, {
+    id: `irq-${operations.length}`,
+    kind: details.kind || PATCH_OPERATION_KIND.HOOK_REPLACE,
+    component: "irq",
+    labelKey: details.labelKey || "operation.irq",
+    offset,
+    byteLength: replacement.length,
+    expectedBefore: bytes.slice(offset, offset + replacement.length),
+    replacement,
+    metadata: {
+      name,
+      ...(details.codeName !== undefined ? { codeName: details.codeName } : {}),
+      ...(details.value !== undefined ? { value: details.value } : {}),
+    },
+  });
 }
 
 function findAlignedMarker(bytes, marker, start = 0, end = bytes.length, alignment = 1) {
@@ -57,58 +70,43 @@ function encodeArmBranch(sourceAddress, targetAddress) {
 }
 
 export function irqHandlerPayloadSpanForLayout() {
-  return alignedPayloadSpan(IRQ_HANDLER_PAYLOAD.length);
+  return alignedPayloadSpan(IRQ_HANDLER_PAYLOAD.length + IRQ_HANDLER_ROM_MARKER.length);
 }
 
 function writeIrqHandlerRomMarker(bytes, operations, payloadBase) {
   const marker = IRQ_HANDLER_ROM_MARKER;
   const markerOffset = payloadBase + IRQ_HANDLER_PAYLOAD.length;
   const markerEnd = markerOffset + marker.length;
-  const paddingEnd = payloadBase + alignedPayloadSpan(IRQ_HANDLER_PAYLOAD.length);
+  const paddingEnd = payloadBase + irqHandlerPayloadSpanForLayout();
   if (markerEnd > paddingEnd || markerEnd > bytes.length) return false;
   if (!isFreeRegion(bytes, markerOffset, marker.length)) return false;
-  copyBytes(bytes, markerOffset, marker);
-  addOperation(operations, "Shared IRQ ROM marker", markerOffset, marker.length, { codeName: "shared_irq_rom_marker" });
+  stageIrqWrite(bytes, operations, "Shared IRQ ROM marker", markerOffset, marker, {
+    kind: PATCH_OPERATION_KIND.LITERAL_REPLACE,
+    codeName: "shared_irq_rom_marker",
+  });
   return true;
 }
 
-function isHandlerConfigByte(offset) {
-  const configOffsets = [
-    C.IRQ_ORIGINAL_ENTRYPOINT_OFFSET,
-    C.IRQ_FLAGS_OFFSET,
-    C.IRQ_RTC_MENU_ENTRY_OFFSET,
-    IRQ_SAVE_FLUSH_ENTRY_OFFSET,
-    C.IRQ_COUNTDOWN_FRAMES_OFFSET,
-    C.IRQ_INDICATOR_MODE_OFFSET,
-    C.IRQ_HOTKEY_MASK_OFFSET,
-    C.IRQ_HANDLER_ENTRY_OFFSET,
-  ];
-  return configOffsets.some((configOffset) => offset >= configOffset && offset < configOffset + 4);
-}
-
-function currentHandlerCodeMatches(bytes, payloadBase) {
-  if (payloadBase < 0 || payloadBase + IRQ_HANDLER_PAYLOAD.length > bytes.length) return false;
-  for (let offset = 0; offset < IRQ_HANDLER_PAYLOAD.length; offset += 1) {
-    if (isHandlerConfigByte(offset)) continue;
-    if (bytes[payloadBase + offset] !== IRQ_HANDLER_PAYLOAD[offset]) return false;
+function hasPcRelativeLiteralReference(bytes, literalOffset) {
+  const armStart = Math.max(0, literalOffset - 0x1008);
+  for (let instructionOffset = literalOffset - 4; instructionOffset >= armStart; instructionOffset -= 4) {
+    if (instructionOffset + 4 > bytes.length) continue;
+    const instruction = readU32(bytes, instructionOffset);
+    if ((instruction & 0x0e5f0000) !== 0x041f0000) continue;
+    const immediate = instruction & 0x0fff;
+    const target = instructionOffset + 8 + ((instruction & 0x00800000) ? immediate : -immediate);
+    if (target === literalOffset) return true;
   }
-  return true;
-}
 
-export function findIrqHandlerPayloadBase(bytes) {
-  if (!IRQ_HANDLER_MARKER.length || !IRQ_HANDLER_CODE_MARKER.length) return null;
-  let pos = 0;
-  while (true) {
-    const markerOffset = findAlignedMarker(bytes, IRQ_HANDLER_MARKER, pos, bytes.length, 4);
-    if (markerOffset === null) return null;
-    if (
-      markerOffset + IRQ_HANDLER_PAYLOAD.length <= bytes.length
-      && startsWithBytes(bytes, markerOffset + C.IRQ_BOOTSTRAP_OFFSET, IRQ_HANDLER_CODE_MARKER)
-    ) {
-      return markerOffset;
-    }
-    pos = markerOffset + 4;
+  const thumbStart = Math.max(0, literalOffset - 0x404);
+  for (let instructionOffset = literalOffset - 2; instructionOffset >= thumbStart; instructionOffset -= 2) {
+    if (instructionOffset + 2 > bytes.length) continue;
+    const instruction = readU16(bytes, instructionOffset);
+    if ((instruction & 0xf800) !== 0x4800) continue;
+    const target = ((instructionOffset + 4) & ~3) + ((instruction & 0xff) << 2);
+    if (target === literalOffset) return true;
   }
+  return false;
 }
 
 export function patchIrqVectorReferences(out, operations, excludedRanges = []) {
@@ -121,8 +119,13 @@ export function patchIrqVectorReferences(out, operations, excludedRanges = []) {
       pos = matchOffset + 4;
       continue;
     }
-    copyBytes(out, matchOffset, ORIGINAL_IRQ_SLOT);
-    addOperation(operations, "Shared IRQ original handler slot", matchOffset, 4, { value: 0x03007ff4 });
+    if (!hasPcRelativeLiteralReference(out, matchOffset)) {
+      pos = matchOffset + 4;
+      continue;
+    }
+    stageIrqWrite(out, operations, "Shared IRQ original handler slot", matchOffset, ORIGINAL_IRQ_SLOT, {
+      value: 0x03007ff4,
+    });
     count += 1;
     pos = matchOffset + 4;
   }
@@ -140,8 +143,7 @@ function indicatorModeValue(indicatorMode) {
 }
 
 function hotkeyMaskValue(hotkeyMask) {
-  const value = Number.isInteger(hotkeyMask) ? hotkeyMask & 0x03ff : C.IRQ_HOTKEY_MASK;
-  return value || C.IRQ_HOTKEY_MASK;
+  return Number.isInteger(hotkeyMask) ? hotkeyMask & 0x03ff : C.IRQ_HOTKEY_MASK;
 }
 
 function irqFlags(options) {
@@ -160,113 +162,106 @@ function saveFlushEntryValue(options) {
   return (options.saveFlushEntry ?? 0) >>> 0;
 }
 
-function writeExistingConfig(bytes, operations, payloadBase, offset, value, name) {
-  if (offset < 0 || payloadBase + offset + 4 > bytes.length) throw new PatchError("Shared IRQ: existing config offset outside ROM");
-  if (readU32(bytes, payloadBase + offset) === (value >>> 0)) return false;
-  writeU32(bytes, payloadBase + offset, value >>> 0);
-  addOperation(operations, name, payloadBase + offset, 4, { codeName: "shared_irq_config", value: value >>> 0 });
-  return true;
+function configuredIrqPayload(bytes, payloadBase, options) {
+  const originalEntrypoint = decodeEntrypointAddress(bytes);
+  const payload = new Uint8Array(IRQ_HANDLER_PAYLOAD);
+  const payloadAddress = (GBA_ROM_BASE + payloadBase) >>> 0;
+  const handlerAddress = (payloadAddress + C.IRQ_HANDLER_OFFSET) >>> 0;
+  const bootstrapAddress = (payloadAddress + C.IRQ_BOOTSTRAP_OFFSET) >>> 0;
+  const flags = irqFlags(options);
+  const hotkeyMask = hotkeyMaskValue(options.hotkeyMask);
+  const saveFlushEntry = saveFlushEntryValue(options);
+  writeConfig(payload, C.IRQ_ORIGINAL_ENTRYPOINT_OFFSET, originalEntrypoint);
+  writeConfig(payload, C.IRQ_FLAGS_OFFSET, flags);
+  writeConfig(payload, C.IRQ_RTC_MENU_ENTRY_OFFSET, options.rtcMenuEntry || 0);
+  writeConfig(payload, IRQ_SAVE_FLUSH_ENTRY_OFFSET, saveFlushEntry);
+  writeConfig(payload, C.IRQ_COUNTDOWN_FRAMES_OFFSET, options.countdownFrames || 0);
+  writeConfig(payload, C.IRQ_INDICATOR_MODE_OFFSET, indicatorModeValue(options.indicatorMode));
+  writeConfig(payload, C.IRQ_HOTKEY_MASK_OFFSET, hotkeyMask);
+  writeConfig(payload, C.IRQ_HANDLER_ENTRY_OFFSET, handlerAddress);
+  return {
+    payload,
+    payloadAddress,
+    handlerAddress,
+    bootstrapAddress,
+    originalEntrypoint,
+    flags,
+    hotkeyMask,
+    saveFlushEntry,
+  };
 }
 
-export function applyIrqHandlerForPipeline(rom, operations, warnings, options = {}, context = {}) {
-  if (!options.enabled) return null;
+function installedIrqResult(payloadBase, configured, irqReferences) {
+  return {
+    requested: true,
+    status: "patched",
+    payloadOffset: payloadBase,
+    runtimeBase: configured.payloadAddress,
+    size: IRQ_HANDLER_PAYLOAD.length,
+    flags: configured.flags,
+    saveFlushEntry: configured.saveFlushEntry,
+    handlerEntry: configured.handlerAddress,
+    bootstrapEntry: configured.bootstrapAddress,
+    originalEntrypoint: configured.originalEntrypoint,
+    hotkeyMask: configured.hotkeyMask,
+    irqReferences,
+  };
+}
 
-  const existingBase = findIrqHandlerPayloadBase(rom.bytes);
-  if (existingBase !== null) {
-    const payloadAddress = (GBA_ROM_BASE + existingBase) >>> 0;
-    const handlerAddress = (payloadAddress + C.IRQ_HANDLER_OFFSET) >>> 0;
-    const flags = irqFlags(options);
-    const hotkeyMask = hotkeyMaskValue(options.hotkeyMask);
-    const saveFlushEntry = saveFlushEntryValue(options);
-    if (!currentHandlerCodeMatches(rom.bytes, existingBase)) {
-      throw new PatchError("Shared IRQ: an installed handler does not match the current payload; migrations are not supported");
-    }
-
-    let updated = 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_FLAGS_OFFSET, flags, "Shared IRQ flags") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_RTC_MENU_ENTRY_OFFSET, options.rtcMenuEntry || 0, "Shared IRQ RTC menu entry") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, IRQ_SAVE_FLUSH_ENTRY_OFFSET, saveFlushEntry, "Shared IRQ save flush entry") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_COUNTDOWN_FRAMES_OFFSET, options.countdownFrames || 0, "Shared IRQ countdown frames") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_INDICATOR_MODE_OFFSET, indicatorModeValue(options.indicatorMode), "Shared IRQ indicator mode") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_HOTKEY_MASK_OFFSET, hotkeyMask, "Shared IRQ hotkey mask") ? 1 : 0;
-    updated += writeExistingConfig(rom.bytes, operations, existingBase, C.IRQ_HANDLER_ENTRY_OFFSET, handlerAddress, "Shared IRQ handler entry") ? 1 : 0;
-    return {
-      requested: true,
-      status: updated ? "reconfigured" : "already_patched",
-      payload_offset: existingBase,
-      size: IRQ_HANDLER_PAYLOAD.length,
-      flags,
-      save_flush_entry: saveFlushEntry,
-      hotkey_mask: hotkeyMask,
-      handler_entry: handlerAddress,
-    };
-  }
-
-  const localOperations = [];
+function installIrqHandler(rom, operations, warnings, options, context) {
+  const previousOperationCount = operations.length;
+  const localOperations = [...operations];
   const localWarnings = [];
   const workRom = { bytes: new Uint8Array(rom.bytes) };
   const excludedRanges = [...(context.excludedRanges || [])];
-
   try {
-    const payloadSpan = alignedPayloadSpan(IRQ_HANDLER_PAYLOAD.length);
-    const payloadBase = context.payloadOffset ?? ensureDirectPayloadRegion(workRom, localOperations, localWarnings, payloadSpan, "Shared IRQ", excludedRanges);
+    const payloadSpan = irqHandlerPayloadSpanForLayout();
+    const payloadBase = context.payloadOffset ?? ensureDirectPayloadRegion(
+      workRom,
+      localOperations,
+      localWarnings,
+      payloadSpan,
+      "Shared IRQ",
+      excludedRanges,
+    );
     if (payloadBase === null) {
       warnings.push(...localWarnings);
       return { requested: true, status: "failed", size: IRQ_HANDLER_PAYLOAD.length };
     }
-
     excludedRanges.push([payloadBase, payloadBase + payloadSpan]);
-    const payloadEnd = payloadBase + IRQ_HANDLER_PAYLOAD.length;
-    if (payloadEnd > workRom.bytes.length) throw new PatchError("Shared IRQ: payload placement is outside the ROM");
-
-    const originalEntrypoint = decodeEntrypointAddress(workRom.bytes);
-    const payload = new Uint8Array(IRQ_HANDLER_PAYLOAD);
-    const payloadAddress = (GBA_ROM_BASE + payloadBase) >>> 0;
-    const handlerAddress = (payloadAddress + C.IRQ_HANDLER_OFFSET) >>> 0;
-    const bootstrapAddress = (payloadAddress + C.IRQ_BOOTSTRAP_OFFSET) >>> 0;
-    const flags = irqFlags(options);
-    const hotkeyMask = hotkeyMaskValue(options.hotkeyMask);
-    const saveFlushEntry = saveFlushEntryValue(options);
-
-    writeConfig(payload, C.IRQ_ORIGINAL_ENTRYPOINT_OFFSET, originalEntrypoint);
-    writeConfig(payload, C.IRQ_FLAGS_OFFSET, flags);
-    writeConfig(payload, C.IRQ_RTC_MENU_ENTRY_OFFSET, options.rtcMenuEntry || 0);
-    writeConfig(payload, IRQ_SAVE_FLUSH_ENTRY_OFFSET, saveFlushEntry);
-    writeConfig(payload, C.IRQ_COUNTDOWN_FRAMES_OFFSET, options.countdownFrames || 0);
-    writeConfig(payload, C.IRQ_INDICATOR_MODE_OFFSET, indicatorModeValue(options.indicatorMode));
-    writeConfig(payload, C.IRQ_HOTKEY_MASK_OFFSET, hotkeyMask);
-    writeConfig(payload, C.IRQ_HANDLER_ENTRY_OFFSET, handlerAddress);
-
-    copyBytes(workRom.bytes, payloadBase, payload);
-    addOperation(localOperations, "Shared IRQ payload", payloadBase, payload.length, { codeName: "shared_irq_handler", value: payloadAddress });
+    if (payloadBase + IRQ_HANDLER_PAYLOAD.length > workRom.bytes.length) {
+      throw new PatchError("Shared IRQ: payload placement is outside the ROM");
+    }
+    const configured = configuredIrqPayload(workRom.bytes, payloadBase, options);
+    stageIrqWrite(workRom.bytes, localOperations, "Shared IRQ payload", payloadBase, configured.payload, {
+      kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
+      codeName: "shared_irq_handler",
+      value: configured.payloadAddress,
+    });
     writeIrqHandlerRomMarker(workRom.bytes, localOperations, payloadBase);
-
-    const entrypointBranch = encodeArmBranch(GBA_ROM_BASE, bootstrapAddress);
-    writeU32(workRom.bytes, 0, entrypointBranch);
-    addOperation(localOperations, "Shared IRQ Entrypoint", 0, 4, { value: entrypointBranch });
-
-    const irqReferences = patchIrqVectorReferences(workRom.bytes, localOperations, excludedRanges);
-
+    const entrypointBranch = encodeArmBranch(GBA_ROM_BASE, configured.bootstrapAddress);
+    const entrypointBytes = new Uint8Array(4);
+    writeU32(entrypointBytes, 0, entrypointBranch);
+    stageIrqWrite(workRom.bytes, localOperations, "Shared IRQ Entrypoint", 0, entrypointBytes, {
+      value: entrypointBranch,
+    });
+    const irqReferences = patchIrqVectorReferences(
+      workRom.bytes,
+      localOperations,
+      excludedRanges,
+    );
     rom.bytes = workRom.bytes;
-    operations.push(...localOperations);
+    operations.push(...localOperations.slice(previousOperationCount));
     warnings.push(...localWarnings);
-    return {
-      requested: true,
-      status: "patched",
-      payload_offset: payloadBase,
-      runtime_base: payloadAddress,
-      size: IRQ_HANDLER_PAYLOAD.length,
-      flags,
-      save_flush_entry: saveFlushEntry,
-      handler_entry: handlerAddress,
-      bootstrap_entry: bootstrapAddress,
-      original_entrypoint: originalEntrypoint,
-      hotkey_mask: hotkeyMask,
-      irq_references: irqReferences,
-    };
+    return installedIrqResult(payloadBase, configured, irqReferences);
   } catch (error) {
     localWarnings.push(error.message || String(error));
     warnings.push(...localWarnings);
     return { requested: true, status: "failed", size: IRQ_HANDLER_PAYLOAD.length };
   }
+}
+
+export function applyIrqHandlerForPipeline(rom, operations, warnings, options = {}, context = {}) {
+  if (!options.enabled) return null;
+  return installIrqHandler(rom, operations, warnings, options, context);
 }

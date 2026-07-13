@@ -1,0 +1,2927 @@
+{
+  "BATTERYLESS_THUMB_BRANCH_THUNK_HEX": "004b1847",
+  "BATTERYLESS_ARM_BRANCH_THUNK_HEX": "00309fe513ff2fe1",
+  "BATTERYLESS_EEPROM_V111_EPILOGUE_PATCH_HEX": "07490847",
+  "BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX": "00490847",
+  "FLASH1M_BANK_SWITCH_MODERN_PATCH_HEX": "9021090508707047c046c046c046c046c046c046c046c046",
+  "FLASH1M_BANK_SWITCH_GBATA_PATCH_HEX": "044a802109021180c10211807047c046c046c04600000009",
+  "BATTERYLESS_FLASH1M_DIRECT_BANK_SWITCH_PATCH_HEX": "9021090508707047c046c046c046c046c046c046c046c046",
+  "KNOWN_SAVE_TYPES": [
+    "EEPROM_V110",
+    "EEPROM_V120",
+    "EEPROM_V121",
+    "EEPROM_V122",
+    "EEPROM_V111",
+    "EEPROM_V124",
+    "EEPROM_V125",
+    "EEPROM_V126",
+    "FLASH_V120",
+    "FLASH_V121",
+    "FLASH_V123",
+    "FLASH_V124",
+    "FLASH_V125",
+    "FLASH_V126",
+    "FLASH512_V130",
+    "FLASH512_V131",
+    "FLASH512_V133",
+    "FLASH1M_V102",
+    "FLASH1M_V103",
+    "SRAM_F_V100",
+    "SRAM_F_V102",
+    "SRAM_F_V103",
+    "SRAM_F_V110",
+    "SRAM_V110",
+    "SRAM_V111",
+    "SRAM_V112",
+    "SRAM_V113"
+  ],
+  "PATCH_BY_SAVE_TYPE": {
+    "EEPROM_V110": {
+      "name": "EEPROM V110",
+      "type": "tail_trampoline",
+      "identifier": {
+        "name": "EEPROM V110 hook point",
+        "checks": [
+          [
+            0,
+            14
+          ],
+          [
+            1,
+            72
+          ],
+          [
+            2,
+            57
+          ],
+          [
+            3,
+            104
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            96
+          ],
+          [
+            6,
+            14
+          ],
+          [
+            7,
+            72
+          ]
+        ]
+      },
+      "injection_size": 188,
+      "writes": [
+        {
+          "name": "EEPROM V110 hook",
+          "base": "hook",
+          "code_name": "eeprom_v110_hook",
+          "source_offset": 1512,
+          "hex": "0048004701004008"
+        },
+        {
+          "name": "EEPROM V110 hook target",
+          "base": "hook",
+          "target_add": 4,
+          "u32_value": "injection_address"
+        },
+        {
+          "name": "EEPROM V110 SRAM address byte",
+          "base": "hook",
+          "target_add": 712,
+          "code_name": "eeprom_v110_sram_address_byte",
+          "source_offset": 1520,
+          "hex": "e0"
+        },
+        {
+          "name": "EEPROM V110 trampoline",
+          "base": "injection",
+          "code_name": "eeprom_v110_trampoline",
+          "source_offset": 1328,
+          "hex": "39682748814223d0891c0888012802d12448786033e000230022891c10b40124086820405b000343891c521c062af7d110bc3960db01022000021b180e2000061b187b60391c083108880938088016e015490023002210b40124086820405b000343891c521c062af7d110bcdb01022000021b180e2000061b18083b3b600b48396801600a48796801600a48391c08310a88802109060a4302600748004700000000000d0000000e0400000ed4000004d8000004dc000004"
+        },
+        {
+          "name": "EEPROM V110 return target",
+          "base": "injection",
+          "target_add": 184,
+          "u32_value": "return_address"
+        }
+      ]
+    },
+    "EEPROM_V120": {
+      "name": "EEPROM V120-V122",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "EEPROM read",
+          "identifier": {
+            "name": "EEPROM read routine",
+            "checks": [
+              [
+                0,
+                162
+              ],
+              [
+                1,
+                176
+              ],
+              [
+                2,
+                13
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                72
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                104
+              ],
+              [
+                12,
+                128
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                131
+              ],
+              [
+                15,
+                66
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_read",
+              "code_name": "eeprom_read",
+              "source_offset": 32,
+              "hex": "00040a1c400be021090541180731002308781070013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "EEPROM write V120-V122",
+          "identifier": {
+            "name": "EEPROM V120-V122 write routine",
+            "checks": [
+              [
+                0,
+                48
+              ],
+              [
+                2,
+                169
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                11,
+                72
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                104
+              ],
+              [
+                14,
+                128
+              ],
+              [
+                15,
+                136
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_write",
+              "code_name": "eeprom_write",
+              "source_offset": 80,
+              "hex": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "EEPROM_V121": {
+      "name": "EEPROM V120-V122",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "EEPROM read",
+          "identifier": {
+            "name": "EEPROM read routine",
+            "checks": [
+              [
+                0,
+                162
+              ],
+              [
+                1,
+                176
+              ],
+              [
+                2,
+                13
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                72
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                104
+              ],
+              [
+                12,
+                128
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                131
+              ],
+              [
+                15,
+                66
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_read",
+              "code_name": "eeprom_read",
+              "source_offset": 32,
+              "hex": "00040a1c400be021090541180731002308781070013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "EEPROM write V120-V122",
+          "identifier": {
+            "name": "EEPROM V120-V122 write routine",
+            "checks": [
+              [
+                0,
+                48
+              ],
+              [
+                2,
+                169
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                11,
+                72
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                104
+              ],
+              [
+                14,
+                128
+              ],
+              [
+                15,
+                136
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_write",
+              "code_name": "eeprom_write",
+              "source_offset": 80,
+              "hex": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "EEPROM_V122": {
+      "name": "EEPROM V120-V122",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "EEPROM read",
+          "identifier": {
+            "name": "EEPROM read routine",
+            "checks": [
+              [
+                0,
+                162
+              ],
+              [
+                1,
+                176
+              ],
+              [
+                2,
+                13
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                72
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                104
+              ],
+              [
+                12,
+                128
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                131
+              ],
+              [
+                15,
+                66
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_read",
+              "code_name": "eeprom_read",
+              "source_offset": 32,
+              "hex": "00040a1c400be021090541180731002308781070013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "EEPROM write V120-V122",
+          "identifier": {
+            "name": "EEPROM V120-V122 write routine",
+            "checks": [
+              [
+                0,
+                48
+              ],
+              [
+                2,
+                169
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ],
+              [
+                10,
+                3
+              ],
+              [
+                11,
+                72
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                104
+              ],
+              [
+                14,
+                128
+              ],
+              [
+                15,
+                136
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_write",
+              "code_name": "eeprom_write",
+              "source_offset": 80,
+              "hex": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "EEPROM_V111": {
+      "name": "EEPROM V111",
+      "type": "tail_trampoline",
+      "identifier": {
+        "name": "EEPROM V111 hook point",
+        "checks": [
+          [
+            0,
+            14
+          ],
+          [
+            1,
+            72
+          ],
+          [
+            2,
+            57
+          ],
+          [
+            3,
+            104
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            96
+          ],
+          [
+            6,
+            14
+          ],
+          [
+            7,
+            72
+          ]
+        ]
+      },
+      "injection_size": 188,
+      "writes": [
+        {
+          "name": "EEPROM V111 hook",
+          "base": "hook",
+          "code_name": "eeprom_v111_hook",
+          "source_offset": 1512,
+          "hex": "0048004701004008"
+        },
+        {
+          "name": "EEPROM V111 hook target",
+          "base": "hook",
+          "target_add": 4,
+          "u32_value": "injection_address"
+        },
+        {
+          "name": "EEPROM V111 SRAM address byte",
+          "base": "hook",
+          "target_add": 726,
+          "code_name": "eeprom_v111_sram_address_byte",
+          "source_offset": 1520,
+          "hex": "e0"
+        },
+        {
+          "name": "EEPROM V111 trampoline",
+          "base": "injection",
+          "code_name": "eeprom_v111_trampoline",
+          "source_offset": 1328,
+          "hex": "39682748814223d0891c0888012802d12448786033e000230022891c10b40124086820405b000343891c521c062af7d110bc3960db01022000021b180e2000061b187b60391c083108880938088016e015490023002210b40124086820405b000343891c521c062af7d110bcdb01022000021b180e2000061b18083b3b600b48396801600a48796801600a48391c08310a88802109060a4302600748004700000000000d0000000e0400000ed4000004d8000004dc000004"
+        },
+        {
+          "name": "EEPROM V111 return target",
+          "base": "injection",
+          "target_add": 184,
+          "u32_value": "return_address"
+        }
+      ]
+    },
+    "EEPROM_V124": {
+      "name": "EEPROM V124-V125",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "EEPROM read",
+          "identifier": {
+            "name": "EEPROM read routine",
+            "checks": [
+              [
+                0,
+                162
+              ],
+              [
+                1,
+                176
+              ],
+              [
+                2,
+                13
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                72
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                104
+              ],
+              [
+                12,
+                128
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                131
+              ],
+              [
+                15,
+                66
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_read",
+              "code_name": "eeprom_read",
+              "source_offset": 32,
+              "hex": "00040a1c400be021090541180731002308781070013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "EEPROM write V124-V126",
+          "identifier": {
+            "name": "EEPROM V124-V126 write routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                2,
+                172
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                9,
+                12
+              ],
+              [
+                10,
+                18
+              ],
+              [
+                11,
+                6
+              ],
+              [
+                12,
+                23
+              ],
+              [
+                13,
+                14
+              ],
+              [
+                14,
+                3
+              ],
+              [
+                15,
+                72
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_write",
+              "code_name": "eeprom_write",
+              "source_offset": 80,
+              "hex": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "EEPROM_V125": {
+      "name": "EEPROM V124-V125",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "EEPROM read",
+          "identifier": {
+            "name": "EEPROM read routine",
+            "checks": [
+              [
+                0,
+                162
+              ],
+              [
+                1,
+                176
+              ],
+              [
+                2,
+                13
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                72
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                104
+              ],
+              [
+                12,
+                128
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                131
+              ],
+              [
+                15,
+                66
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_read",
+              "code_name": "eeprom_read",
+              "source_offset": 32,
+              "hex": "00040a1c400be021090541180731002308781070013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "EEPROM write V124-V126",
+          "identifier": {
+            "name": "EEPROM V124-V126 write routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                2,
+                172
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                1
+              ],
+              [
+                9,
+                12
+              ],
+              [
+                10,
+                18
+              ],
+              [
+                11,
+                6
+              ],
+              [
+                12,
+                23
+              ],
+              [
+                13,
+                14
+              ],
+              [
+                14,
+                3
+              ],
+              [
+                15,
+                72
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_write",
+              "code_name": "eeprom_write",
+              "source_offset": 80,
+              "hex": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "EEPROM_V126": {
+      "name": "EEPROM V126",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "EEPROM read",
+          "identifier": {
+            "name": "EEPROM read routine",
+            "checks": [
+              [
+                0,
+                162
+              ],
+              [
+                1,
+                176
+              ],
+              [
+                2,
+                13
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ],
+              [
+                8,
+                3
+              ],
+              [
+                9,
+                72
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                104
+              ],
+              [
+                12,
+                128
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                131
+              ],
+              [
+                15,
+                66
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_read",
+              "code_name": "eeprom_read",
+              "source_offset": 32,
+              "hex": "00040a1c400be021090541180731002308781070013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "EEPROM write V126",
+          "identifier": {
+            "name": "EEPROM V126 write routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                71
+              ],
+              [
+                3,
+                70
+              ],
+              [
+                4,
+                128
+              ],
+              [
+                5,
+                180
+              ],
+              [
+                6,
+                172
+              ],
+              [
+                7,
+                176
+              ],
+              [
+                8,
+                14
+              ],
+              [
+                9,
+                28
+              ],
+              [
+                10,
+                0
+              ],
+              [
+                11,
+                4
+              ],
+              [
+                12,
+                5
+              ],
+              [
+                13,
+                12
+              ],
+              [
+                14,
+                18
+              ],
+              [
+                15,
+                6
+              ],
+              [
+                16,
+                18
+              ],
+              [
+                17,
+                14
+              ],
+              [
+                18,
+                144
+              ],
+              [
+                19,
+                70
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "eeprom_write",
+              "code_name": "eeprom_write",
+              "source_offset": 80,
+              "hex": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH_V120": {
+      "name": "FLASH V120",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH V120-V121 read id",
+          "identifier": {
+            "name": "FLASH V120-V121 read id routine",
+            "checks": [
+              [
+                0,
+                144
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                147
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                111
+              ],
+              [
+                5,
+                70
+              ],
+              [
+                6,
+                57
+              ],
+              [
+                7,
+                29
+              ],
+              [
+                8,
+                8
+              ],
+              [
+                9,
+                28
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v120_read_id",
+              "code_name": "flash_v120_read_id",
+              "hex": "00b53d2000021f21084302bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V120-V121 sector erase 1F3D",
+          "identifier": {
+            "name": "FLASH V120-V121 1F3D sector erase routine",
+            "checks": [
+              [
+                0,
+                128
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                146
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                111
+              ],
+              [
+                5,
+                70
+              ],
+              [
+                6,
+                57
+              ],
+              [
+                7,
+                28
+              ],
+              [
+                8,
+                8
+              ],
+              [
+                9,
+                128
+              ],
+              [
+                10,
+                56
+              ],
+              [
+                11,
+                28
+              ],
+              [
+                12,
+                1
+              ],
+              [
+                13,
+                136
+              ],
+              [
+                14,
+                15
+              ],
+              [
+                15,
+                41
+              ],
+              [
+                16,
+                4
+              ],
+              [
+                17,
+                217
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v120_sector_erase_1f3d",
+              "code_name": "flash_v120_sector_erase",
+              "hex": "7cb50007000ce0210905091801231b03ff200870013b0131002bfad100207cbc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V120-V121 program 1F3D",
+          "identifier": {
+            "name": "FLASH V120-V121 1F3D program routine",
+            "checks": [
+              [
+                0,
+                128
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                147
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                111
+              ],
+              [
+                5,
+                70
+              ],
+              [
+                6,
+                121
+              ],
+              [
+                7,
+                96
+              ],
+              [
+                8,
+                57
+              ],
+              [
+                9,
+                28
+              ],
+              [
+                10,
+                8
+              ],
+              [
+                11,
+                128
+              ],
+              [
+                12,
+                56
+              ],
+              [
+                13,
+                28
+              ],
+              [
+                14,
+                1
+              ],
+              [
+                15,
+                136
+              ],
+              [
+                16,
+                15
+              ],
+              [
+                17,
+                41
+              ],
+              [
+                18,
+                3
+              ],
+              [
+                19,
+                217
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v120_program_1f3d",
+              "code_name": "flash_v120_program",
+              "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc08bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH_V121": {
+      "name": "FLASH V121",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH V121 read id",
+          "identifier": {
+            "name": "FLASH V121 read id routine",
+            "checks": [
+              [
+                0,
+                144
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                147
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                111
+              ],
+              [
+                5,
+                70
+              ],
+              [
+                6,
+                57
+              ],
+              [
+                7,
+                29
+              ],
+              [
+                8,
+                8
+              ],
+              [
+                9,
+                28
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v121_read_id",
+              "code_name": "flash_v120_read_id",
+              "hex": "00b53d2000021f21084302bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V121 sector erase 1F3D",
+          "identifier": {
+            "name": "FLASH V121 1F3D sector erase routine",
+            "checks": [
+              [
+                0,
+                128
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                147
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                111
+              ],
+              [
+                5,
+                70
+              ],
+              [
+                6,
+                57
+              ],
+              [
+                7,
+                28
+              ],
+              [
+                8,
+                12
+              ],
+              [
+                9,
+                49
+              ],
+              [
+                10,
+                8
+              ],
+              [
+                11,
+                28
+              ],
+              [
+                12,
+                255
+              ],
+              [
+                13,
+                247
+              ],
+              [
+                14,
+                84
+              ],
+              [
+                15,
+                251
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v121_sector_erase_1f3d",
+              "code_name": "flash_v120_sector_erase",
+              "hex": "7cb50007000ce0210905091801231b03ff200870013b0131002bfad100207cbc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V121 program 1F3D",
+          "identifier": {
+            "name": "FLASH V121 1F3D program routine",
+            "checks": [
+              [
+                0,
+                128
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                148
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                111
+              ],
+              [
+                5,
+                70
+              ],
+              [
+                6,
+                121
+              ],
+              [
+                7,
+                96
+              ],
+              [
+                8,
+                57
+              ],
+              [
+                9,
+                28
+              ],
+              [
+                10,
+                8
+              ],
+              [
+                11,
+                128
+              ],
+              [
+                12,
+                56
+              ],
+              [
+                13,
+                28
+              ],
+              [
+                14,
+                1
+              ],
+              [
+                15,
+                136
+              ],
+              [
+                16,
+                15
+              ],
+              [
+                17,
+                41
+              ],
+              [
+                18,
+                3
+              ],
+              [
+                19,
+                217
+              ],
+              [
+                104,
+                116
+              ],
+              [
+                105,
+                62
+              ],
+              [
+                106,
+                47
+              ],
+              [
+                107,
+                8
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v121_program_1f3d",
+              "code_name": "flash_v120_program",
+              "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc08bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH_V123": {
+      "name": "FLASH V123-V126",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH V123-V126 identify",
+          "identifier": {
+            "name": "FLASH V123-V126 identify routine",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                170
+              ],
+              [
+                3,
+                255
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_identify",
+              "code_name": "flash_v123_identify",
+              "source_offset": 288,
+              "hex": "1b231b0232200343"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 wait",
+          "identifier": {
+            "name": "FLASH V123-V126 small wait routine",
+            "checks": [
+              [
+                0,
+                112
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                21
+              ],
+              [
+                5,
+                77
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_wait",
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            },
+            {
+              "name": "flash_v123_wait",
+              "target_add": 116,
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 program",
+          "identifier": {
+            "name": "FLASH V123-V126 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                15
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_program",
+              "code_name": "flash_v123_program",
+              "source_offset": 304,
+              "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH_V124": {
+      "name": "FLASH V123-V126",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH V123-V126 identify",
+          "identifier": {
+            "name": "FLASH V123-V126 identify routine",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                170
+              ],
+              [
+                3,
+                255
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_identify",
+              "code_name": "flash_v123_identify",
+              "source_offset": 288,
+              "hex": "1b231b0232200343"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 wait",
+          "identifier": {
+            "name": "FLASH V123-V126 small wait routine",
+            "checks": [
+              [
+                0,
+                112
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                21
+              ],
+              [
+                5,
+                77
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_wait",
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            },
+            {
+              "name": "flash_v123_wait",
+              "target_add": 116,
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 program",
+          "identifier": {
+            "name": "FLASH V123-V126 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                15
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_program",
+              "code_name": "flash_v123_program",
+              "source_offset": 304,
+              "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH_V125": {
+      "name": "FLASH V123-V126",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH V123-V126 identify",
+          "identifier": {
+            "name": "FLASH V123-V126 identify routine",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                170
+              ],
+              [
+                3,
+                255
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_identify",
+              "code_name": "flash_v123_identify",
+              "source_offset": 288,
+              "hex": "1b231b0232200343"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 wait",
+          "identifier": {
+            "name": "FLASH V123-V126 small wait routine",
+            "checks": [
+              [
+                0,
+                112
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                21
+              ],
+              [
+                5,
+                77
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_wait",
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            },
+            {
+              "name": "flash_v123_wait",
+              "target_add": 116,
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 program",
+          "identifier": {
+            "name": "FLASH V123-V126 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                15
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_program",
+              "code_name": "flash_v123_program",
+              "source_offset": 304,
+              "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH_V126": {
+      "name": "FLASH V123-V126",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH V123-V126 identify",
+          "identifier": {
+            "name": "FLASH V123-V126 identify routine",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                170
+              ],
+              [
+                3,
+                255
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_identify",
+              "code_name": "flash_v123_identify",
+              "source_offset": 288,
+              "hex": "1b231b0232200343"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 wait",
+          "identifier": {
+            "name": "FLASH V123-V126 small wait routine",
+            "checks": [
+              [
+                0,
+                112
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                21
+              ],
+              [
+                5,
+                77
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_wait",
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            },
+            {
+              "name": "flash_v123_wait",
+              "target_add": 116,
+              "code_name": "flash_v123_wait",
+              "source_offset": 300,
+              "hex": "00207047"
+            }
+          ]
+        },
+        {
+          "name": "FLASH V123-V126 program",
+          "identifier": {
+            "name": "FLASH V123-V126 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                144
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                15
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                0
+              ],
+              [
+                7,
+                4
+              ],
+              [
+                8,
+                4
+              ],
+              [
+                9,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash_v123_program",
+              "code_name": "flash_v123_program",
+              "source_offset": 304,
+              "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH512_V130": {
+      "name": "FLASH512 V130-V131",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH512 program",
+          "identifier": {
+            "name": "FLASH512 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                160
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                22
+              ],
+              [
+                7,
+                28
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash512_program",
+              "code_name": "flash512_program",
+              "source_offset": 368,
+              "hex": "70b5a0b000034018e0210905091808781070013b01320131002bf8d1002020b070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH512 helpers",
+          "identifier": {
+            "name": "FLASH512 helper routines",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                136
+              ],
+              [
+                3,
+                253
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash512_identify",
+              "code_name": "flash512_identify",
+              "source_offset": 416,
+              "hex": "1b231b0232200343"
+            },
+            {
+              "name": "flash512_helper_return",
+              "target_add": 268,
+              "code_name": "flash512_helper_return",
+              "source_offset": 432,
+              "hex": "00b5002002bc0847"
+            },
+            {
+              "name": "flash512_helper_return",
+              "target_add": 384,
+              "code_name": "flash512_helper_return",
+              "source_offset": 432,
+              "hex": "00b5002002bc0847"
+            },
+            {
+              "name": "flash512_helper_program",
+              "target_add": 948,
+              "code_name": "flash512_helper_program",
+              "source_offset": 448,
+              "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH512_V131": {
+      "name": "FLASH512 V130-V131",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH512 program",
+          "identifier": {
+            "name": "FLASH512 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                160
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                22
+              ],
+              [
+                7,
+                28
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash512_program",
+              "code_name": "flash512_program",
+              "source_offset": 368,
+              "hex": "70b5a0b000034018e0210905091808781070013b01320131002bf8d1002020b070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH512 helpers",
+          "identifier": {
+            "name": "FLASH512 helper routines",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                136
+              ],
+              [
+                3,
+                253
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash512_identify",
+              "code_name": "flash512_identify",
+              "source_offset": 416,
+              "hex": "1b231b0232200343"
+            },
+            {
+              "name": "flash512_helper_return",
+              "target_add": 268,
+              "code_name": "flash512_helper_return",
+              "source_offset": 432,
+              "hex": "00b5002002bc0847"
+            },
+            {
+              "name": "flash512_helper_return",
+              "target_add": 384,
+              "code_name": "flash512_helper_return",
+              "source_offset": 432,
+              "hex": "00b5002002bc0847"
+            },
+            {
+              "name": "flash512_helper_program",
+              "target_add": 948,
+              "code_name": "flash512_helper_program",
+              "source_offset": 448,
+              "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH512_V133": {
+      "name": "FLASH512 V133",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH512 V133 program",
+          "identifier": {
+            "name": "FLASH512 V133 program routine",
+            "checks": [
+              [
+                0,
+                240
+              ],
+              [
+                1,
+                181
+              ],
+              [
+                2,
+                160
+              ],
+              [
+                3,
+                176
+              ],
+              [
+                4,
+                13
+              ],
+              [
+                5,
+                28
+              ],
+              [
+                6,
+                22
+              ],
+              [
+                7,
+                28
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash512_v133_program",
+              "code_name": "flash512_v133_program",
+              "source_offset": 368,
+              "hex": "70b5a0b000034018e0210905091808781070013b01320131002bf8d1002020b070bc02bc0847"
+            }
+          ]
+        },
+        {
+          "name": "FLASH512 V133 helpers",
+          "identifier": {
+            "name": "FLASH512 V133 helper routines",
+            "checks": [
+              [
+                0,
+                255
+              ],
+              [
+                1,
+                247
+              ],
+              [
+                2,
+                136
+              ],
+              [
+                3,
+                253
+              ],
+              [
+                4,
+                0
+              ],
+              [
+                5,
+                4
+              ],
+              [
+                6,
+                3
+              ],
+              [
+                7,
+                12
+              ]
+            ]
+          },
+          "writes": [
+            {
+              "name": "flash512_v133_identify",
+              "code_name": "flash512_v133_identify",
+              "source_offset": 416,
+              "hex": "1b231b0232200343"
+            },
+            {
+              "name": "flash512_v133_helper_return",
+              "target_add": 280,
+              "code_name": "flash512_v133_helper_return",
+              "source_offset": 432,
+              "hex": "00b5002002bc0847"
+            },
+            {
+              "name": "flash512_v133_helper_return",
+              "target_add": 396,
+              "code_name": "flash512_v133_helper_return",
+              "source_offset": 432,
+              "hex": "00b5002002bc0847"
+            },
+            {
+              "name": "flash512_v133_helper_program",
+              "target_add": 1116,
+              "code_name": "flash512_v133_helper_program",
+              "source_offset": 448,
+              "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH1M_V102": {
+      "name": "FLASH1M V102",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH1M V102 switch bank",
+          "identifier": {
+            "name": "FLASH1M V102 switch bank routine",
+            "marker": "054baa211970054a55211170b0211970e021090508707047"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v102_switch_bank",
+              "code_name": "flash1m_v102_switch_bank",
+              "hex": "9021090508707047c046c046c046c046c046c046c046c046"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V102 inter 1",
+          "identifier": {
+            "name": "FLASH1M V102 inter 1",
+            "marker": "5555000eaa2a000e30b591b0684600f0f3f86d460135"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v102_inter_1",
+              "code_name": "flash1m_v102_inter_1",
+              "hex": "feffff010000000030b591b0684600f0f3f86d460135"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V102 read id",
+          "identifier": {
+            "name": "FLASH1M V102 read id routine",
+            "marker": "064aaa2010700549552008709020107010a9034a101c08e000005555000eaa2a000e204e000008880138088008880028f9d10c48"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v102_read_id",
+              "code_name": "flash1m_v102_read_id",
+              "hex": "064aaa2000000549552000009020000010a9034a101c08e000005555000eaa2a000e204e000008880138088008880028f9d10c48132013200006040ce0200005622062200006000e04430749aa200000074a55200000f02000000000"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V102 write",
+          "identifier": {
+            "name": "FLASH1M V102 write routine",
+            "marker": "1449aa240c70134b55221a70802008700c701a7010200870"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v102_write",
+              "code_name": "flash1m_v102_write",
+              "hex": "0e210906ff248022134b5202013a8c54fcd1000000000000"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V102 sector delete",
+          "identifier": {
+            "name": "FLASH1M V102 sector delete routine",
+            "marker": "1349aa250d70134b55221a70802008700d701a7030202070"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v102_sector_delete",
+              "code_name": "flash1m_v102_sector_delete",
+              "hex": "1349ff25082200005202013aa554fcd10000000000000000"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V102 command cleanup",
+          "identifier": {
+            "name": "FLASH1M V102 command cleanup",
+            "marker": "0a4caa222270094b55221a70a022227002780a70"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v102_command_cleanup",
+              "code_name": "flash1m_v102_command_cleanup",
+              "hex": "0a4caa220000094b55220000a022000002780a70"
+            }
+          ]
+        }
+      ]
+    },
+    "FLASH1M_V103": {
+      "name": "FLASH1M V103",
+      "type": "simple",
+      "steps": [
+        {
+          "name": "FLASH1M V103 switch bank",
+          "identifier": {
+            "name": "FLASH1M V103 switch bank routine",
+            "marker": "054baa211970054a55211170b0211970e021090508707047"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_switch_bank",
+              "code_name": "flash1m_v103_switch_bank",
+              "hex": "9021090508707047c046c046c046c046c046c046c046c046"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V103 inter 1",
+          "identifier": {
+            "name": "FLASH1M V103 inter 1",
+            "marker": "5555000eaa2a000e30b591b0684600f0f3f86d460135"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_inter_1",
+              "code_name": "flash1m_v103_inter_1",
+              "hex": "feffff010000000030b591b0684600f0f3f86d460135"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V103 read id",
+          "identifier": {
+            "name": "FLASH1M V103 read id routine",
+            "marker": "064aaa2010700549552008709020107010a9034a101c08e000005555000eaa2a000e204e000008880138088008880028f9d10c48"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_read_id",
+              "code_name": "flash1m_v103_read_id",
+              "hex": "064aaa2000000549552000009020000010a9034a101c08e000005555000eaa2a000e204e000008880138088008880028f9d10c48132013200006040ce0200005622062200006000e04430749aa200000074a55200000f02000000000"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V103 write",
+          "identifier": {
+            "name": "FLASH1M V103 write routine",
+            "marker": "1449aa240c70134b55221a70802008700c701a7010200870"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_write",
+              "code_name": "flash1m_v103_write",
+              "hex": "0e210906ff248022134b5202013a8c54fcd1000000000000"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V103 sector delete",
+          "identifier": {
+            "name": "FLASH1M V103 sector delete routine",
+            "marker": "1449aa250d70144b55221a70802008700d701a7030202070"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_sector_delete",
+              "code_name": "flash1m_v103_sector_delete",
+              "hex": "1449ff25082200005202013aa554fcd10000000000000000"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V103 command cleanup A",
+          "identifier": {
+            "name": "FLASH1M V103 command cleanup A",
+            "marker": "0c4aaa2010700b4955200870a020107027700948"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_command_cleanup_a",
+              "code_name": "flash1m_v103_command_cleanup_a",
+              "hex": "0c4aaa2000000b4955200000a020000027700948"
+            }
+          ]
+        },
+        {
+          "name": "FLASH1M V103 command cleanup B",
+          "identifier": {
+            "name": "FLASH1M V103 command cleanup B",
+            "marker": "0a4caa222270094b55221a70a022227002780a70"
+          },
+          "writes": [
+            {
+              "name": "flash1m_v103_command_cleanup_b",
+              "code_name": "flash1m_v103_command_cleanup_b",
+              "hex": "0a4caa220000094b55220000a022000002780a70"
+            }
+          ]
+        }
+      ]
+    },
+    "SRAM_F_V100": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_F_V102": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_F_V103": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_F_V110": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_V110": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_V111": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_V112": {
+      "name": "SRAM",
+      "type": "already_sram"
+    },
+    "SRAM_V113": {
+      "name": "SRAM",
+      "type": "already_sram"
+    }
+  },
+  "BATTERYLESS_WRITE_HOOKS": [
+    {
+      "name": "SRAM write",
+      "marker": "30b5051c0c1c131c0b4a10880b490840",
+      "target": "sram",
+      "thunk": "thumb",
+      "save_size": 32768
+    },
+    {
+      "name": "SRAM write alternate",
+      "marker": "80b583b06f4638607960ba6009480949",
+      "target": "sram",
+      "thunk": "thumb",
+      "save_size": 32768
+    },
+    {
+      "name": "SRAM fast write",
+      "marker": "04c090e401c0c1e42cc4a0e101c0c1e4",
+      "target": "sram",
+      "thunk": "arm",
+      "save_size": 32768
+    },
+    {
+      "name": "EEPROM write",
+      "marker": "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847",
+      "target": "eeprom",
+      "thunk": "thumb",
+      "save_size": 8192
+    },
+    {
+      "name": "EEPROM V110/V111 posthook",
+      "marker": "0a88802109060a430260074800470000",
+      "target": "eeprom_v111_posthook",
+      "thunk": "eeprom_v111_epilogue",
+      "save_size": 512,
+      "storage_mode": 1
+    },
+    {
+      "name": "FLASH V120-V121 program",
+      "marker": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc08bc0847",
+      "target": "flash",
+      "thunk": "thumb",
+      "save_size": 65536
+    },
+    {
+      "name": "FLASH512 helper program",
+      "marker": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847",
+      "target": "flash",
+      "thunk": "thumb",
+      "save_size": 65536
+    },
+    {
+      "name": "FLASH V123-V126 program",
+      "marker": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847",
+      "target": "flash",
+      "thunk": "thumb",
+      "save_size": 65536
+    },
+    {
+      "name": "FLASH1M program",
+      "marker": "f0b590b00f1c0004040c034800684089",
+      "target": "flash",
+      "thunk": "thumb",
+      "save_size": 131072
+    }
+  ]
+}

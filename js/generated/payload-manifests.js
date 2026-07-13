@@ -1,0 +1,96 @@
+// Generated file. Do not edit.
+// Generator: payloads/generate_manifests.py
+// Generator version: 2
+// Source SHA-256: c9792c7df095d46aa924bf9c5b52f254fdd86d5825d008e87d1cf1134477f615
+// Payload-set SHA-256: a9c3418f3a5cdd278889e9c1113f6944cf1fc1fb1673f0e14cf655c2d0b4ac4b
+// Toolchain: devkitARM 16.1.0; GNU Binutils 2.46.0.20260210
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+const toolchain = Object.freeze({gcc: "devkitARM 16.1.0", binutils: "GNU Binutils 2.46.0.20260210"});
+
+export const PAYLOAD_MANIFESTS = Object.freeze({
+  batterylessSram: Object.freeze({
+    schemaVersion: 1,
+    payloadId: "batteryless-sram",
+    payloadVersion: 2,
+    licenseExpression: "GPL-3.0-or-later AND MIT",
+    sourceSha256: "9801e8aa528ab0be4d4cd3c176be2ee0d4fa68eca7c517f508ca8e318632ba54",
+    binarySha256: "20104a0c18fe5b045ebf45fd477e34ca8571c1ab5c8f5e63bd0cea66d2d76931",
+    toolchain: toolchain,
+    size: 4428,
+    alignment: 0x40000,
+    symbols: Object.freeze({}),
+    configOffsets: Object.freeze({"originalEntrypoint":0,"flushMode":4,"saveSize":8,"storageMode":36,"indicatorMode":40}),
+    relocations: Object.freeze([]),
+  }),
+  batterylessSramGbata: Object.freeze({
+    schemaVersion: 1,
+    payloadId: "batteryless-sram-gbata",
+    payloadVersion: 2,
+    licenseExpression: "GPL-3.0-or-later AND MIT",
+    sourceSha256: "9801e8aa528ab0be4d4cd3c176be2ee0d4fa68eca7c517f508ca8e318632ba54",
+    binarySha256: "8a8dba64e19f2e28e7d723b16c7d34e6417a7849be5ddb2919a6494f5f1c29aa",
+    toolchain: toolchain,
+    size: 4524,
+    alignment: 0x40000,
+    symbols: Object.freeze({}),
+    configOffsets: Object.freeze({"originalEntrypoint":0,"flushMode":4,"saveSize":8,"storageMode":36,"indicatorMode":40}),
+    relocations: Object.freeze([]),
+  }),
+  flashJournal: Object.freeze({
+    schemaVersion: 1,
+    payloadId: "flash-journal",
+    payloadVersion: 2,
+    licenseExpression: "GPL-3.0-or-later AND MIT",
+    sourceSha256: "dbf9c6bf6f87f87ea8438bf95125f0817e3f049cfb3706a0af2ba62e11493418",
+    binarySha256: "e02163754a88be17326255cd3896350544baa11939fb71430ac902c92de74144",
+    toolchain: toolchain,
+    size: 6112,
+    alignment: 0x40000,
+    symbols: Object.freeze({}),
+    configOffsets: Object.freeze({"journalBase":28,"logicalSaveSize":32,"layout":36,"countdown":40,"indicator":44}),
+    relocations: Object.freeze([]),
+  }),
+  customFlashJournal: Object.freeze({
+    schemaVersion: 1,
+    payloadId: "custom-flash-journal",
+    payloadVersion: 2,
+    licenseExpression: "GPL-3.0-only AND MIT",
+    sourceSha256: "e7c6efaab7c1ce6695adf6d73fb53423422469537311b894367bef05acae4f5b",
+    binarySha256: "2f5e02f126fef9716298c20d4be15b4fa6f8983a683433fd67f6e79e89f94fd5",
+    toolchain: toolchain,
+    size: 6168,
+    alignment: 0x40000,
+    symbols: Object.freeze({}),
+    configOffsets: Object.freeze({"journalBase":28,"logicalSaveSize":32,"layout":36,"countdown":40,"indicator":44,"saveChipType":48}),
+    relocations: Object.freeze([]),
+  }),
+  fakeRtc: Object.freeze({
+    schemaVersion: 1,
+    payloadId: "fake-rtc",
+    payloadVersion: 1,
+    licenseExpression: "GPL-3.0-or-later",
+    sourceSha256: "3e206139c4cd7d42b23de1077e70cef7f78e42e96e503f2406957c49707beeaf",
+    binarySha256: "777d0e2b93639d551b0946324a62134e9f605a65220d730f410710a2087a060b",
+    toolchain: toolchain,
+    size: 7946,
+    alignment: 0x100,
+    symbols: Object.freeze({"fake_rtc_menu_run_runtime":150998700,"payload_getstatus":150995012,"payload_gettimedate":150995020,"payload_probe":150994944,"payload_reset":150995008}),
+    configOffsets: Object.freeze({}),
+    relocations: Object.freeze([584,1544,1548,2408,2416,2424,2428,2512,3104,3108]),
+  }),
+  sharedIrq: Object.freeze({
+    schemaVersion: 1,
+    payloadId: "shared-irq",
+    payloadVersion: 1,
+    licenseExpression: "GPL-3.0-or-later",
+    sourceSha256: "76e4a40ab1c55afd11b22cde02def344a709795503968328353bc08b6fe39e56",
+    binarySha256: "5dd64dd2959075ac52f34d6ddcfc6cbd927d53e0729c8437c7feca26df0b85db",
+    toolchain: toolchain,
+    size: 508,
+    alignment: 0x100,
+    symbols: Object.freeze({"bootstrap":36,"handler":60}),
+    configOffsets: Object.freeze({"originalEntrypoint":4,"flags":8,"rtcMenuEntry":12,"saveFlushEntry":16,"countdownFrames":20,"indicatorMode":24,"hotkeyMask":28,"handlerEntry":32}),
+    relocations: Object.freeze([]),
+  }),
+});
