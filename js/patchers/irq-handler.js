@@ -2,9 +2,9 @@
 
 import { asciiBytes, findBytes, hexToBytes, readU16, readU32, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
-import { PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { PATCH_OPERATION_KIND, RTC_TICK_MODES } from "../domain/constants.js";
 import { stagePatchOperation } from "../patch-engine/draft.js";
-import { alignedPayloadSpan, ensureDirectPayloadRegion, isFreeRegion } from "./payload-placement.js";
+import { ensureDirectPayloadRegion, isFreeRegion, markedPayloadSpan } from "./payload-placement.js";
 import { IRQ_HANDLER_CONSTANTS, IRQ_HANDLER_PAYLOAD_HEX } from "./irq-handler-data.js";
 
 const C = IRQ_HANDLER_CONSTANTS;
@@ -16,6 +16,7 @@ const IRQ_SAVE_FLUSH_ENTRY_OFFSET = C.IRQ_SAVE_FLUSH_ENTRY_OFFSET;
 const IRQ_FLAG_SAVE_FLUSH = C.IRQ_FLAG_SAVE_FLUSH;
 const IRQ_FLAG_SAVE_FLUSH_AUTO = C.IRQ_FLAG_SAVE_FLUSH_AUTO;
 const IRQ_FLAG_SAVE_FLUSH_HOTKEY = C.IRQ_FLAG_SAVE_FLUSH_HOTKEY;
+const IRQ_FLAG_RTC_VBLANK_TICK = C.IRQ_FLAG_RTC_VBLANK_TICK;
 const OLD_IRQ_SLOT = hexToBytes("fc7f0003");
 const ORIGINAL_IRQ_SLOT = hexToBytes("f47f0003");
 
@@ -70,7 +71,7 @@ function encodeArmBranch(sourceAddress, targetAddress) {
 }
 
 export function irqHandlerPayloadSpanForLayout() {
-  return alignedPayloadSpan(IRQ_HANDLER_PAYLOAD.length + IRQ_HANDLER_ROM_MARKER.length);
+  return markedPayloadSpan(IRQ_HANDLER_PAYLOAD.length, IRQ_HANDLER_ROM_MARKER.length);
 }
 
 function writeIrqHandlerRomMarker(bytes, operations, payloadBase) {
@@ -78,8 +79,12 @@ function writeIrqHandlerRomMarker(bytes, operations, payloadBase) {
   const markerOffset = payloadBase + IRQ_HANDLER_PAYLOAD.length;
   const markerEnd = markerOffset + marker.length;
   const paddingEnd = payloadBase + irqHandlerPayloadSpanForLayout();
-  if (markerEnd > paddingEnd || markerEnd > bytes.length) return false;
-  if (!isFreeRegion(bytes, markerOffset, marker.length)) return false;
+  if (markerEnd > paddingEnd || markerEnd > bytes.length) {
+    throw new PatchError("Shared IRQ: reserved payload span does not include the ROM marker");
+  }
+  if (!isFreeRegion(bytes, markerOffset, marker.length)) {
+    throw new PatchError("Shared IRQ: ROM marker region is not free");
+  }
   stageIrqWrite(bytes, operations, "Shared IRQ ROM marker", markerOffset, marker, {
     kind: PATCH_OPERATION_KIND.LITERAL_REPLACE,
     codeName: "shared_irq_rom_marker",
@@ -146,12 +151,21 @@ function hotkeyMaskValue(hotkeyMask) {
   return Number.isInteger(hotkeyMask) ? hotkeyMask & 0x03ff : C.IRQ_HOTKEY_MASK;
 }
 
+function rtcTickModeValue(options) {
+  if (!options.rtcMenuEntry) return null;
+  return options.rtcTickMode === RTC_TICK_MODES.READ
+    ? RTC_TICK_MODES.READ
+    : RTC_TICK_MODES.VBLANK;
+}
+
 function irqFlags(options) {
   const saveFlushEntry = options.saveFlushEntry ?? 0;
   const saveFlushAuto = options.saveFlushAuto ?? false;
   const saveFlushHotkey = options.saveFlushHotkey ?? Boolean(saveFlushEntry);
+  const rtcTickMode = rtcTickModeValue(options);
   return (
     (options.rtcMenuEntry ? C.IRQ_FLAG_RTC : 0)
+    | (options.rtcMenuEntry && rtcTickMode === RTC_TICK_MODES.VBLANK ? IRQ_FLAG_RTC_VBLANK_TICK : 0)
     | (saveFlushEntry ? IRQ_FLAG_SAVE_FLUSH : 0)
     | (saveFlushEntry && saveFlushAuto ? IRQ_FLAG_SAVE_FLUSH_AUTO : 0)
     | (saveFlushEntry && saveFlushHotkey ? IRQ_FLAG_SAVE_FLUSH_HOTKEY : 0)
@@ -166,7 +180,11 @@ function configuredIrqPayload(bytes, payloadBase, options) {
   const originalEntrypoint = decodeEntrypointAddress(bytes);
   const payload = new Uint8Array(IRQ_HANDLER_PAYLOAD);
   const payloadAddress = (GBA_ROM_BASE + payloadBase) >>> 0;
-  const handlerAddress = (payloadAddress + C.IRQ_HANDLER_OFFSET) >>> 0;
+  const rtcTickMode = rtcTickModeValue(options);
+  const handlerOffset = rtcTickMode === RTC_TICK_MODES.VBLANK
+    ? C.IRQ_HANDLER_CONTINUOUS_OFFSET
+    : C.IRQ_HANDLER_OFFSET;
+  const handlerAddress = (payloadAddress + handlerOffset) >>> 0;
   const bootstrapAddress = (payloadAddress + C.IRQ_BOOTSTRAP_OFFSET) >>> 0;
   const flags = irqFlags(options);
   const hotkeyMask = hotkeyMaskValue(options.hotkeyMask);
@@ -188,6 +206,7 @@ function configuredIrqPayload(bytes, payloadBase, options) {
     flags,
     hotkeyMask,
     saveFlushEntry,
+    rtcTickMode,
   };
 }
 
@@ -198,8 +217,10 @@ function installedIrqResult(payloadBase, configured, irqReferences) {
     payloadOffset: payloadBase,
     runtimeBase: configured.payloadAddress,
     size: IRQ_HANDLER_PAYLOAD.length,
+    payloadSpan: irqHandlerPayloadSpanForLayout(),
     flags: configured.flags,
     saveFlushEntry: configured.saveFlushEntry,
+    rtcTickMode: configured.rtcTickMode,
     handlerEntry: configured.handlerAddress,
     bootstrapEntry: configured.bootstrapAddress,
     originalEntrypoint: configured.originalEntrypoint,

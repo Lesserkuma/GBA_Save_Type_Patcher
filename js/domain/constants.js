@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-export const APP_VERSION = "1.6";
-export const WORKER_PROTOCOL_VERSION = 1;
+export const APP_VERSION = "1.7";
+export const WORKER_PROTOCOL_VERSION = 2;
 
 export const GBA_MAX_ROM_SIZE_BYTES = 32 * 1024 * 1024;
 export const MAX_FILE_COUNT = 64;
@@ -29,6 +29,11 @@ export const PATCH_STATUS = Object.freeze({
   INVALID: "invalid",
 });
 
+export const RTC_TICK_MODES = Object.freeze({
+  VBLANK: "vblank",
+  READ: "read",
+});
+
 export const PATCH_OPERATION_KIND = Object.freeze({
   ROM_EXPAND: "romExpand",
   PAYLOAD_INSTALL: "payloadInstall",
@@ -54,7 +59,11 @@ export const DEFAULT_OPTIONS = Object.freeze({
   sram: Object.freeze({ flash1mBankSwitchStyle: "modern" }),
   customFlash: Object.freeze({ saveChipModel: "sst25vf064cFamily" }),
   waitstate: Object.freeze({ enabled: false, mode: "supercard_exact" }),
-  rtc: Object.freeze({ enabled: false }),
+  rtc: Object.freeze({
+    enabled: false,
+    tickMode: RTC_TICK_MODES.VBLANK,
+    saveOnGlobalHotkey: true,
+  }),
 });
 
 export function cloneDefaultOptions() {

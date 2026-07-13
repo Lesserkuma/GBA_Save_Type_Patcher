@@ -6,7 +6,12 @@ import {
 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
 import { applyWaitstateForPipeline, waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./waitstate.js";
-import { applyRtcForPipeline, RTC_PAYLOAD_SIZE } from "./rtc.js";
+import {
+  applyRtcForPipeline,
+  rtcPayloadSpanForLayout,
+  RTC_PAYLOAD_SIZE,
+  RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
+} from "./rtc.js";
 import { applyIrqHandlerForPipeline, IRQ_HANDLER_PAYLOAD_SIZE, irqHandlerPayloadSpanForLayout } from "./irq-handler.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, PATCH_SAVE_MEDIUM, updateGbaHeaderChecksum } from "./patch-state.js";
 import {
@@ -14,6 +19,7 @@ import {
   SRAM_CONSTANTS,
 } from "./sram-data.js";
 import { alignedPayloadSpan } from "./payload-placement.js";
+import { ensureStandaloneRtcPersistenceLayout } from "./rtc-persistence-placement.js";
 import { detectRomSaveMetadata, findSaveType } from "./save-type.js";
 import {
   BATTERYLESS_LAST_BLOCK_KEEP_EMPTY,
@@ -21,6 +27,7 @@ import {
   applyBatterylessPatch,
   batterylessPatchExcludedRanges,
   batterylessPayloadForStyle,
+  batterylessSaveOffset,
   embedSaveFile,
   ensureBatterylessLayout,
   ensureNonBatterylessAddonLayout,
@@ -188,7 +195,8 @@ function createSramPatchContext(inputBytes, options) {
   const batteryless = options.batteryless === true;
   const waitstate = options.waitstate?.enabled === true;
   const rtc = options.rtc?.enabled === true;
-  const rtcPayloadSpan = rtc ? alignedPayloadSpan(RTC_PAYLOAD_SIZE) : 0;
+  const rtcPersistenceEnabled = rtc && options.rtc?.saveOnGlobalHotkey !== false;
+  const rtcPayloadSpan = rtc ? rtcPayloadSpanForLayout() : 0;
   const waitstatePayloadSpan = waitstatePayloadSpanForLayout(originalData, options.waitstate);
   const flash1mBankSwitchStyle = normalizeFlash1mBankSwitchStyle(options.flash1mBankSwitchStyle);
   const selectedBatterylessPayload = batterylessPayloadForStyle(flash1mBankSwitchStyle);
@@ -215,12 +223,16 @@ function createSramPatchContext(inputBytes, options) {
     rtcExcludedRanges: [],
     waitstateExcludedRanges: [],
     irqHandlerExcludedRanges: [],
+    rtcPersistenceExcludedRanges: [],
+    rtcPersistenceBlockOffset: null,
+    rtcPersistenceRange: null,
     skipSavePatch: false,
     sramPatchApplied: false,
     saveEmbedded: false,
     batteryless,
     waitstate,
     rtc,
+    rtcPersistenceEnabled,
     rtcPayloadSpan,
     waitstatePayloadSpan,
     waitstateFixedWriteRanges: waitstateFixedWriteRangesForLayout(originalData, options.waitstate),
@@ -397,6 +409,37 @@ function planNonBatterylessAddons(context) {
   const waitstateSpan = context.waitstate && context.waitstateResult === null
     ? context.waitstatePayloadSpan
     : 0;
+  if (rtcSpan && context.rtcPersistenceEnabled) {
+    const layout = ensureStandaloneRtcPersistenceLayout(
+      context.rom,
+      context.operations,
+      context.warnings,
+      {
+        rtcSpan,
+        waitstateSpan,
+        irqSpan: irqHandlerPayloadSpanForLayout(),
+      },
+      context.waitstateFixedWriteRanges,
+    );
+    if (layout === null) {
+      context.rtcResult = { requested: true, status: "failed", size: RTC_PAYLOAD_SIZE };
+      return;
+    }
+    context.rtcPayloadOffset = layout.rtcPayloadOffset;
+    context.rtcPlacement = "before-rtc-persistence";
+    context.rtcExcludedRanges = rangeForSpan(layout.rtcPayloadOffset, rtcSpan);
+    context.waitstatePayloadOffset = waitstateSpan ? layout.waitstatePayloadOffset : null;
+    context.waitstateExcludedRanges = rangeForSpan(layout.waitstatePayloadOffset, waitstateSpan);
+    context.irqHandlerPayloadOffset = layout.irqPayloadOffset;
+    context.irqHandlerExcludedRanges = rangeForSpan(
+      layout.irqPayloadOffset,
+      irqHandlerPayloadSpanForLayout(),
+    );
+    context.rtcPersistenceBlockOffset = layout.persistenceBlockOffset;
+    context.rtcPersistenceRange = layout.persistenceRange;
+    context.rtcPersistenceExcludedRanges = [layout.persistenceRange];
+    return;
+  }
   const layout = ensureNonBatterylessAddonLayout(
     context.rom,
     context.operations,
@@ -443,7 +486,17 @@ function applyRtcAndBatteryless(context) {
           ...context.rtcExcludedRanges,
           ...context.waitstateExcludedRanges,
           ...context.irqHandlerExcludedRanges,
+          ...context.rtcPersistenceExcludedRanges,
         ],
+        persistenceBlockOffset: context.rtcPersistenceEnabled
+          ? (context.batterylessPayloadOffset === null
+            ? context.rtcPersistenceBlockOffset
+            : batterylessSaveOffset(context.batterylessPayloadOffset, context.selectedBatterylessPayload))
+          : null,
+        persistenceFlags: context.rtcPersistenceEnabled
+          && context.batterylessPayloadOffset !== null
+          ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG
+          : 0,
       },
     );
   }
@@ -461,6 +514,7 @@ function applyRtcAndBatteryless(context) {
       context.batterylessPrefixSize,
       context.keepBatterylessLastBlockEmpty,
       context.sourceSaveMetadata.size,
+      context.rtcResult?.persistenceFlushEntry || 0,
     );
   }
   if (context.batterylessResult?.payloadOffset !== undefined
@@ -504,6 +558,7 @@ function applySramWaitstate(context) {
         ...batterylessRanges,
         ...context.rtcExcludedRanges,
         ...context.irqHandlerExcludedRanges,
+        ...context.rtcPersistenceExcludedRanges,
       ],
       waitstatePayloadOffset: context.waitstatePayloadOffset,
       batterylessPayloadOffset: context.batterylessPayloadOffset,
@@ -518,6 +573,7 @@ function irqExcludedRanges(context) {
     ...context.rtcExcludedRanges,
     ...context.waitstateExcludedRanges,
     ...context.irqHandlerExcludedRanges,
+    ...context.rtcPersistenceExcludedRanges,
   ];
   if (context.batterylessResult?.payloadOffset !== undefined
       && context.batterylessResult?.payloadOffset !== null) {
@@ -533,7 +589,8 @@ function irqExcludedRanges(context) {
       && context.rtcResult?.size) {
     ranges.push([
       context.rtcResult.payloadOffset,
-      context.rtcResult.payloadOffset + alignedPayloadSpan(context.rtcResult.size),
+      context.rtcResult.payloadOffset
+        + (context.rtcResult.payloadSpan ?? rtcPayloadSpanForLayout()),
     ]);
   }
   if (context.waitstateResult?.payloadOffset !== undefined
@@ -541,7 +598,8 @@ function irqExcludedRanges(context) {
       && context.waitstateResult?.size) {
     ranges.push([
       context.waitstateResult.payloadOffset,
-      context.waitstateResult.payloadOffset + alignedPayloadSpan(context.waitstateResult.size),
+      context.waitstateResult.payloadOffset
+        + (context.waitstateResult.payloadSpan ?? alignedPayloadSpan(context.waitstateResult.size)),
     ]);
   }
   return ranges;
@@ -549,7 +607,12 @@ function irqExcludedRanges(context) {
 
 function applySramIrq(context) {
   const rtcMenuEntry = context.rtcResult?.runtimeMenuEntry || 0;
-  const flushEntry = context.batterylessResult?.flushEntry || 0;
+  const rtcTickMode = context.rtcResult?.tickMode;
+  const batterylessFlushEntry = context.batterylessResult?.flushEntry || 0;
+  const standaloneRtcFlushEntry = batterylessFlushEntry
+    ? 0
+    : (context.rtcResult?.persistenceFlushEntry || 0);
+  const flushEntry = batterylessFlushEntry || standaloneRtcFlushEntry;
   if (context.irqHandlerResult !== null || (!rtcMenuEntry && !flushEntry)) return;
   context.irqHandlerResult = applyIrqHandlerForPipeline(
     context.rom,
@@ -558,8 +621,9 @@ function applySramIrq(context) {
     {
       enabled: true,
       rtcMenuEntry,
+      rtcTickMode,
       saveFlushEntry: flushEntry,
-      saveFlushAuto: Boolean(flushEntry && context.batterylessMode === "auto"),
+      saveFlushAuto: Boolean(batterylessFlushEntry && context.batterylessMode === "auto"),
       saveFlushHotkey: Boolean(flushEntry),
       countdownFrames: context.batterylessCountdown,
       indicatorMode: context.batterylessIndicatorMode,
@@ -608,20 +672,22 @@ function savePatchStatus(context) {
 
 function completedSramResult(context) {
   const savePatchResult = { requested: true, status: savePatchStatus(context) };
+  const result = makeResult(
+    context.saveType,
+    sramResultStatus(context),
+    context.operations,
+    context.warnings,
+    context.batterylessResult,
+    context.waitstateResult,
+    context.saveEmbedded,
+    context.rtcResult,
+    context.irqHandlerResult,
+    savePatchResult,
+  );
+  if (context.rtcPersistenceRange) result.reservedRanges = [context.rtcPersistenceRange];
   return {
     bytes: context.rom.bytes,
-    result: makeResult(
-      context.saveType,
-      sramResultStatus(context),
-      context.operations,
-      context.warnings,
-      context.batterylessResult,
-      context.waitstateResult,
-      context.saveEmbedded,
-      context.rtcResult,
-      context.irqHandlerResult,
-      savePatchResult,
-    ),
+    result,
   };
 }
 

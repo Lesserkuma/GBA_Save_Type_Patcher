@@ -64,6 +64,9 @@ implementation. In particular:
   identify/erase/program algorithms for independently copied RAM routines.
 - `payloads/flash-39vf512/payload.c` uses the same general ROM-FLASH execution
   and hardware-pause foundation as part of the journal runtime.
+- `payloads/fake-rtc/rtc_persist.c` adapts the upstream ROM-FLASH type 1-4
+  identify/erase/program structure and copy-to-RAM execution model for the
+  Fake RTC persistence record.
 - `js/patchers/irq-handler.js` and the shared IRQ payload retain the upstream
   idea of finding and redirecting the GBA user IRQ pointer, but the shared
   handler, composition rules, and configuration ABI are local rewrites.
@@ -159,6 +162,10 @@ text is provided in this repository's `LICENSE` file.
   from `src/patches.S`.
 - `payloads/fake-rtc/rtc_state.S` follows SuperFW's use of otherwise unused
   banked CPU-mode registers for volatile RTC state.
+- `payloads/fake-rtc/rtc_persist.c` adds the local checksummed cold-boot state
+  format and coordinates its final-block record with Batteryless and Journal
+  save reservations. Its flash command routines are separately attributed to
+  gba-auto-batteryless-patcher above.
 - The complete Fake RTC on-screen menu is an original work of GBA Save Type
   Patcher and is not based on SuperFW. This includes its user-interface design,
   rendering and input logic, date and time editing, and all menu graphics and

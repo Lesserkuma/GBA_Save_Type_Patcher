@@ -100,6 +100,8 @@ indicator_mode:
     .word 0
 flush_sram_entry:
     .word flush_sram
+rtc_persist_entry:
+    .word 0
 
 .thumb
 # If you are writing a manual batteryless save patch, you can branch here
@@ -676,6 +678,18 @@ flush_sram_audio_no_stop_tm1:
     blne flush_sram_no_pack
     bl eeprom_v111_pack_sram_raw
 flush_sram_no_pack:
+    # A configured Fake-RTC persistence flush owns the erase pass for the
+    # complete Batteryless block. It also writes the RTC record before the
+    # regular save data is programmed below.
+    ldr r12, rtc_persist_entry
+    cmp r12, # 0
+    beq flush_sram_no_rtc_persist
+    mov r0, # 0
+    mov lr, pc
+    bx r12
+    cmp r0, # 0
+    beq flush_sram_done
+flush_sram_no_rtc_persist:
     adr r6, flash_fn_table
     adrl r7, original_entrypoint
 
@@ -693,6 +707,13 @@ try_flash:
     b try_flash
 
 found_flash:
+    # Fake-RTC already erased both 128-KiB halves before programming its
+    # record. Skip only Batteryless's erase pair so that record cannot be
+    # erased again; keep the normal program and verify passes below.
+    ldr r0, rtc_persist_entry
+    cmp r0, # 0
+    addne r6, # 8
+    bne flush_sram_program
     ldm r6!, {r2, r3}
     mov r0, r4
     mov r1, r5
@@ -701,6 +722,7 @@ found_flash:
     bl run_from_ram
     cmp r0, # 0
     beq flush_sram_done
+flush_sram_program:
     ldm r6!, {r2, r3}
     mov r0, r4
     mov r1, r5

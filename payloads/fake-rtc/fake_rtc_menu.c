@@ -6,9 +6,10 @@
 #include "menu_assets_generated.h"
 
 extern void rtc_state_write(uint32_t timestamp, uint32_t speed);
-extern uint32_t rtc_state_read(uint32_t *timestamp_out, uint8_t *speed_out);
+extern uint32_t rtc_state_read(uint32_t *timestamp_out, uint16_t *speed_out);
 extern void rtc_state_read_runtime(uint32_t *timestamp_out, uint32_t *speed_out);
 extern uint32_t rtc_state_is_initialized(void);
+extern const uint32_t rtc_tick_mode_config;
 
 #ifndef FAKE_RTC_DEFAULT_TIMESTAMP
 #define FAKE_RTC_DEFAULT_TIMESTAMP 0u
@@ -18,9 +19,12 @@ extern uint32_t rtc_state_is_initialized(void);
 #define FAKE_RTC_DEFAULT_SPEED 0u
 #endif
 
-#define FAKE_RTC_TICK_SECONDS 1u
+#define FAKE_RTC_TICK_MODE_READ 1u
 #define FAKE_RTC_STATUS_24H 0x40u
 #define FAKE_RTC_MAX_TIMESTAMP 3155759999u /* 2099-12-31 23:59:59 */
+#define FAKE_RTC_MAX_SPEED 9999u
+#define FAKE_RTC_FRAME_PHASE_STEP 4389u
+#define FAKE_RTC_PHASE_ONE_SECOND 262144u
 
 
 #define MEM_BG_PALETTE  ((volatile uint16_t*)0x05000000)
@@ -82,7 +86,7 @@ typedef struct {
     uint8_t hour;
     uint8_t minute;
     uint8_t second;
-    uint8_t speed;
+    uint16_t speed;
 } RtcFields;
 
 
@@ -119,7 +123,7 @@ static const uint16_t kDateCharX[18] = {
     149,
     156, 164,
 };
-static const uint16_t kSpeedCharX[3] = {189, 197, 205};
+static const uint16_t kSpeedCharX[4] = {181, 189, 197, 205};
 static const uint16_t kFieldArrowX[7] = {48, 72, 97, 120, 144, 168, 209};
 static const uint16_t kTextY = 79;
 static const uint16_t kArrowY = 70;
@@ -158,8 +162,16 @@ static inline uint8_t is_leap_year(uint16_t year) {
     return (uint8_t)((year & 3u) == 0u);
 }
 
-static uint8_t runtime_state_for_menu(uint32_t raw_timestamp, uint32_t raw_speed, uint32_t *timestamp_out, uint8_t *speed_out) {
-    uint8_t speed = (uint8_t)(raw_speed & 0xFFu);
+static uint16_t clamp_speed(uint32_t speed) {
+    return (uint16_t)(speed > FAKE_RTC_MAX_SPEED ? FAKE_RTC_MAX_SPEED : speed);
+}
+
+static uint32_t legacy_first_tick_seconds(uint16_t speed) {
+    return ((uint32_t)speed * FAKE_RTC_FRAME_PHASE_STEP) / FAKE_RTC_PHASE_ONE_SECOND;
+}
+
+static uint8_t runtime_state_for_menu(uint32_t raw_timestamp, uint32_t raw_speed, uint32_t *timestamp_out, uint16_t *speed_out) {
+    uint16_t speed = clamp_speed(raw_speed);
     uint32_t adjusted_timestamp;
 
     if (raw_timestamp <= FAKE_RTC_MAX_TIMESTAMP) {
@@ -168,11 +180,13 @@ static uint8_t runtime_state_for_menu(uint32_t raw_timestamp, uint32_t raw_speed
         return 1;
     }
 
-    adjusted_timestamp = raw_timestamp + ((uint32_t)speed * FAKE_RTC_TICK_SECONDS);
-    if (adjusted_timestamp < raw_timestamp && adjusted_timestamp <= FAKE_RTC_MAX_TIMESTAMP) {
-        *timestamp_out = adjusted_timestamp;
-        *speed_out = speed;
-        return 1;
+    if (rtc_tick_mode_config == FAKE_RTC_TICK_MODE_READ) {
+        adjusted_timestamp = raw_timestamp + legacy_first_tick_seconds(speed);
+        if (adjusted_timestamp < raw_timestamp && adjusted_timestamp <= FAKE_RTC_MAX_TIMESTAMP) {
+            *timestamp_out = adjusted_timestamp;
+            *speed_out = speed;
+            return 1;
+        }
     }
 
     return 0;
@@ -242,7 +256,7 @@ static uint32_t fields_to_timestamp(const RtcFields *f) {
     return (((days * 24u + f->hour) * 60u + f->minute) * 60u + f->second);
 }
 
-static void timestamp_to_fields(uint32_t timestamp, uint8_t speed, RtcFields *out) {
+static void timestamp_to_fields(uint32_t timestamp, uint16_t speed, RtcFields *out) {
     uint32_t days = timestamp / 86400u;
     uint32_t rem = timestamp % 86400u;
     uint16_t year = 2000;
@@ -587,25 +601,18 @@ static void render_menu_from_index(const RtcFields *f, uint8_t selected_field, u
         draw_glyph(oam, &sprite_index, kDateCharX[i], kTextY, tile_base, datetime_chars[i]);
     }
     {
-        uint8_t speed = f->speed;
-        uint8_t hundreds = (uint8_t)(speed / 100u);
-        uint8_t tens = (uint8_t)((speed / 10u) % 10u);
-        uint8_t ones = (uint8_t)(speed % 10u);
-        uint8_t digit_start = 2u;
+        uint16_t speed = f->speed;
+        uint32_t divisor = 1000u;
+        uint8_t started = 0u;
 
-        if (hundreds != 0u) {
-            digit_start = 0u;
-        } else if (tens != 0u) {
-            digit_start = 1u;
+        for (i = 0; i < 4u; ++i) {
+            uint8_t digit = (uint8_t)((speed / divisor) % 10u);
+            if (digit != 0u || i == 3u) started = 1u;
+            if (started) {
+                draw_glyph(oam, &sprite_index, kSpeedCharX[i], kTextY, tile_base, (char)('0' + digit));
+            }
+            divisor /= 10u;
         }
-
-        if (digit_start == 0u) {
-            draw_glyph(oam, &sprite_index, kSpeedCharX[0], kTextY, tile_base, (char)('0' + hundreds));
-        }
-        if (digit_start <= 1u) {
-            draw_glyph(oam, &sprite_index, kSpeedCharX[1], kTextY, tile_base, (char)('0' + tens));
-        }
-        draw_glyph(oam, &sprite_index, kSpeedCharX[2], kTextY, tile_base, (char)('0' + ones));
 
         draw_glyph(oam, &sprite_index, 213u, kTextY, tile_base, 'x');
     }
@@ -646,18 +653,29 @@ static void apply_delta(RtcFields *f, uint8_t selected_field, int delta) {
             if (delta > 0) f->second = (uint8_t)(f->second >= 59u ? 0u : f->second + 1u);
             else f->second = (uint8_t)(f->second <= 0u ? 59u : f->second - 1u);
             break;
-        case FIELD_SPEED:
-            if (delta > 0) f->speed = (uint8_t)(f->speed == 255u ? 0u : f->speed + 1u);
-            else f->speed = (uint8_t)(f->speed == 0u ? 255u : f->speed - 1u);
+        case FIELD_SPEED: {
+            int32_t speed = (int32_t)f->speed + delta;
+            if (speed > (int32_t)FAKE_RTC_MAX_SPEED) speed -= (int32_t)(FAKE_RTC_MAX_SPEED + 1u);
+            else if (speed < 0) speed += (int32_t)(FAKE_RTC_MAX_SPEED + 1u);
+            f->speed = (uint16_t)speed;
             break;
+        }
         default:
             break;
     }
 }
 
+static int speed_repeat_delta(uint16_t held, int direction) {
+    uint16_t step = 1u;
+    if (held > 180u) step = 1000u;
+    else if (held > 120u) step = 100u;
+    else if (held > 60u) step = 10u;
+    return direction > 0 ? (int)step : -(int)step;
+}
+
 static void load_menu_fields(RtcFields *fields) {
     uint32_t menu_timestamp = FAKE_RTC_DEFAULT_TIMESTAMP;
-    uint8_t menu_speed = (uint8_t)(FAKE_RTC_DEFAULT_SPEED & 0xFFu);
+    uint16_t menu_speed = clamp_speed(FAKE_RTC_DEFAULT_SPEED);
     uint32_t runtime_timestamp = 0;
     uint32_t runtime_speed = 0xFFFFFFFFu;
 
@@ -674,7 +692,7 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, u
     uint16_t hold_up = 0;
     uint16_t hold_down = 0;
     uint32_t menu_timestamp = FAKE_RTC_DEFAULT_TIMESTAMP;
-    uint8_t menu_speed = (uint8_t)(FAKE_RTC_DEFAULT_SPEED & 0xFFu);
+    uint16_t menu_speed = clamp_speed(FAKE_RTC_DEFAULT_SPEED);
     uint8_t selected = 0;
 
     if (!initial_rendered) render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
@@ -695,7 +713,9 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, u
             hold_up = 0;
         } else if (keys & KEY_UP) {
             hold_up++;
-            if (hold_up > 10u) apply_delta(&fields, selected, +1);
+            if (hold_up > 10u) {
+                apply_delta(&fields, selected, selected == FIELD_SPEED ? speed_repeat_delta(hold_up, +1) : +1);
+            }
         } else {
             hold_up = 0;
         }
@@ -705,7 +725,9 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, u
             hold_down = 0;
         } else if (keys & KEY_DOWN) {
             hold_down++;
-            if (hold_down > 10u) apply_delta(&fields, selected, -1);
+            if (hold_down > 10u) {
+                apply_delta(&fields, selected, selected == FIELD_SPEED ? speed_repeat_delta(hold_down, -1) : -1);
+            }
         } else {
             hold_down = 0;
         }
@@ -713,13 +735,13 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, u
         render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
 
         if ((keys & KEY_A) && !(prev_keys & KEY_A)) {
-            menu_speed = (uint8_t)(fields.speed & 0xFFu);
+            menu_speed = fields.speed;
             menu_timestamp = fields_to_timestamp(&fields);
-            rtc_state_write(
-                menu_timestamp - ((uint32_t)menu_speed * FAKE_RTC_TICK_SECONDS),
-                menu_speed
-            );
             wait_keys_release(KEY_A);
+            if (rtc_tick_mode_config == FAKE_RTC_TICK_MODE_READ) {
+                menu_timestamp -= legacy_first_tick_seconds(menu_speed);
+            }
+            rtc_state_write(menu_timestamp, menu_speed);
             break;
         }
 

@@ -200,7 +200,8 @@ input[type=checkbox] {
   padding-bottom: .2rem
 }
 
-.options-panel:not(.no-extra-options) fieldset:first-of-type {
+.options-panel:not(.no-extra-options) fieldset:first-of-type,
+.waitstate-panel:not(.no-extra-options) .waitstate-toggle {
   border-bottom: 1px solid var(--bg3);
   padding-bottom: 1rem
 }

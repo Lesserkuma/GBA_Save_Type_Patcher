@@ -319,6 +319,9 @@ export function validateFlash512kPayloadDescriptor(descriptor, label = "512K FLA
   if (Number.isInteger(descriptor.configFields?.saveChipType) && readU32(payload, descriptor.configFields.saveChipType) !== 0) {
     throw new Error(`${label} chip-type template value must be zero.`);
   }
+  if (Number.isInteger(descriptor.configFields?.rtcPersistEntry) && readU32(payload, descriptor.configFields.rtcPersistEntry) !== 0) {
+    throw new Error(`${label} RTC persistence entry template value must be zero.`);
+  }
 }
 
 function bytesMatchAt(bytes, offset, marker) {

@@ -35,12 +35,41 @@ optimistically.
 
 - **Fake RTC** adds a software clock and an in-game configuration menu
   for RTC games running on cartridges without a real-time clock.
+  - **Continuous on VBlank** is the default and advances independently of RTC
+    reads. At `1x`, one RTC second is approximately 60 delivered VBlank frames.
+    Higher speeds are distributed across those frames, allowing frequent RTC
+    reads to observe smooth progress without increasing the overall clock rate.
+    It adds a small amount of work to delivered VBlank IRQs.
+  - **Only when the game reads the clock** does not add RTC clock-tick work to
+    the VBlank path.
+    Each RTC read counts as one nominal frame, so at `1x` approximately 60
+    consecutive reads advance the clock by one second.
+  - The speed multiplier ranges from `0` to `9999`. Holding
+    Up or Down accelerates changes when the speed field is selected.
+  - **Save RTC State on Global Hotkey** is enabled by default. It restores the
+    timestamp, speed, and sub-second phase after a cold boot from a checksummed
+    32-byte record at the very end of an aligned 256-KiB writable ROM-FLASH
+    block. Batteryless SRAM and FLASH Journal patches share their existing
+    256-KiB save reservation; other modes reserve the block directly after the
+    add-on payload block. On a cold boot, the saved values are loaded into the
+    RTC settings menu.
+  - A persistence update erases the 256-KiB block as two consecutive 128-KiB
+    halves before programming anything. The Batteryless and Journal runtimes
+    coordinate that erase with their normal game-save flush so save data and
+    the RTC record are written back in the same operation. Without one of those
+    save runtimes, the record is updated after the initial RTC menu and when
+    the RTC hotkey menu is confirmed.
+  - When **Save RTC State on Global Hotkey** is disabled, no persistence block is
+    reserved and RTC values are neither saved nor restored.
 - **Waitstate** adjusts `WAITCNT` initialization for cartridges that require
   slower ROM access timings.
 
 These add-ons are best effort. If an add-on cannot be applied, its warning is
 kept while an otherwise successful save-type patch can still be returned. A
 failed requested save-type conversion fails that ROM instead.
+Continuous Fake RTC additionally requires the shared IRQ handler; installation
+is rejected if that handler cannot be installed, rather than producing a clock
+that cannot advance.
 
 ## Usage
 

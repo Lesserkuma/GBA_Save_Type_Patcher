@@ -2,7 +2,7 @@
  * Generator: payloads/fake-rtc/generate_menu_assets.py
  * Generator version: 2
  * Source inputs: assets/arrow.png, assets/bg.png, assets/glyphs.png
- * Source SHA-256: bccb4c1c78cd4bbb3f27b2dea2fc8b56adf42128c9c1605061ac3da479a9bee0
+ * Source SHA-256: 0d4e07487774ea299be914963129b8f8d04bc0c65fe3035337c7c9c8c5dd86a6
  * Binary SHA-256: 014011df43fc50037ee6052d7bfc552459093851b9170a63c28275aae0ec86d9
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

@@ -66,7 +66,7 @@
         </section>
 
         <div class="settings-side-column">
-          <section class="panel waitstate-panel" aria-labelledby="waitstate-title">
+          <section id="other-patches-panel" class="panel waitstate-panel no-extra-options" aria-labelledby="waitstate-title">
             <div class="panel-heading compact"><h2 id="waitstate-title"><span aria-hidden="true">&#129513;</span> Other Patches</h2></div>
             <fieldset class="waitstate-toggle">
               <label class="option-line">
@@ -75,6 +75,10 @@
               <label class="option-line">
                 <input type="checkbox" name="waitstateEnabled"><span class="option-copy"><span class="option-label">Waitstate</span><span class="option-hint">(for cartridges that need slower cartridge access timings)</span></span>
               </label>
+            </fieldset>
+            <fieldset id="rtc-options" class="sub-options" hidden><legend>Fake RTC Settings</legend>
+              <div class="inline-group stacked-mobile"><span>Clock update:</span><label><input type="radio" name="rtcTickMode" value="vblank" checked> Continuous on VBlank</label><label><input type="radio" name="rtcTickMode" value="read"> Only when the game reads the clock</label></div>
+              <div class="inline-group stacked-mobile"><span>Save RTC State on Menu Close:</span><label><input type="radio" name="rtcSaveOnGlobalHotkey" value="enabled" checked> Enabled</label><label><input type="radio" name="rtcSaveOnGlobalHotkey" value="disabled"> Disabled</label></div>
             </fieldset>
           </section>
 

@@ -4,6 +4,7 @@ import {
   PATCH_MODES,
   PATCH_OPERATION_KIND,
   PATCH_STATUS,
+  RTC_TICK_MODES,
 } from "./constants.js";
 
 /** @typedef {{medium: string, size: number|null, library: string|null, label: string}} SaveMetadata */
@@ -32,7 +33,7 @@ const FLASH512K_OPTION_KEYS = new Set(["countdownFrames", "indicator"]);
 const CUSTOM_FLASH_OPTION_KEYS = new Set(["saveChipModel", "saveChipType"]);
 const SRAM_OPTION_KEYS = new Set(["flash1mBankSwitchStyle"]);
 const WAITSTATE_OPTION_KEYS = new Set(["enabled", "mode"]);
-const RTC_OPTION_KEYS = new Set(["enabled"]);
+const RTC_OPTION_KEYS = new Set(["enabled", "tickMode", "saveOnGlobalHotkey"]);
 const PATCH_OPERATION_KEYS = new Set([
   "id", "kind", "component", "offset", "byteLength", "expectedBefore",
   "replacement", "labelKey", "alignment", "dependencies", "allowOverlap", "metadata",
@@ -97,7 +98,9 @@ export function isPatchOptions(options) {
       || !["modern", "gbata"].includes(options.sram.flash1mBankSwitchStyle)
       || typeof options.waitstate.enabled !== "boolean"
       || options.waitstate.mode !== "supercard_exact"
-      || typeof options.rtc.enabled !== "boolean") return false;
+      || typeof options.rtc.enabled !== "boolean"
+      || typeof options.rtc.saveOnGlobalHotkey !== "boolean"
+      || !Object.values(RTC_TICK_MODES).includes(options.rtc.tickMode)) return false;
 
   if (options.patchMode === PATCH_MODES.CUSTOM_FLASH
       && ![1, 2].includes(options.customFlash.saveChipType)) return false;

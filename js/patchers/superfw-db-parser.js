@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { alignedPayloadSpan } from "./payload-placement.js";
+import { markedPayloadSpan } from "./payload-placement.js";
 import { SUPERFW_PATCH_DB_BASE64 } from "./superfw-db-data.generated.js";
 import { MAX_GBA_ROM_SIZE, readU32At } from "./waitstate-common.js";
 
@@ -107,7 +107,7 @@ export function getSuperfwDbEntryForRom(bytes) {
   return { programs: db.programs, ops, wcntOps };
 }
 
-function collectSuperfwProgramWrites(entry) {
+function collectSuperfwProgramWrites(entry, markerSize = 0) {
   if (!entry) return [];
   const writes = [];
   const seen = new Set();
@@ -125,7 +125,7 @@ function collectSuperfwProgramWrites(entry) {
           programIndex: argument,
           oldOffset: offset,
           size: program.length,
-          span: alignedPayloadSpan(program.length),
+          span: markedPayloadSpan(program.length, markerSize),
         });
       }
     } else if (opcode === 0x3) {
@@ -137,8 +137,8 @@ function collectSuperfwProgramWrites(entry) {
   return writes;
 }
 
-export function makeSuperfwProgramRelocations(entry, programBaseOffset = null) {
-  const writes = collectSuperfwProgramWrites(entry);
+export function makeSuperfwProgramRelocations(entry, programBaseOffset = null, markerSize = 0) {
+  const writes = collectSuperfwProgramWrites(entry, markerSize);
   if (programBaseOffset === null || programBaseOffset === undefined || !writes.length) return [];
   let cursor = programBaseOffset;
   return writes.map((write) => {
@@ -148,8 +148,8 @@ export function makeSuperfwProgramRelocations(entry, programBaseOffset = null) {
   });
 }
 
-export function superfwProgramRelocationSpan(entry) {
-  return collectSuperfwProgramWrites(entry).reduce((sum, write) => sum + write.span, 0);
+export function superfwProgramRelocationSpan(entry, markerSize = 0) {
+  return collectSuperfwProgramWrites(entry, markerSize).reduce((sum, write) => sum + write.span, 0);
 }
 
 export function collectSuperfwFixedWriteRanges(entry) {

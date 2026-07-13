@@ -2,18 +2,32 @@
 
 import { patchSramBytes } from "./patchers/sram.js";
 import { CUSTOM_JOURNAL_DESCRIPTOR, patchCustomFlashBytes } from "./patchers/custom-flash.js";
-import { STANDARD_JOURNAL_DESCRIPTOR, patchFlash512kBytes } from "./patchers/flash512k.js";
+import {
+  STANDARD_JOURNAL_DESCRIPTOR,
+  patchFlash512kBytes,
+  patchInstalledJournalRtcPersistEntry,
+} from "./patchers/flash512k.js";
 import { applyWaitstateForPipeline } from "./patchers/waitstate.js";
 import { waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./patchers/waitstate.js";
-import { applyRtcForPipeline, RTC_PAYLOAD_SIZE } from "./patchers/rtc.js";
+import {
+  applyRtcForPipeline,
+  rtcPayloadSpanForLayout,
+  RTC_PAYLOAD_SIZE,
+  RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG,
+  RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
+} from "./patchers/rtc.js";
 import {
   applyIrqHandlerForPipeline,
   irqHandlerPayloadSpanForLayout,
 } from "./patchers/irq-handler.js";
 import { PATCH_BLOCK_ALIGNMENT, alignDown, alignedPayloadSpan, isFreeRegion } from "./patchers/payload-placement.js";
+import {
+  ensureStandaloneRtcPersistenceLayout,
+  RTC_PERSISTENCE_BLOCK_SIZE,
+} from "./patchers/rtc-persistence-placement.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, updateGbaHeaderChecksum } from "./patchers/patch-state.js";
 import { detectRomSaveMetadata } from "./patchers/save-type.js";
-import { PATCH_OPERATION_KIND, WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
+import { PATCH_OPERATION_KIND, RTC_TICK_MODES, WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
 import {
   assertCancelRequest,
   assertPatchRequest,
@@ -38,6 +52,8 @@ function applyRtcStandalonePatch(patched, rtcOptions = {}, context = {}) {
   const rtc = applyRtcForPipeline(rom, patched.result.operations, patched.result.warnings, rtcOptions, {
     excludedRanges: context.excludedRanges || [],
     payloadOffset: context.payloadOffset ?? null,
+    persistenceBlockOffset: context.persistenceBlockOffset ?? null,
+    persistenceFlags: context.persistenceFlags ?? 0,
   });
   patched.bytes = rom.bytes;
   patched.result.rtc = rtc;
@@ -73,7 +89,34 @@ function validRange(range) {
 
 function payloadRange(result, payloadOffset) {
   if (!Number.isInteger(payloadOffset) || !Number.isInteger(result?.size) || result.size <= 0) return null;
-  return [payloadOffset, payloadOffset + alignedPayloadSpan(result.size)];
+  const payloadSpan = Number.isInteger(result.payloadSpan)
+    ? result.payloadSpan
+    : alignedPayloadSpan(result.size);
+  return [payloadOffset, payloadOffset + payloadSpan];
+}
+
+function persistenceRangeAt(offset) {
+  if (!Number.isInteger(offset)
+      || offset < 0
+      || offset % RTC_PERSISTENCE_BLOCK_SIZE
+      || offset + RTC_PERSISTENCE_BLOCK_SIZE > 0x02000000) return null;
+  return [offset, offset + RTC_PERSISTENCE_BLOCK_SIZE];
+}
+
+function appendReservedRange(result, range) {
+  if (!validRange(range)) return;
+  const ranges = Array.isArray(result.reservedRanges)
+    ? result.reservedRanges.filter(validRange).map(([start, end]) => [start, end])
+    : [];
+  if (!ranges.some(([start, end]) => start === range[0] && end === range[1])) {
+    ranges.push([range[0], range[1]]);
+  }
+  result.reservedRanges = ranges;
+}
+
+function shouldPersistRtc(options = {}) {
+  return options.rtc?.enabled === true
+    && options.rtc?.saveOnGlobalHotkey !== false;
 }
 
 function journalWaitstateExcludedRanges(result) {
@@ -109,7 +152,7 @@ function journalWaitstateExcludedRanges(result) {
 
 function planJournalAddons(bytes, options = {}, descriptor = STANDARD_JOURNAL_DESCRIPTOR) {
   const rtcSpan = options.rtc?.enabled
-    ? alignedPayloadSpan(RTC_PAYLOAD_SIZE)
+    ? rtcPayloadSpanForLayout()
     : 0;
   const waitstateSpan = waitstatePayloadSpanForLayout(bytes, options.waitstate || {});
   const irqSpan = irqHandlerPayloadSpanForLayout();
@@ -158,26 +201,96 @@ function preparedJournalAddonLayout(patched, plan) {
 }
 
 function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
-  // Target layout without Batteryless SRAM: [last ROM data] [Fake RTC] [Waitstate] [Shared IRQ] [free space].
+  // With RTC persistence enabled: [last ROM data/padding] [Fake RTC]
+  // [Waitstate] [Shared IRQ] | 0x40000-byte writable RTC block. Disabled
+  // persistence uses the regular add-on placement and reserves no block.
+  ensureResultArrays(patched);
   const excludedRanges = [...(context.excludedRanges || [])].filter(validRange);
-  patched = applyRtcStandalonePatch(patched, options.rtc, {
-    excludedRanges,
-    payloadOffset: context.rtcPayloadOffset,
-  });
+  let rtcPayloadOffset = context.rtcPayloadOffset ?? null;
+  let waitstatePayloadOffset = context.waitstatePayloadOffset ?? null;
+  let irqPayloadOffset = context.irqPayloadOffset ?? null;
+  const persistenceEnabled = shouldPersistRtc(options);
+  let persistenceBlockOffset = persistenceEnabled
+    ? (context.persistenceBlockOffset ?? null)
+    : null;
+  const persistenceFlags = persistenceEnabled ? (context.persistenceFlags ?? 0) : 0;
+  let persistenceRange = persistenceRangeAt(persistenceBlockOffset);
+  let rtcLayoutAvailable = true;
+
+  if (persistenceEnabled && persistenceBlockOffset === null) {
+    const operationCountBeforeLayout = patched.result.operations.length;
+    const rom = { bytes: patched.bytes };
+    const layout = ensureStandaloneRtcPersistenceLayout(
+      rom,
+      patched.result.operations,
+      patched.result.warnings,
+      {
+        rtcSpan: rtcPayloadSpanForLayout(),
+        waitstateSpan: waitstatePayloadSpanForLayout(patched.bytes, options.waitstate || {}),
+        irqSpan: irqHandlerPayloadSpanForLayout(),
+      },
+      [
+        ...excludedRanges,
+        ...waitstateFixedWriteRangesForLayout(patched.bytes, options.waitstate || {}),
+      ],
+    );
+    patched.bytes = rom.bytes;
+    if (layout === null) {
+      patched.result.rtc = { requested: true, status: "failed", size: RTC_PAYLOAD_SIZE };
+      rtcLayoutAvailable = false;
+    } else {
+      rtcPayloadOffset = layout.rtcPayloadOffset;
+      waitstatePayloadOffset = layout.waitstatePayloadOffset;
+      irqPayloadOffset = layout.irqPayloadOffset;
+      persistenceBlockOffset = layout.persistenceBlockOffset;
+      persistenceRange = layout.persistenceRange;
+      if (patched.result.operations.length > operationCountBeforeLayout) patched.result.status = "patched";
+    }
+  } else if (persistenceEnabled && persistenceRange === null) {
+    throw new Error("Fake RTC persistence block supplied by the patch pipeline is invalid.");
+  }
+
+  if (persistenceRange) {
+    excludedRanges.push(persistenceRange);
+    appendReservedRange(patched.result, persistenceRange);
+  }
+
+  if (rtcLayoutAvailable) {
+    patched = applyRtcStandalonePatch(patched, options.rtc, {
+      excludedRanges,
+      payloadOffset: rtcPayloadOffset,
+      persistenceBlockOffset,
+      persistenceFlags,
+    });
+  }
+  if (patched.result.flashJournal?.journal && patched.result.rtc?.persistenceFlushEntry) {
+    patchInstalledJournalRtcPersistEntry(
+      patched.bytes,
+      patched.result.operations,
+      patched.result.flashJournal,
+      patched.result.rtc.persistenceFlushEntry,
+    );
+  }
   const rtcRange = payloadRange(patched.result.rtc, patched.result.rtc?.payloadOffset);
   if (rtcRange) excludedRanges.push(rtcRange);
 
   const waitstateExcludedRanges = [...(context.waitstateExcludedRanges || excludedRanges)];
+  if (persistenceRange) waitstateExcludedRanges.push(persistenceRange);
   if (rtcRange) waitstateExcludedRanges.push(rtcRange);
   patched = applyWaitstateStandalonePatch(patched, options.waitstate, {
     excludedRanges: waitstateExcludedRanges,
-    waitstatePayloadOffset: context.waitstatePayloadOffset,
+    waitstatePayloadOffset,
   });
   const waitstateRange = payloadRange(patched.result.waitstate, patched.result.waitstate?.payloadOffset);
   if (waitstateRange) excludedRanges.push(waitstateRange);
 
   const rtcMenuEntry = patched.result.rtc?.runtimeMenuEntry || 0;
-  const saveFlushEntry = context.saveFlushEntry || 0;
+  const rtcTickMode = patched.result.rtc?.tickMode;
+  const pipelineSaveFlushEntry = context.saveFlushEntry || 0;
+  const standalonePersistenceFlushEntry = pipelineSaveFlushEntry
+    ? 0
+    : (patched.result.rtc?.persistenceFlushEntry || 0);
+  const saveFlushEntry = pipelineSaveFlushEntry || standalonePersistenceFlushEntry;
   if (rtcMenuEntry || saveFlushEntry) {
     ensureResultArrays(patched);
     const operationCountBeforeIrq = patched.result.operations.length;
@@ -185,15 +298,16 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
     const irqHandler = applyIrqHandlerForPipeline(rom, patched.result.operations, patched.result.warnings, {
       enabled: true,
       rtcMenuEntry,
+      rtcTickMode,
       saveFlushEntry,
-      saveFlushAuto: context.saveFlushAuto === true,
-      saveFlushHotkey: context.saveFlushHotkey !== false,
+      saveFlushAuto: standalonePersistenceFlushEntry ? false : context.saveFlushAuto === true,
+      saveFlushHotkey: standalonePersistenceFlushEntry ? true : context.saveFlushHotkey !== false,
       countdownFrames: context.countdownFrames || 0,
       indicatorMode: context.indicatorMode || "off",
       hotkeyMask: context.hotkeyMask ?? options.batteryless?.hotkeyMask,
     }, {
       excludedRanges,
-      payloadOffset: context.irqPayloadOffset ?? null,
+      payloadOffset: irqPayloadOffset,
     });
     patched.bytes = rom.bytes;
     patched.result.irqHandler = irqHandler;
@@ -261,7 +375,8 @@ function failureWarning(result, prefix) {
 function sharedIrqIsRequired(result) {
   return Boolean(
     result?.batteryless?.flushEntry
-    || result?.flashJournal?.journal?.flushEntry,
+    || result?.flashJournal?.journal?.flushEntry
+    || (result?.rtc?.status === "patched" && result.rtc.tickMode === RTC_TICK_MODES.VBLANK),
   );
 }
 
@@ -281,6 +396,11 @@ function ensureJournalReserveIntegrity(patched) {
 function ensureSuccessfulPatch(result, options = {}) {
   if (result?.batteryless?.status === "failed") throw new Error(failureWarning(result, "Batteryless SRAM:"));
   if (options.patchMode === "sram" && ["failed", "unsupported"].includes(result?.savePatch?.status)) throw new Error(firstWarning(result));
+  if (result?.rtc?.status === "patched"
+      && result.rtc.tickMode === RTC_TICK_MODES.VBLANK
+      && result?.irqHandler?.status !== "patched") {
+    throw new Error(failureWarning(result, "Shared IRQ:") || "Continuous Fake RTC requires the shared IRQ handler.");
+  }
   if (result?.irqHandler?.status === "failed" && sharedIrqIsRequired(result)) throw new Error(failureWarning(result, "Shared IRQ:"));
   if (result?.status === "unsupported") throw new Error(firstWarning(result));
 }
@@ -323,6 +443,7 @@ self.addEventListener("message", async (event) => {
 
     if (message.options.patchMode === "flash512k") {
       const flash512kOptions = message.options.flash512k || {};
+      const persistRtc = shouldPersistRtc(message.options);
       const countdownFrames = Number.isInteger(flash512kOptions.countdownFrames) ? flash512kOptions.countdownFrames : 100;
       const indicatorMode = flash512kOptions.indicator || "save";
       const addonPlan = planJournalAddons(romBytes, message.options, STANDARD_JOURNAL_DESCRIPTOR);
@@ -343,7 +464,9 @@ self.addEventListener("message", async (event) => {
         waitstateExcludedRanges: journalWaitstateExcludedRanges(patched.result),
         saveFlushEntry: journal?.flushEntry || 0,
         saveFlushAuto: Boolean(journal?.flushEntry),
-        saveFlushHotkey: false,
+        saveFlushHotkey: Boolean(journal?.flushEntry && persistRtc),
+        persistenceBlockOffset: persistRtc ? (journal?.offset ?? null) : null,
+        persistenceFlags: persistRtc && journal ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG : 0,
         countdownFrames: effectiveCountdownFrames,
         indicatorMode: effectiveIndicatorMode,
         hotkeyMask: message.options.batteryless?.hotkeyMask,
@@ -351,6 +474,7 @@ self.addEventListener("message", async (event) => {
       });
     } else if (message.options.patchMode === "custom-flash") {
       const flash512kOptions = message.options.flash512k || {};
+      const persistRtc = shouldPersistRtc(message.options);
       const countdownFrames = Number.isInteger(flash512kOptions.countdownFrames) ? flash512kOptions.countdownFrames : 100;
       const indicatorMode = flash512kOptions.indicator || "save";
       const addonPlan = planJournalAddons(romBytes, message.options, CUSTOM_JOURNAL_DESCRIPTOR);
@@ -371,13 +495,20 @@ self.addEventListener("message", async (event) => {
           waitstateExcludedRanges: journalWaitstateExcludedRanges(patched.result),
           saveFlushEntry: journal.flushEntry,
           saveFlushAuto: true,
-          saveFlushHotkey: false,
+          saveFlushHotkey: persistRtc,
           countdownFrames: journal.countdownFrames,
           indicatorMode: journal.indicatorMode,
+          persistenceBlockOffset: persistRtc ? journal.offset : null,
+          persistenceFlags: persistRtc
+            ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG
+              | RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG
+            : 0,
           ...addonLayout,
         });
       } else {
-        patched = applyStandaloneAddonPatches(patched, message.options);
+        patched = applyStandaloneAddonPatches(patched, message.options, {
+          persistenceFlags: persistRtc ? RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG : 0,
+        });
       }
     } else if (message.options.patchMode === "none") {
       patched = { bytes: romBytes, result: { operations: [], warnings: [], status: "unchanged" } };

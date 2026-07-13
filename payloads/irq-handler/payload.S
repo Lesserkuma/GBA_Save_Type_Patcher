@@ -17,6 +17,11 @@
     .equ IRQ_FLAG_SAVE_FLUSH, 2
     .equ IRQ_FLAG_SAVE_FLUSH_AUTO, 4
     .equ IRQ_FLAG_SAVE_FLUSH_HOTKEY, 8
+    // Metadata mirrors the host-selected continuous handler entry. The
+    // handler does not branch on this flag, keeping Legacy's hot path intact.
+    .equ IRQ_FLAG_RTC_VBLANK_TICK, 16
+    .equ RTC_STATE_MAGIC, 0x46525443
+    .equ RTC_MAX_TIMESTAMP, 0xBC19137F
     .equ KEY_MENU_COMBO_DEFAULT, GBA_KEY_MENU_COMBO_DEFAULT
 
     .global irq_config_magic
@@ -60,7 +65,9 @@ irq_bootstrap:
 
     .global irq_handler
     .type irq_handler, %function
-irq_handler:
+    .global irq_handler_continuous
+    .type irq_handler_continuous, %function
+irq_handler_continuous:
     stmfd   sp!, {r0-r12, lr}
     mov     r8, r0              // IO base, expected 0x04000000
     adr     r9, irq_flags
@@ -72,7 +79,60 @@ irq_handler:
     ldr     r1, [r8, #0x200]    // IE in low half, IF in high half
     tst     r1, #0x00010000     // pending VBlank IRQ?
     beq     irq_chain_original
+    tst     r1, #0x00000001     // VBlank IRQ enabled?
+    beq     irq_vblank_common   // Preserve existing stale-IF hotkey semantics.
 
+    // One hardware frame contributes exactly 4389/262144 seconds. Scale that
+    // fraction by speed on every VBlank, committing every whole second to the
+    // timestamp. This spreads fast clocks across frames instead of applying
+    // one large speed-sized jump per second. ABORT[SP] caches speed in bits
+    // 18..31 and keeps the fractional phase in bits 0..17.
+    mov     r1, #0x97           // Abort mode, IRQ disabled
+    msr     cpsr_c, r1
+    ldr     r2, =RTC_STATE_MAGIC
+    cmp     lr, r2
+    bne     irq_rtc_tick_restore
+
+    mov     r3, sp, lsr #18     // cached speed
+    mov     r1, sp, lsl #14
+    mov     r1, r1, lsr #14     // fractional phase
+    mov     r2, #0x1100
+    add     r2, r2, #0x25       // 0x1100 + 0x25 = 4389
+    mul     r2, r3, r2          // per-frame phase scaled by speed
+    add     r1, r1, r2
+    mov     r2, r1, lsr #18     // whole timestamp seconds to commit
+    mov     r1, r1, lsl #14
+    mov     r1, r1, lsr #14     // remaining fractional phase
+    orr     sp, r1, r3, lsl #18
+    cmp     r2, #0
+    beq     irq_rtc_tick_restore
+
+    mov     r1, #0x9B           // Undefined mode, IRQ disabled
+    msr     cpsr_c, r1
+    add     lr, lr, r2          // Commit the whole seconds accrued this frame.
+    ldr     r2, =RTC_MAX_TIMESTAMP
+    cmp     lr, r2
+    movhi   lr, #0              // Wrap to 2000-01-01 00:00:00.
+
+irq_rtc_tick_restore:
+    mov     r1, #0x92           // IRQ mode, IRQ disabled
+    msr     cpsr_c, r1
+    b       irq_vblank_common
+    .size irq_handler_continuous, . - irq_handler_continuous
+
+// Legacy Fake RTC and save-only configurations retain the original handler
+// entry and therefore execute no additional work on their VBlank hot path.
+irq_handler:
+    stmfd   sp!, {r0-r12, lr}
+    mov     r8, r0              // IO base, expected 0x04000000
+    adr     r9, irq_flags
+    ldr     r10, [r9]
+
+    ldr     r1, [r8, #0x200]    // IE in low half, IF in high half
+    tst     r1, #0x00010000     // pending VBlank IRQ?
+    beq     irq_chain_original
+
+irq_vblank_common:
     tst     r10, #(IRQ_FLAG_RTC | IRQ_FLAG_SAVE_FLUSH_HOTKEY)
     beq     irq_check_countdown
 
@@ -87,6 +147,13 @@ irq_handler:
 
     bl      irq_call_original_once
 
+    adr     r0, irq_hotkey_mask
+    ldr     r0, [r0]            // RTC consumes the configured combo while paused.
+    tst     r10, #IRQ_FLAG_RTC
+    blne    irq_call_rtc_menu
+
+    // Persist the value just confirmed in the RTC menu. Save-only setups keep
+    // their old behavior because the menu call above is skipped.
     tst     r10, #IRQ_FLAG_SAVE_FLUSH
     beq     irq_hotkey_no_save_flush
     tst     r10, #IRQ_FLAG_SAVE_FLUSH_HOTKEY
@@ -95,11 +162,6 @@ irq_handler:
     ldr     r0, [r0]            // Manual callback consumes release while paused.
     bl      irq_call_save_flush
 irq_hotkey_no_save_flush:
-
-    adr     r0, irq_hotkey_mask
-    ldr     r0, [r0]            // RTC consumes the configured combo while paused.
-    tst     r10, #IRQ_FLAG_RTC
-    blne    irq_call_rtc_menu
 
     bl      irq_wait_hotkey_release
     b       irq_return

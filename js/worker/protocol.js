@@ -79,7 +79,7 @@ export function isSerializedPatchError(error) {
 
 export function assertPatchRequest(message) {
   if (!isPatchRequest(message)) {
-    throw new PatchError("Worker request does not match protocol version 1.", {
+    throw new PatchError(`Worker request does not match protocol version ${WORKER_PROTOCOL_VERSION}.`, {
       code: "WORKER_INVALID_REQUEST",
       stage: "protocol",
       context: { receivedType: message?.type, receivedVersion: message?.protocolVersion },
@@ -90,7 +90,7 @@ export function assertPatchRequest(message) {
 
 export function assertCancelRequest(message) {
   if (!isCancelRequest(message)) {
-    throw new PatchError("Worker cancel request does not match protocol version 1.", {
+    throw new PatchError(`Worker cancel request does not match protocol version ${WORKER_PROTOCOL_VERSION}.`, {
       code: "WORKER_INVALID_CANCEL_REQUEST",
       stage: "protocol",
       context: { receivedVersion: message?.protocolVersion },

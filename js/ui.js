@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { DEFAULT_OPTIONS, PATCH_MODES, PATCH_STATUS } from "./domain/constants.js";
+import { DEFAULT_OPTIONS, PATCH_MODES, PATCH_STATUS, RTC_TICK_MODES } from "./domain/constants.js";
 import { statusMessage, UI_TEXT, uiMessage } from "./domain/messages.js";
 import { PatchError } from "./core/errors.js";
 import { saveFileMatchesRom } from "./files.js";
@@ -40,6 +40,7 @@ export function bindElements() {
     saveSummary: requireElement("#save-summary"),
     optionsForm: requireElement("#patch-options"),
     optionsPanel: requireElement("#save-options-panel"),
+    otherPatchesPanel: requireElement("#other-patches-panel"),
     batterylessOptions: requireElement("#batteryless-options"),
     flash512kOptions: requireElement("#flash512k-options"),
     sharedHotkeyOptions: requireElement("#shared-hotkey-options"),
@@ -48,6 +49,7 @@ export function bindElements() {
     batterylessAutoFlushCopy: requireElement("#batteryless-auto-flush-copy"),
     sramOptions: requireElement("#sram-options"),
     customFlashOptions: requireElement("#custom-flash-options"),
+    rtcOptions: requireElement("#rtc-options"),
     patchButton: requireElement("#patch-button"),
     clearButton: requireElement("#clear-button"),
     statusRegion: requireElement("#status-region"),
@@ -118,6 +120,7 @@ export function renderOptions(state) {
   elements.batterylessOptions.hidden = !isBatteryless;
   if (elements.flash512kOptions) elements.flash512kOptions.hidden = !(isFlash512k || isCustomFlash);
   if (elements.sharedHotkeyOptions) elements.sharedHotkeyOptions.hidden = !(isBatteryless || isRtc);
+  if (elements.rtcOptions) elements.rtcOptions.hidden = !isRtc;
   if (elements.sramOptions) elements.sramOptions.hidden = !(isSram || isBatteryless);
   elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
   const isAutoModeEnabled = state.options.batteryless.mode === "auto";
@@ -132,6 +135,7 @@ export function renderOptions(state) {
   elements.countdownField.hidden = !isBatterylessAutoMode;
   if (elements.batterylessAutoFlushCopy) elements.batterylessAutoFlushCopy.hidden = !isBatterylessAutoMode;
   elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "none");
+  elements.otherPatchesPanel.classList.toggle("no-extra-options", !isRtc);
 }
 
 function createRomCard() {
@@ -311,6 +315,8 @@ export function syncOptionsFromForm(state) {
   options.waitstate.enabled = f.elements.waitstateEnabled.checked;
   options.waitstate.mode = "supercard_exact";
   options.rtc.enabled = f.elements.rtcEnabled.checked;
+  options.rtc.tickMode = f.elements.rtcTickMode.value;
+  options.rtc.saveOnGlobalHotkey = f.elements.rtcSaveOnGlobalHotkey.value !== "disabled";
   replaceOptions(state, options);
 }
 
@@ -372,7 +378,17 @@ export function readValidatedOptions(state) {
     ? { enabled: true, mode: "supercard_exact" }
     : { enabled: false, mode: "supercard_exact" };
 
-  options.rtc = { enabled: options.rtc?.enabled === true };
+  const rtcEnabled = options.rtc?.enabled === true;
+  const rtcTickMode = options.rtc?.tickMode ?? DEFAULT_OPTIONS.rtc.tickMode;
+  const rtcSaveOnGlobalHotkey = options.rtc?.saveOnGlobalHotkey !== false;
+  if (!Object.values(RTC_TICK_MODES).includes(rtcTickMode)) {
+    throw optionError(UI_TEXT.RTC_TICK_MODE_INVALID, "rtc.tickMode");
+  }
+  options.rtc = {
+    enabled: rtcEnabled,
+    tickMode: rtcTickMode,
+    saveOnGlobalHotkey: rtcSaveOnGlobalHotkey,
+  };
 
   if (options.patchMode === "none" && !options.waitstate.enabled && !options.rtc.enabled) {
     throw optionError(UI_TEXT.PATCH_SELECTION_REQUIRED, "patchMode");

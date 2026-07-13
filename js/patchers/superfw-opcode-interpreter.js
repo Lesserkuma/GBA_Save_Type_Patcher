@@ -287,7 +287,11 @@ export function applySuperfwWaitcntDbOps(inputBytes, entry, operations, options 
     rom: { bytes: new Uint8Array(inputBytes) },
     operations,
     warnings: options.warnings || [],
-    programRelocations: makeSuperfwProgramRelocations(entry, options.programBaseOffset ?? null),
+    programRelocations: makeSuperfwProgramRelocations(
+      entry,
+      options.programBaseOffset ?? null,
+      options.programMarkerSize ?? 0,
+    ),
     excludedRanges: options.excludedRanges || [],
   };
   let appliedWrites = 0;

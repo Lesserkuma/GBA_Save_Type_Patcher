@@ -9,9 +9,13 @@
 
 import { asciiBytes, findBytes, hexToBytes, readU32, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
-import { PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { PATCH_OPERATION_KIND, RTC_TICK_MODES } from "../domain/constants.js";
 import { stagePatchOperation, stageRomExpansion } from "../patch-engine/draft.js";
-import { PAYLOAD_ALIGNMENT as TARGET_PAYLOAD_ALIGNMENT, alignedPayloadSpan, ensureDirectPayloadRegion } from "./payload-placement.js";
+import {
+  PAYLOAD_ALIGNMENT as TARGET_PAYLOAD_ALIGNMENT,
+  ensureDirectPayloadRegion,
+  markedPayloadSpan,
+} from "./payload-placement.js";
 import { RTC_PAYLOAD_CONSTANTS, RTC_PAYLOAD_HEX } from "./rtc-data.js";
 
 const GBA_ROM_BASE = 0x08000000;
@@ -20,6 +24,11 @@ const RTC_PAYLOAD_ALIGNMENT = TARGET_PAYLOAD_ALIGNMENT;
 const ORIGINAL_PAYLOAD_LINK_ADDR = RTC_PAYLOAD_CONSTANTS.RTC_ORIGINAL_PAYLOAD_LINK_ADDR;
 
 export const RTC_PAYLOAD_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PAYLOAD_SIZE;
+export const RTC_PERSISTENCE_BLOCK_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_BLOCK_SIZE;
+export const RTC_PERSISTENCE_HALF_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_HALF_SIZE;
+export const RTC_PERSISTENCE_RECORD_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_RECORD_SIZE;
+export const RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_CUSTOM_BACKEND;
+export const RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_SHARED_SAVE_AREA;
 
 function validateGeneratedRtcData() {
   const constants = RTC_PAYLOAD_CONSTANTS;
@@ -31,6 +40,17 @@ function validateGeneratedRtcData() {
     || !Array.isArray(constants.RTC_RELOCATION_OFFSETS)
     || !Array.isArray(constants.RTC_RELATIVE_ASSET_RELOCATION_OFFSETS)
     || !constants.RTC_ORIGINAL_PAYLOAD_SYMBOLS
+    || !Number.isInteger(constants.RTC_TICK_MODE_CONFIG_OFFSET)
+    || !Number.isInteger(constants.RTC_TICK_MODE_VBLANK)
+    || !Number.isInteger(constants.RTC_TICK_MODE_READ)
+    || !Number.isInteger(constants.RTC_PERSIST_BLOCK_CONFIG_OFFSET)
+    || !Number.isInteger(constants.RTC_PERSIST_FLAGS_CONFIG_OFFSET)
+    || constants.RTC_PERSIST_BLOCK_SIZE !== 0x40000
+    || constants.RTC_PERSIST_HALF_SIZE !== 0x20000
+    || !Number.isInteger(constants.RTC_PERSIST_RECORD_SIZE)
+    || constants.RTC_PERSIST_RECORD_SIZE <= 0
+    || !Number.isInteger(constants.RTC_PERSIST_FLAG_CUSTOM_BACKEND)
+    || !Number.isInteger(constants.RTC_PERSIST_FLAG_SHARED_SAVE_AREA)
   ) {
     throw new PatchError("RTC generated payload data is missing or invalid.", {
       code: "RTC_GENERATED_DATA_INVALID",
@@ -51,6 +71,70 @@ function validateGeneratedRtcData() {
 const ACTIVE_RELOCATION_OFFSETS = RTC_PAYLOAD_CONSTANTS.RTC_RELOCATION_OFFSETS;
 const ACTIVE_RELATIVE_ASSET_RELOCATION_OFFSETS = RTC_PAYLOAD_CONSTANTS.RTC_RELATIVE_ASSET_RELOCATION_OFFSETS;
 const ACTIVE_ORIGINAL_PAYLOAD_SYMBOLS = RTC_PAYLOAD_CONSTANTS.RTC_ORIGINAL_PAYLOAD_SYMBOLS;
+
+export function normalizeRtcTickMode(value) {
+  return value === RTC_TICK_MODES.READ ? RTC_TICK_MODES.READ : RTC_TICK_MODES.VBLANK;
+}
+
+function configureRtcTickMode(payloadBuild, tickMode) {
+  const offset = RTC_PAYLOAD_CONSTANTS.RTC_TICK_MODE_CONFIG_OFFSET;
+  if (offset < 0 || offset + 4 > payloadBuild.payloadBytes.length) {
+    throw new PatchError("RTC: tick-mode configuration is outside the payload");
+  }
+  const value = tickMode === RTC_TICK_MODES.READ
+    ? RTC_PAYLOAD_CONSTANTS.RTC_TICK_MODE_READ
+    : RTC_PAYLOAD_CONSTANTS.RTC_TICK_MODE_VBLANK;
+  writeU32(payloadBuild.payloadBytes, offset, value);
+}
+
+function configureRtcPersistence(payloadBuild, context = {}) {
+  const blockOffset = context.persistenceBlockOffset ?? null;
+  const flags = context.persistenceFlags ?? 0;
+  if (blockOffset === null) {
+    writeU32(
+      payloadBuild.payloadBytes,
+      RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_BLOCK_CONFIG_OFFSET,
+      0xffffffff,
+    );
+    writeU32(
+      payloadBuild.payloadBytes,
+      RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAGS_CONFIG_OFFSET,
+      0,
+    );
+    return null;
+  }
+  if (!Number.isInteger(blockOffset)
+      || blockOffset < 0
+      || blockOffset % RTC_PERSISTENCE_BLOCK_SIZE
+      || blockOffset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_MAX_ROM_SIZE
+      || (blockOffset <= 0x01000000
+        && 0x01000000 < blockOffset + RTC_PERSISTENCE_BLOCK_SIZE)) {
+    throw new PatchError("RTC: persistence block is invalid");
+  }
+  if (!Number.isInteger(flags) || flags < 0 || flags > 0xffffffff) {
+    throw new PatchError("RTC: persistence flags are invalid");
+  }
+  writeU32(
+    payloadBuild.payloadBytes,
+    RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_BLOCK_CONFIG_OFFSET,
+    blockOffset >>> 0,
+  );
+  writeU32(
+    payloadBuild.payloadBytes,
+    RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAGS_CONFIG_OFFSET,
+    flags >>> 0,
+  );
+  return {
+    offset: blockOffset,
+    size: RTC_PERSISTENCE_BLOCK_SIZE,
+    recordOffset: blockOffset + RTC_PERSISTENCE_BLOCK_SIZE - RTC_PERSISTENCE_RECORD_SIZE,
+    recordSize: RTC_PERSISTENCE_RECORD_SIZE,
+    eraseOffsets: [blockOffset, blockOffset + RTC_PERSISTENCE_HALF_SIZE],
+    eraseSize: RTC_PERSISTENCE_HALF_SIZE,
+    flags: flags >>> 0,
+  };
+}
+
 export const RTC_HANDLER_SIGNATURES = Object.freeze({
   "probe": [
     46464,
@@ -174,6 +258,11 @@ const PAYLOAD_SYMBOLS = {
 
 const EMBEDDED_PAYLOAD = validateGeneratedRtcData();
 const RTC_ROM_MARKER_TEXT = "lk_rtc_runtime";
+const RTC_ROM_MARKER = asciiBytes(RTC_ROM_MARKER_TEXT);
+
+export function rtcPayloadSpanForLayout() {
+  return markedPayloadSpan(RTC_PAYLOAD_SIZE, RTC_ROM_MARKER.length);
+}
 
 function stageRtcWrite(bytes, operations, name, offset, replacement, details = {}) {
   return stagePatchOperation(bytes, operations, {
@@ -214,12 +303,16 @@ export function isRtcFreeRegion(bytes, start, size) {
 }
 
 function writeRtcRomMarker(bytes, operations, payloadOffset) {
-  const marker = asciiBytes(RTC_ROM_MARKER_TEXT);
+  const marker = RTC_ROM_MARKER;
   const markerOffset = payloadOffset + RTC_PAYLOAD_SIZE;
   const markerEnd = markerOffset + marker.length;
-  const paddingEnd = payloadOffset + alignedPayloadSpan(RTC_PAYLOAD_SIZE);
-  if (markerEnd > paddingEnd || markerEnd > bytes.length) return false;
-  if (!isRtcFreeRegion(bytes, markerOffset, marker.length)) return false;
+  const paddingEnd = payloadOffset + rtcPayloadSpanForLayout();
+  if (markerEnd > paddingEnd || markerEnd > bytes.length) {
+    throw new PatchError("RTC: reserved payload span does not include the ROM marker");
+  }
+  if (!isRtcFreeRegion(bytes, markerOffset, marker.length)) {
+    throw new PatchError("RTC: ROM marker region is not free");
+  }
   stageRtcWrite(bytes, operations, "RTC ROM marker", markerOffset, marker, {
     kind: PATCH_OPERATION_KIND.LITERAL_REPLACE,
     codeName: "rtc_rom_marker",
@@ -265,8 +358,8 @@ function relocatePayload(payload, newLinkAddr) {
   return { payloadBytes: relocated, symbols };
 }
 
-function ensureRtcPayloadRegion(rom, operations, warnings, size = RTC_PAYLOAD_SIZE, excludedRanges = []) {
-  return ensureDirectPayloadRegion(rom, operations, warnings, alignedPayloadSpan(size), "RTC", excludedRanges);
+function ensureRtcPayloadRegion(rom, operations, warnings, excludedRanges = []) {
+  return ensureDirectPayloadRegion(rom, operations, warnings, rtcPayloadSpanForLayout(), "RTC", excludedRanges);
 }
 
 function halfwordAt(bytes, offset) {
@@ -352,7 +445,7 @@ function makeThumbJumpStub(targetAddr, totalSize) {
 }
 
 function validatePayloadOffset(bytes, payloadOffset) {
-  const payloadSpan = alignedPayloadSpan(RTC_PAYLOAD_SIZE);
+  const payloadSpan = rtcPayloadSpanForLayout();
   if (!Number.isInteger(payloadOffset)) throw new PatchError("RTC: payload offset is invalid");
   if (payloadOffset % RTC_PAYLOAD_ALIGNMENT) throw new PatchError("RTC: payload offset must be 0x100-byte aligned");
   if (payloadOffset < 0 || payloadOffset + payloadSpan > GBA_MAX_ROM_SIZE) {
@@ -363,22 +456,23 @@ function validatePayloadOffset(bytes, payloadOffset) {
   }
 }
 
-function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, context = {}) {
+function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcOptions = {}, context = {}) {
   const matches = findRtcHandlers(originalBytes, context.excludedRanges || []);
+  const tickMode = normalizeRtcTickMode(rtcOptions.tickMode);
   let payloadOffset = context.payloadOffset ?? null;
   let placement = context.placement || (payloadOffset === null ? null : "manual");
 
   if (payloadOffset === null) {
-    payloadOffset = ensureRtcPayloadRegion(workRom, operations, warnings, RTC_PAYLOAD_SIZE, context.excludedRanges || []);
+    payloadOffset = ensureRtcPayloadRegion(workRom, operations, warnings, context.excludedRanges || []);
     if (payloadOffset === null) {
       return { requested: true, status: "failed", size: RTC_PAYLOAD_SIZE };
     }
-    placement = payloadOffset + alignedPayloadSpan(RTC_PAYLOAD_SIZE) <= originalBytes.length
+    placement = payloadOffset + rtcPayloadSpanForLayout() <= originalBytes.length
       ? "uniformTrailingPadding"
       : "alignedRomExpansion";
   } else {
     validatePayloadOffset(workRom.bytes, payloadOffset);
-    const end = payloadOffset + alignedPayloadSpan(RTC_PAYLOAD_SIZE);
+    const end = payloadOffset + rtcPayloadSpanForLayout();
     if (end > workRom.bytes.length) {
       const oldSize = workRom.bytes.length;
       const byteLength = end - oldSize;
@@ -406,6 +500,19 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, cont
 
   const linkAddr = (GBA_ROM_BASE + payloadOffset) >>> 0;
   const payloadBuild = relocatePayload(embeddedPayloadBytes(), linkAddr);
+  configureRtcTickMode(payloadBuild, tickMode);
+  const persistenceContext = rtcOptions.saveOnGlobalHotkey === false
+    ? { ...context, persistenceBlockOffset: null, persistenceFlags: 0 }
+    : context;
+  const persistence = configureRtcPersistence(payloadBuild, persistenceContext);
+  const persistenceLoadEntry = persistence
+    && payloadBuild.symbols.rtc_persist_load !== undefined
+    ? (payloadBuild.symbols.rtc_persist_load | 1) >>> 0
+    : null;
+  const persistenceFlushEntry = persistence
+    && payloadBuild.symbols.rtc_persist_flush !== undefined
+    ? (payloadBuild.symbols.rtc_persist_flush | 1) >>> 0
+    : null;
   stageRtcWrite(workRom.bytes, operations, "RTC payload", payloadOffset, payloadBuild.payloadBytes, {
     kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
     codeName: "rtc_payload",
@@ -432,7 +539,12 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, cont
     payloadOffset,
     runtimeBase: linkAddr,
     runtimeMenuEntry: payloadBuild.symbols.fake_rtc_menu_run_runtime === undefined ? null : (payloadBuild.symbols.fake_rtc_menu_run_runtime | 1) >>> 0,
+    persistenceLoadEntry,
+    persistenceFlushEntry,
+    persistence,
+    tickMode,
     size: RTC_PAYLOAD_SIZE,
+    payloadSpan: rtcPayloadSpanForLayout(),
     placement,
     relocations: ACTIVE_RELOCATION_OFFSETS.length + ACTIVE_RELATIVE_ASSET_RELOCATION_OFFSETS.length,
     graphicsRelocations: ACTIVE_RELATIVE_ASSET_RELOCATION_OFFSETS.length,
@@ -450,7 +562,7 @@ export function applyRtcForPipeline(rom, operations, warnings, rtcOptions = {}, 
   const localWarnings = [];
 
   try {
-    const rtc = patchRtcOnWorkingRom(workRom, localOperations, localWarnings, originalBytes, context);
+    const rtc = patchRtcOnWorkingRom(workRom, localOperations, localWarnings, originalBytes, rtcOptions, context);
     rom.bytes = workRom.bytes;
     operations.push(...localOperations.slice(previousOperationCount));
     warnings.push(...localWarnings);

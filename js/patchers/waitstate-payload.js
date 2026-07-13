@@ -8,6 +8,8 @@ import { isFreeRegion, stageWaitstateWrite } from "./waitstate-common.js";
 
 export const WAITCNT_ENTRYPOINT_MARKER = "lk_waitcnt_bootstrap";
 export const WAITCNT_SWI_RESTORE_MARKER = "lk_swi_waitcnt_restore";
+export const WAITCNT_ENTRYPOINT_MARKER_BYTES = asciiBytes(WAITCNT_ENTRYPOINT_MARKER);
+export const WAITCNT_SWI_RESTORE_MARKER_BYTES = asciiBytes(WAITCNT_SWI_RESTORE_MARKER);
 
 export function decodeEntrypointAddress(bytes) {
   if (bytes.length < 4 || bytes[3] !== 0xea) {
@@ -56,8 +58,12 @@ export function writeRomMarker(
   const markerOffset = offset + size;
   const markerEnd = markerOffset + marker.length;
   const paddingEnd = offset + span;
-  if (markerEnd > paddingEnd || markerEnd > bytes.length) return false;
-  if (!isFreeRegion(bytes, markerOffset, marker.length)) return false;
+  if (markerEnd > paddingEnd || markerEnd > bytes.length) {
+    throw new PatchError(`${label}: reserved payload span does not include the ROM marker`);
+  }
+  if (!isFreeRegion(bytes, markerOffset, marker.length)) {
+    throw new PatchError(`${label}: ROM marker region is not free`);
+  }
   stageWaitstateWrite(bytes, operations, label, markerOffset, marker, {
     kind: PATCH_OPERATION_KIND.LITERAL_REPLACE,
     codeName,

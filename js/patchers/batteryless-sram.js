@@ -524,6 +524,7 @@ function makeBatterylessPayload(
   storageMode,
   indicatorMode,
   flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN,
+  rtcPersistEntry = 0,
 ) {
   if (countdown < 0 || countdown > 0xff) throw new PatchError("Batteryless SRAM: delay value must be between 0 and 255");
   if (!(indicatorMode in C.BATTERYLESS_INDICATOR_MODE_VALUES)) throw new PatchError("Batteryless SRAM: unknown indicator mode");
@@ -534,6 +535,11 @@ function makeBatterylessPayload(
   writeU32(payload, C.BATTERYLESS_SAVE_SIZE_OFFSET, saveSize >>> 0);
   writeU32(payload, C.BATTERYLESS_STORAGE_MODE_OFFSET, storageMode >>> 0);
   writeU32(payload, C.BATTERYLESS_INDICATOR_MODE_OFFSET, C.BATTERYLESS_INDICATOR_MODE_VALUES[indicatorMode] >>> 0);
+  if (C.BATTERYLESS_RTC_PERSIST_ENTRY_OFFSET === undefined) {
+    if (rtcPersistEntry) throw new PatchError("Batteryless SRAM: payload does not expose the Fake-RTC persistence ABI");
+  } else {
+    writeU32(payload, C.BATTERYLESS_RTC_PERSIST_ENTRY_OFFSET, rtcPersistEntry >>> 0);
+  }
   payload[C.BATTERYLESS_COUNTDOWN_IMMEDIATE_OFFSET] = countdown & 0xff;
   return payload;
 }
@@ -603,6 +609,7 @@ function installBatterylessCore(context) {
     hookResult.storageMode,
     context.indicatorMode,
     context.style,
+    context.rtcPersistEntry,
   );
   stageSramWrite(context.workRom.bytes, context.operations, "Batteryless SRAM Payload", context.payloadBase, payload, {
     kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
@@ -645,6 +652,7 @@ function completedBatterylessResult(context, installed) {
     flushEntry: C.BATTERYLESS_FLUSH_SRAM === undefined
       ? null
       : (C.GBA_ROM_BASE + context.payloadBase + C.BATTERYLESS_FLUSH_SRAM) >>> 0,
+    rtcPersistEntry: context.rtcPersistEntry || null,
     countdown: context.countdown,
     indicatorMode: context.indicatorMode,
     hooks: installed.hookResult.hooksFound,
@@ -666,6 +674,7 @@ export function applyBatterylessPatch(
   prefixSize = 0,
   keepLastBlockEmpty = false,
   knownSaveSize = null,
+  rtcPersistEntry = 0,
 ) {
   const selectedPayload = batterylessPayloadForStyle(flash1mBankSwitchStyle);
   const previousOperationCount = operations.length;
@@ -675,6 +684,7 @@ export function applyBatterylessPatch(
     countdown,
     indicatorMode,
     style: flash1mBankSwitchStyle,
+    rtcPersistEntry: rtcPersistEntry >>> 0,
   };
   const context = {
     ...baseContext,

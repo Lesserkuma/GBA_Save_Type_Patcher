@@ -41,6 +41,7 @@ export const UI_TEXT = Object.freeze({
   JOURNAL_DELAY_INVALID: "Journal flush delay must be a number from 1 to 255.",
   JOURNAL_INDICATOR_INVALID: "Journal save indicator must be save, countdown, or off.",
   CUSTOM_FLASH_MODEL_INVALID: "Select a valid custom Flash chip model.",
+  RTC_TICK_MODE_INVALID: "Select a valid Fake RTC clock update mode.",
   HOTKEY_REQUIRED: "Select at least one hotkey button.",
   PATCH_SELECTION_REQUIRED: "Select an optional patch or choose a save type patch mode.",
 });

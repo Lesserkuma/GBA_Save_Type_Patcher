@@ -10,6 +10,7 @@ SECTIONS
     .text :
     {
         *(.text*)
+        *(.rtc_flash_ram_code)
         *(.rodata*)
         *(.glue_7)
         *(.glue_7t)

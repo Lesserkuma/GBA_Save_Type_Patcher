@@ -64,6 +64,7 @@ const ABI = {
   layoutConfigOffset: requiredConstant("FLASH512K_LAYOUT_CONFIG_OFFSET"),
   countdownConfigOffset: requiredConstant("FLASH512K_COUNTDOWN_CONFIG_OFFSET"),
   indicatorConfigOffset: requiredConstant("FLASH512K_INDICATOR_CONFIG_OFFSET"),
+  rtcPersistEntryConfigOffset: requiredConstant("FLASH512K_RTC_PERSIST_ENTRY_CONFIG_OFFSET"),
   flushEntry: requiredConstant("FLASH512K_FLUSH_ENTRY"),
 };
 
@@ -89,6 +90,7 @@ export function defineJournalDescriptor(rawData, spec = {}) {
     layout: required("FLASH512K_LAYOUT_CONFIG_OFFSET"),
     countdown: required("FLASH512K_COUNTDOWN_CONFIG_OFFSET"),
     indicator: required("FLASH512K_INDICATOR_CONFIG_OFFSET"),
+    rtcPersistEntry: required("FLASH512K_RTC_PERSIST_ENTRY_CONFIG_OFFSET"),
   };
   if (Number.isInteger(constants.FLASH512K_SAVE_CHIP_TYPE_CONFIG_OFFSET)) {
     configFields.saveChipType = constants.FLASH512K_SAVE_CHIP_TYPE_CONFIG_OFFSET;
@@ -277,6 +279,7 @@ function configurePayload(payloadBase, journalOffset, family, countdownFrames, i
   writeU32(payload, fields.layout, config.layout >>> 0);
   writeU32(payload, fields.countdown, countdownFrames >>> 0);
   writeU32(payload, fields.indicator, INDICATOR_MODE_VALUES[indicatorMode] >>> 0);
+  writeU32(payload, fields.rtcPersistEntry, 0);
   if (Number.isInteger(fields.saveChipType)) writeU32(payload, fields.saveChipType, saveChipType >>> 0);
   return {
     payload,
@@ -291,6 +294,7 @@ function makeJournalMetadata(payloadBase, family, counts, config, status, descri
   const flushEntry = flash512kTargetAddress(payloadBase, descriptor.entries.flush, descriptor.gbaRomBase);
   const reservedRange = [config.journalOffset, config.journalOffset + descriptor.placement.reservedSize];
   const runtimeWriteRange = [config.journalOffset, config.journalOffset + descriptor.placement.activeSize];
+  const rtcPersistEntryConfigOffset = payloadBase + descriptor.configFields.rtcPersistEntry;
   return {
     requested: true,
     status,
@@ -304,15 +308,108 @@ function makeJournalMetadata(payloadBase, family, counts, config, status, descri
       offset: config.journalOffset,
       reservedSize: descriptor.placement.reservedSize,
       activeSize: descriptor.placement.activeSize,
-      // The remainder of the reservation must stay erased for validation,
-      // but is not modified by the runtime.
+      // The inactive remainder stays erased in the ROM image. Fake-RTC may
+      // later own the complete reserve and place its record at the tail.
       runtimeWriteRanges: [runtimeWriteRange],
       countdownFrames: config.countdownFrames,
       indicatorMode: config.indicatorMode,
       flushEntry,
+      rtcPersistEntry: 0,
+      rtcPersistEntryConfigOffset,
       reservedRanges: [reservedRange],
     },
-    config: Number.isInteger(config.saveChipType) ? { saveChipType: config.saveChipType } : {},
+    config: {
+      ...(Number.isInteger(config.saveChipType) ? { saveChipType: config.saveChipType } : {}),
+      rtcPersistEntry: 0,
+      rtcPersistEntryConfigOffset,
+      rtcPersistEntryPayloadOffset: descriptor.configFields.rtcPersistEntry,
+    },
+  };
+}
+
+/**
+ * Configure an already staged Standard or Custom Journal payload after the
+ * Fake-RTC payload address is known. stagePatchOperation declares the overlap
+ * with the earlier whole-payload install and uses the current staged bytes as
+ * this operation's preimage.
+ */
+export function patchInstalledJournalRtcPersistEntry(
+  bytes,
+  operations,
+  journalPatch,
+  rtcPersistEntry,
+) {
+  if (!(bytes instanceof Uint8Array) || !Array.isArray(operations)) {
+    throw new TypeError("Journal RTC persistence patching requires ROM bytes and an operation array.");
+  }
+  const payloadOffset = journalPatch?.payloadOffset;
+  const payloadSize = journalPatch?.payloadSize;
+  const configOffset = journalPatch?.config?.rtcPersistEntryConfigOffset
+    ?? journalPatch?.journal?.rtcPersistEntryConfigOffset;
+  if (
+    !Number.isSafeInteger(payloadOffset)
+    || !Number.isSafeInteger(payloadSize)
+    || payloadSize <= 0
+    || !Number.isSafeInteger(configOffset)
+    || configOffset < payloadOffset
+    || configOffset + 4 > payloadOffset + payloadSize
+    || configOffset + 4 > bytes.length
+  ) {
+    throw new PatchError("Journal RTC persistence config is outside the installed payload.");
+  }
+  if (
+    !Number.isSafeInteger(rtcPersistEntry)
+    || rtcPersistEntry < 0
+    || rtcPersistEntry > 0xffffffff
+    || (rtcPersistEntry !== 0 && (
+      (rtcPersistEntry & 1) !== 1
+      || rtcPersistEntry - 1 < ABI.gbaRomBase
+      || rtcPersistEntry - 1 >= ABI.gbaRomBase + GBA_MAX_ROM_SIZE
+    ))
+  ) {
+    throw new PatchError("Journal RTC persistence entry is not a valid Thumb ROM address.");
+  }
+
+  const replacement = new Uint8Array(4);
+  writeU32(replacement, 0, rtcPersistEntry >>> 0);
+  const operation = stagePatchOperation(bytes, operations, {
+    id: `flash-journal-${operations.length}`,
+    kind: PATCH_OPERATION_KIND.CONFIG_WRITE,
+    component: "flashJournal",
+    offset: configOffset,
+    byteLength: replacement.length,
+    expectedBefore: bytes.slice(configOffset, configOffset + replacement.length),
+    replacement,
+    labelKey: "operation.flashJournal",
+    metadata: {
+      name: "Journal RTC persistence entry",
+      value: rtcPersistEntry >>> 0,
+      codeName: "journal_rtc_persist_entry",
+      configOffset: configOffset - payloadOffset,
+    },
+  });
+
+  journalPatch.config = {
+    ...(journalPatch.config || {}),
+    rtcPersistEntry: rtcPersistEntry >>> 0,
+    rtcPersistEntryConfigOffset: configOffset,
+  };
+  if (journalPatch.journal) {
+    journalPatch.journal.rtcPersistEntry = rtcPersistEntry >>> 0;
+    journalPatch.journal.rtcPersistEntryConfigOffset = configOffset;
+    const journalOffset = journalPatch.journal.offset;
+    const runtimeSize = rtcPersistEntry
+      ? journalPatch.journal.reservedSize
+      : journalPatch.journal.activeSize;
+    if (Number.isSafeInteger(journalOffset) && Number.isSafeInteger(runtimeSize) && runtimeSize > 0) {
+      journalPatch.journal.runtimeWriteRanges = [[journalOffset, journalOffset + runtimeSize]];
+    }
+  }
+  return {
+    entry: rtcPersistEntry >>> 0,
+    configOffset,
+    payloadConfigOffset: configOffset - payloadOffset,
+    operationId: operation.id,
   };
 }
 

@@ -111,6 +111,10 @@ journal_countdown_config: .word 100
 .hidden journal_indicator_config
 .type journal_indicator_config, %object
 journal_indicator_config: .word 0
+.global journal_rtc_persist_entry_config
+.hidden journal_rtc_persist_entry_config
+.type journal_rtc_persist_entry_config, %object
+journal_rtc_persist_entry_config: .word 0
 )" JOURNAL_EXTRA_CONFIG_ASM R"(
 .text
 )");
@@ -120,6 +124,7 @@ extern HIDDEN const uint32_t journal_logical_size_config;
 extern HIDDEN const uint32_t journal_layout_config;
 extern HIDDEN const uint32_t journal_countdown_config;
 extern HIDDEN const uint32_t journal_indicator_config;
+extern HIDDEN const uint32_t journal_rtc_persist_entry_config;
 #ifdef CUSTOM_SAVE_BACKEND
 extern HIDDEN const uint32_t journal_save_chip_type_config;
 #endif
@@ -150,6 +155,8 @@ typedef struct {
     uint32_t first;
     uint32_t size;
 } PendingWrite;
+
+typedef uint32_t (*RtcPersistFlush)(uint32_t release_mask);
 
 typedef struct {
     uint16_t soundcnt_l;
@@ -271,6 +278,7 @@ static uint32_t config_valid(void)
     uint32_t layout = journal_layout_config;
     uint32_t countdown = journal_countdown_config;
     uint32_t indicator = journal_indicator_config;
+    uint32_t rtc_persist_entry = journal_rtc_persist_entry_config;
 
     if (base == 0xFFFFFFFFu || base >= 0x02000000u)
         return 0;
@@ -282,6 +290,11 @@ static uint32_t config_valid(void)
           (size == 0x2000u && layout == SAVE_LAYOUT_EEPROM)))
         return 0;
     if (countdown == 0 || countdown > 255u)
+        return 0;
+    if (rtc_persist_entry &&
+        (!(rtc_persist_entry & 1u) ||
+         (rtc_persist_entry & ~1u) < ROM_BASE ||
+         (rtc_persist_entry & ~1u) >= ROM_BASE + 0x02000000u))
         return 0;
 #ifdef CUSTOM_SAVE_BACKEND
     if (journal_save_chip_type_config != 1u &&
@@ -1019,6 +1032,13 @@ static uint32_t erase_and_verify_journal(uint32_t type)
     return 1;
 }
 
+static uint32_t flush_rtc_persistence(void)
+{
+    RtcPersistFlush flush =
+        (RtcPersistFlush)(uintptr_t)journal_rtc_persist_entry_config;
+    return flush(0);
+}
+
 static void wait_for_hotkey_release(uint32_t release_mask)
 {
     release_mask &= KEYINPUT_MASK;
@@ -1033,7 +1053,8 @@ static uint32_t flush_journal_inner(uint32_t release_mask,
     uint32_t dirty;
     uint32_t reset_save_flash = 0;
     uint32_t success = 0;
-    uint32_t rom_flash_type;
+    uint32_t rom_flash_type = 0;
+    uint32_t rtc_persist_entry;
     uint32_t logical_per_sector;
     uint32_t first;
     uint16_t previous_greenswap = REG_GREENSWAP;
@@ -1050,16 +1071,19 @@ static uint32_t flush_journal_inner(uint32_t release_mask,
 
     if (!slots_are_well_formed(&journal_dirty))
         goto restore;
-    dirty = journal_dirty || pending;
+    rtc_persist_entry = journal_rtc_persist_entry_config;
+    dirty = journal_dirty || pending || rtc_persist_entry;
     if (!dirty) {
         success = 1;
         goto restore;
     }
 
     reset_save_flash = 1;
-    rom_flash_type = probe_rom_flash_type();
-    if (!rom_flash_type)
-        goto restore;
+    if (!rtc_persist_entry) {
+        rom_flash_type = probe_rom_flash_type();
+        if (!rom_flash_type)
+            goto restore;
+    }
 
     logical_per_sector = 0x1000u;
     for (first = 0; first < journal_logical_size_config; first += logical_per_sector) {
@@ -1071,8 +1095,15 @@ static uint32_t flush_journal_inner(uint32_t release_mask,
             goto restore;
     }
 
-    if (journal_dirty && !erase_and_verify_journal(rom_flash_type))
+    if (rtc_persist_entry) {
+        /* RTC persistence owns both 128 KiB halves of the reservation.  It
+         * erases the Journal and writes its tail record as one operation, so
+         * no Journal erase may follow this call. */
+        if (!flush_rtc_persistence())
+            goto restore;
+    } else if (journal_dirty && !erase_and_verify_journal(rom_flash_type)) {
         goto restore;
+    }
     success = 1;
 
 restore:
@@ -1254,6 +1285,13 @@ static uint32_t journal_write_core(const uint8_t *source, uint32_t first, uint32
     for (;;) {
         if (!preflight_write(source, first, size, &changed, &collision))
             return 0;
+        if (journal_rtc_persist_entry_config) {
+            /* A valid game save call is also the RTC persistence trigger,
+             * even when its logical save bytes were already up to date. */
+            COUNTDOWN_COUNTER = (uint16_t)journal_countdown_config;
+            if (journal_indicator_config == INDICATOR_COUNTDOWN)
+                REG_GREENSWAP = 1;
+        }
         if (!changed)
             return 1;
         if (!collision)

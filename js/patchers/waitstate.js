@@ -32,7 +32,7 @@
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, updateGbaHeaderChecksum } from "./patch-state.js";
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
-import { PAYLOAD_ALIGNMENT, alignedPayloadSpan, ensureDirectPayloadRegion } from "./payload-placement.js";
+import { PAYLOAD_ALIGNMENT, ensureDirectPayloadRegion, markedPayloadSpan } from "./payload-placement.js";
 import { detectRomSaveMetadata } from "./save-type.js";
 import {
   collectSuperfwFixedWriteRanges,
@@ -45,7 +45,9 @@ import { applySuperfwPatchengineWaitcnt, patchWaitstateStartupLiterals } from ".
 import { stageWaitstateWrite, u32ToBytes } from "./waitstate-common.js";
 import {
   WAITCNT_ENTRYPOINT_MARKER,
+  WAITCNT_ENTRYPOINT_MARKER_BYTES,
   WAITCNT_SWI_RESTORE_MARKER,
+  WAITCNT_SWI_RESTORE_MARKER_BYTES,
   decodeEntrypointAddress,
   encodeArmBranch,
   makeWaitstatePayload,
@@ -67,6 +69,7 @@ function runSuperfwWaitcntPatch(inputBytes, operations, warnings, options = {}) 
     const patched = applySuperfwWaitcntDbOps(original, dbEntry, operations, {
       warnings,
       programBaseOffset: options.programBaseOffset ?? null,
+      programMarkerSize: WAITCNT_SWI_RESTORE_MARKER_BYTES.length,
       excludedRanges: options.excludedRanges || [],
     });
     const appliedWrites = operations.length - before;
@@ -105,9 +108,15 @@ function runSuperfwWaitcntPatch(inputBytes, operations, warnings, options = {}) 
 export function waitstatePayloadSpanForLayout(inputBytes, waitstateOptions = {}) {
   if (!waitstateOptions?.enabled) return 0;
 
-  const entrypointSpan = alignedPayloadSpan(C.WAITSTATE_PAYLOAD_SIZE);
+  const entrypointSpan = markedPayloadSpan(
+    C.WAITSTATE_PAYLOAD_SIZE,
+    WAITCNT_ENTRYPOINT_MARKER_BYTES.length,
+  );
   const dbEntry = inputBytes ? getSuperfwDbEntryForRom(inputBytes) : null;
-  return entrypointSpan + superfwProgramRelocationSpan(dbEntry);
+  return entrypointSpan + superfwProgramRelocationSpan(
+    dbEntry,
+    WAITCNT_SWI_RESTORE_MARKER_BYTES.length,
+  );
 }
 
 function failedWaitstateResult(value) {
@@ -115,9 +124,15 @@ function failedWaitstateResult(value) {
 }
 
 function resolveWaitstateLayout(work, options, excludedRanges) {
-  const entrypointSpan = alignedPayloadSpan(C.WAITSTATE_PAYLOAD_SIZE);
+  const entrypointSpan = markedPayloadSpan(
+    C.WAITSTATE_PAYLOAD_SIZE,
+    WAITCNT_ENTRYPOINT_MARKER_BYTES.length,
+  );
   const dbEntry = getSuperfwDbEntryForRom(work);
-  const programSpan = superfwProgramRelocationSpan(dbEntry);
+  const programSpan = superfwProgramRelocationSpan(
+    dbEntry,
+    WAITCNT_SWI_RESTORE_MARKER_BYTES.length,
+  );
   const totalPayloadSpan = entrypointSpan + programSpan;
   const fixedWriteRanges = collectSuperfwFixedWriteRanges(dbEntry);
   let payloadOffset = options.payloadOffset ?? null;
@@ -143,13 +158,13 @@ function resolveWaitstateLayout(work, options, excludedRanges) {
   if (payloadOffset === null) {
     return { error: "Waitstate: no free tail area for entrypoint payload found" };
   }
-  return { payloadOffset, programSpan, totalPayloadSpan };
+  return { payloadOffset, entrypointSpan, programSpan, totalPayloadSpan };
 }
 
 function applySuperfwWithFallback(work, layout, excludedRanges, previousOperations) {
   const operations = [...previousOperations];
   const warnings = [];
-  const programBaseOffset = layout.payloadOffset + alignedPayloadSpan(C.WAITSTATE_PAYLOAD_SIZE);
+  const programBaseOffset = layout.payloadOffset + layout.entrypointSpan;
   let result = runSuperfwWaitcntPatch(work, operations, warnings, {
     programBaseOffset: layout.programSpan ? programBaseOffset : null,
     excludedRanges,
@@ -192,7 +207,7 @@ function installWaitstateEntrypoint(context) {
     context.operations,
     context.payloadOffset,
     payload.length,
-    alignedPayloadSpan(payload.length),
+    markedPayloadSpan(payload.length, WAITCNT_ENTRYPOINT_MARKER_BYTES.length),
     WAITCNT_ENTRYPOINT_MARKER,
     "WAITCNT entrypoint ROM marker",
     "waitcnt_entrypoint_rom_marker",
@@ -218,6 +233,7 @@ function completedWaitstateResult(value, nextEntrypoint, layout, directWrites, w
     value,
     payloadOffset: layout.payloadOffset,
     size: layout.totalPayloadSpan,
+    payloadSpan: layout.totalPayloadSpan,
     nextEntrypoint,
     directWrites,
     source: waitstate?.source,

@@ -34,6 +34,26 @@ export function alignedPayloadSpan(size) {
   return alignUp(size, PAYLOAD_ALIGNMENT);
 }
 
+export function markedPayloadSpan(payloadSize, markerSize) {
+  alignedPayloadSpan(payloadSize);
+  if (!Number.isSafeInteger(markerSize) || markerSize < 0) {
+    throw new PatchError("Payload marker size must be a non-negative integer.", {
+      code: "PAYLOAD_MARKER_SIZE_INVALID",
+      stage: "placement",
+      context: { payloadSize, markerSize },
+    });
+  }
+  const combinedSize = payloadSize + markerSize;
+  if (!Number.isSafeInteger(combinedSize)) {
+    throw new PatchError("Payload and marker size exceed the supported integer range.", {
+      code: "PAYLOAD_MARKER_SPAN_INVALID",
+      stage: "placement",
+      context: { payloadSize, markerSize },
+    });
+  }
+  return alignedPayloadSpan(combinedSize);
+}
+
 export function isFreeByte(value) {
   return value === 0x00 || value === 0xff;
 }
