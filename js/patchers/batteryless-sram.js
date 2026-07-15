@@ -35,6 +35,7 @@ import {
   rangesOverlap,
   stageSramWrite,
 } from "./sram-common.js";
+import { buildEepromV12xWriteCompatHook } from "./eeprom-v12x-write-compat.js";
 
 const C = SRAM_CONSTANTS;
 const BATTERYLESS_PAYLOAD_MODERN = hexToBytes(BATTERYLESS_PAYLOAD_HEX);
@@ -376,6 +377,16 @@ function writeBatterylessThumbHook(out, offset, targetAddress, operations, name)
   });
 }
 
+function writeBatterylessEepromV12xCompatHook(out, offset, targetAddress, operations, name) {
+  const compat = buildEepromV12xWriteCompatHook(out, offset, targetAddress, C.GBA_ROM_BASE);
+  if (compat === null) return false;
+  stageSramWrite(out, operations, `Batteryless SRAM ${name} SDK timer compatibility`, offset, compat.replacement, {
+    codeName: "batteryless_eeprom_v12x_compat_hook",
+    value: targetAddress >>> 0,
+  });
+  return true;
+}
+
 function writeBatterylessArmHook(out, offset, targetAddress, operations, name) {
   if (offset < 0 || offset + 12 > out.length) throw new PatchError(`Batteryless ARM hook is outside the ROM: 0x${offset.toString(16)}`);
   const replacement = new Uint8Array(12);
@@ -444,10 +455,17 @@ function patchBatterylessWriteHooks(
 
       if (mode === "auto") {
         const targetAddress = (C.GBA_ROM_BASE + payloadBase + batterylessTargetOffset(hook.target)) >>> 0;
-        if (hook.thunk === "thumb") writeBatterylessThumbHook(out, matchOffset, targetAddress, operations, hook.name);
-        else if (hook.thunk === "arm") writeBatterylessArmHook(out, matchOffset, targetAddress, operations, hook.name);
-        else if (hook.thunk === "eeprom_v111_epilogue") writeBatterylessEepromV111Hook(out, matchOffset, targetAddress, operations, hook.name);
-        else throw new PatchError(`Unknown Batteryless hook type: ${hook.thunk}`);
+        const usedEepromCompatHook = (
+          hook.target === "eeprom"
+          && hook.thunk === "thumb"
+          && writeBatterylessEepromV12xCompatHook(out, matchOffset, targetAddress, operations, hook.name)
+        );
+        if (!usedEepromCompatHook) {
+          if (hook.thunk === "thumb") writeBatterylessThumbHook(out, matchOffset, targetAddress, operations, hook.name);
+          else if (hook.thunk === "arm") writeBatterylessArmHook(out, matchOffset, targetAddress, operations, hook.name);
+          else if (hook.thunk === "eeprom_v111_epilogue") writeBatterylessEepromV111Hook(out, matchOffset, targetAddress, operations, hook.name);
+          else throw new PatchError(`Unknown Batteryless hook type: ${hook.thunk}`);
+        }
       }
       pos = matchOffset + 2;
     }
@@ -652,6 +670,9 @@ function completedBatterylessResult(context, installed) {
     flushEntry: C.BATTERYLESS_FLUSH_SRAM === undefined
       ? null
       : (C.GBA_ROM_BASE + context.payloadBase + C.BATTERYLESS_FLUSH_SRAM) >>> 0,
+    initEntry: C.BATTERYLESS_INITIALIZE_SRAM === undefined
+      ? null
+      : (C.GBA_ROM_BASE + context.payloadBase + C.BATTERYLESS_INITIALIZE_SRAM) >>> 0,
     rtcPersistEntry: context.rtcPersistEntry || null,
     countdown: context.countdown,
     indicatorMode: context.indicatorMode,

@@ -24,6 +24,32 @@
     .equ RTC_MAX_TIMESTAMP, 0xBC19137F
     .equ KEY_MENU_COMBO_DEFAULT, GBA_KEY_MENU_COMBO_DEFAULT
 
+    // Direct Sound IRQs must reach the game's handler without touching ROM.
+    // Save the two scratch registers and the entry flags, inspect the combined
+    // IE/IF word, then restore the exact entry state before chaining.  The
+    // slower shared-handler frame is only needed for VBlank work.
+    .macro irq_fast_chain_non_vblank slow_label
+    stmfd   sp!, {r1, r2}
+    mrs     r2, cpsr
+    ldr     r1, [r0, #0x200]
+    tst     r1, #0x00010000
+    bne     .Lirq_fast_slow\@
+    ldr     r1, [r0, #-12]
+    cmp     r1, #0
+    beq     .Lirq_fast_return\@
+    msr     cpsr_f, r2
+    ldmfd   sp!, {r1, r2}
+    ldr     pc, [r0, #-12]
+.Lirq_fast_return\@:
+    msr     cpsr_f, r2
+    ldmfd   sp!, {r1, r2}
+    bx      lr
+.Lirq_fast_slow\@:
+    msr     cpsr_f, r2
+    ldmfd   sp!, {r1, r2}
+    b       \slow_label
+    .endm
+
     .global irq_config_magic
 irq_config_magic:
     .word IRQ_HANDLER_MAGIC
@@ -51,6 +77,9 @@ irq_hotkey_mask:
     .global irq_handler_entry
 irq_handler_entry:
     .word 0
+    .global irq_startup_callback_entry
+irq_startup_callback_entry:
+    .word 0
 
     .global irq_bootstrap
     .type irq_bootstrap, %function
@@ -63,12 +92,32 @@ irq_bootstrap:
     ldr     pc, [r1]
     .size irq_bootstrap, . - irq_bootstrap
 
+    // A deferred startup is represented solely by the IRQ vector pointing at
+    // this one-shot handler. Do not borrow adjacent IWRAM words for state: some
+    // games, including Pocket Monsters Ruby, use 03007FF0 themselves.
+    .global irq_handler_startup
+    .type irq_handler_startup, %function
+irq_handler_startup:
+    irq_fast_chain_non_vblank irq_handler_startup_vblank
+irq_handler_startup_vblank:
+    stmfd   sp!, {r0-r12, lr}
+    mrs     r11, cpsr
+    mov     r8, r0
+    adr     r9, irq_flags
+    ldr     r10, [r9]
+    bl      irq_call_startup_once
+    b       irq_vblank_common
+    .size irq_handler_startup, . - irq_handler_startup
+
     .global irq_handler
     .type irq_handler, %function
     .global irq_handler_continuous
     .type irq_handler_continuous, %function
 irq_handler_continuous:
+    irq_fast_chain_non_vblank irq_handler_continuous_vblank
+irq_handler_continuous_vblank:
     stmfd   sp!, {r0-r12, lr}
+    mrs     r11, cpsr            // r11 is free after the game's value was stacked.
     mov     r8, r0              // IO base, expected 0x04000000
     adr     r9, irq_flags
     ldr     r10, [r9]
@@ -123,7 +172,10 @@ irq_rtc_tick_restore:
 // Legacy Fake RTC and save-only configurations retain the original handler
 // entry and therefore execute no additional work on their VBlank hot path.
 irq_handler:
+    irq_fast_chain_non_vblank irq_handler_vblank
+irq_handler_vblank:
     stmfd   sp!, {r0-r12, lr}
+    mrs     r11, cpsr            // Preserve the game's IRQ-entry condition flags.
     mov     r8, r0              // IO base, expected 0x04000000
     adr     r9, irq_flags
     ldr     r10, [r9]
@@ -184,10 +236,12 @@ irq_chain_original:
     ldr     r1, [r8, #-12]      // [03007FF4] original game handler slot
     cmp     r1, #0
     beq     irq_return
+    msr     cpsr_f, r11
     ldmfd   sp!, {r0-r12, lr}
     ldr     pc, [r0, #-12]
 
 irq_return:
+    msr     cpsr_f, r11
     ldmfd   sp!, {r0-r12, lr}
     bx      lr
     .size irq_handler, . - irq_handler
@@ -197,12 +251,35 @@ irq_call_original_once:
     cmp     r1, #0
     bxeq    lr
 
-    stmfd   sp!, {r7-r10, lr}
+    stmfd   sp!, {r7-r11, lr}
     mov     r0, r8
+    msr     cpsr_f, r11
+    ldr     r11, [sp, #68]      // Present the game's stacked r11 to its handler.
     mov     lr, pc
     bx      r1
-    ldmfd   sp!, {r7-r10, lr}
+    ldmfd   sp!, {r7-r11, lr}
     mov     r0, r8
+    bx      lr
+
+irq_call_startup_once:
+    adr     r2, irq_startup_callback_entry
+    ldr     r12, [r2]
+    cmp     r12, #0
+    beq     irq_startup_install_regular
+
+    mov     r3, #0x9F           // System mode, IRQ disabled
+    msr     cpsr_c, r3
+    push    {lr}
+    mov     lr, pc
+    bx      r12
+    pop     {lr}
+    mov     r3, #0x92           // IRQ mode, IRQ disabled
+    msr     cpsr_c, r3
+
+irq_startup_install_regular:
+    adr     r2, irq_handler_entry
+    ldr     r2, [r2]
+    str     r2, [r8, #-4]       // Replace the one-shot vector after success.
     bx      lr
 
 irq_call_save_flush:

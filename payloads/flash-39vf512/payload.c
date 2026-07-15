@@ -40,6 +40,8 @@
 #define SAVE_ERASE_TIMEOUT 0x01000000u
 #define ROM_WORKSPACE_EWRAM_START 0x02000000u
 #define ROM_WORKSPACE_EWRAM_END 0x02040000u
+#define ROM_WORKSPACE_IWRAM_START 0x03000000u
+#define ROM_WORKSPACE_IWRAM_END 0x03008000u
 #define ROM_WORKSPACE_SIZE 0x400u
 #define ROM_WORKSPACE_ALIGNMENT 0x400u
 #define ROM_WORKSPACE_EXEC_OFFSET 0x000u
@@ -51,8 +53,12 @@
 #define ROM_WORKSPACE_STACK_BOTTOM 0x140u
 #define ROM_WORKSPACE_STACK_TOP 0x400u
 #define ROM_WORKSPACE_STACK_SIZE 0x2C0u
+#define ROM_WORKSPACE_STACK_MAGIC 0x4B535746u
+#define ROM_WORKSPACE_STACK_COPY_RESERVE 0x80u
 #define ROM_WORKSPACE_STACK_SAFETY_BELOW 0x1000u
 #define ROM_WORKSPACE_STACK_SAFETY_ABOVE 0x0100u
+#define EEPROM_CALLER_STACK_SOURCE_WINDOW 0x40u
+#define EEPROM_CALLER_STACK_SOURCE_OFFSET 0x18u
 #define ROM_WORKSPACE_GUARD_WORD 0xA55A3CC3u
 #define HIDDEN __attribute__((visibility("hidden")))
 
@@ -116,6 +122,8 @@ journal_indicator_config: .word 0
 .type journal_rtc_persist_entry_config, %object
 journal_rtc_persist_entry_config: .word 0
 )" JOURNAL_EXTRA_CONFIG_ASM R"(
+.global flash512k_write_eeprom_compat_word
+flash512k_write_eeprom_compat_word: .word write_eeprom_compat_patched + 1
 .text
 )");
 
@@ -243,6 +251,14 @@ journal_irq_restore:
     bx lr
 .size journal_irq_restore, .-journal_irq_restore
 
+.global journal_read_cpsr
+.hidden journal_read_cpsr
+.type journal_read_cpsr, %function
+journal_read_cpsr:
+    mrs r0, cpsr
+    bx lr
+.size journal_read_cpsr, .-journal_read_cpsr
+
 .global journal_irq_delivery_enabled
 .hidden journal_irq_delivery_enabled
 .type journal_irq_delivery_enabled, %function
@@ -269,6 +285,7 @@ extern HIDDEN uint32_t journal_call_workspace(
     void *exec_slot, void *stack_top);
 extern HIDDEN uint32_t journal_irq_lock(void);
 extern HIDDEN void journal_irq_restore(uint32_t cpsr);
+extern HIDDEN uint32_t journal_read_cpsr(void);
 extern HIDDEN uint32_t journal_irq_delivery_enabled(void);
 
 static uint32_t config_valid(void)
@@ -587,7 +604,7 @@ static uint32_t workspace_stack_run(const RomWorkspace *workspace,
     uint32_t index;
     uint32_t guard_ok = 1;
 
-    meta[0] = 0x4B535746u; /* "FWSK" */
+    meta[0] = ROM_WORKSPACE_STACK_MAGIC; /* "FWSK" */
     meta[1] = workspace->fill_word;
     meta[2] = argument0;
     meta[3] = argument1;
@@ -609,6 +626,39 @@ static uint32_t workspace_stack_run(const RomWorkspace *workspace,
     if (!workspace_restore(workspace) || !guard_ok)
         return 0;
     return result;
+}
+
+/* The normal stack-copy fallback is safe on games' own stacks and on the
+ * shallower flush worker.  A synchronous EEPROM append can, however, reach
+ * this point after consuming most of the 0x2c0-byte private stack.  Recognize
+ * only our live FWSK frame and refuse the fallback unless both the copied
+ * driver and a conservative call/driver reserve still fit above the guard. */
+static inline __attribute__((always_inline)) uint32_t workspace_stack_is_active(
+    uintptr_t stack_pointer)
+{
+    uintptr_t base = stack_pointer & ~(ROM_WORKSPACE_ALIGNMENT - 1u);
+    volatile const uint32_t *meta;
+
+    if (base < ROM_WORKSPACE_EWRAM_START ||
+        base + ROM_WORKSPACE_SIZE > ROM_WORKSPACE_EWRAM_END ||
+        stack_pointer < base + ROM_WORKSPACE_STACK_BOTTOM ||
+        stack_pointer > base + ROM_WORKSPACE_STACK_TOP)
+        return 0;
+    meta = (volatile const uint32_t *)(base + ROM_WORKSPACE_META_OFFSET);
+    return meta[0] == ROM_WORKSPACE_STACK_MAGIC &&
+        meta[5] == ROM_WORKSPACE_STACK_TOP &&
+        meta[7] == ROM_WORKSPACE_GUARD_WORD;
+}
+
+static inline __attribute__((always_inline)) uint32_t workspace_stack_can_copy(
+    uintptr_t stack_pointer, uint32_t function_size)
+{
+    uintptr_t base = stack_pointer & ~(ROM_WORKSPACE_ALIGNMENT - 1u);
+
+    if (!workspace_stack_is_active(stack_pointer))
+        return 1;
+    return stack_pointer - (base + ROM_WORKSPACE_STACK_BOTTOM) >=
+        function_size + ROM_WORKSPACE_STACK_COPY_RESERVE;
 }
 
 static uint32_t run_rom_function(uint32_t argument0, uint32_t argument1,
@@ -649,10 +699,13 @@ static uint32_t run_rom_function(uint32_t argument0, uint32_t argument1,
                                  &workspace.fill_word)) {
         result = workspace_run(&workspace, argument0, argument1,
                                function_start, function_end);
-    } else {
+    } else if (workspace_stack_can_copy(
+                   current_stack_pointer(), function_end - function_start)) {
         result = journal_run_from_stack(argument0, argument1,
                                         (const void *)function_start,
                                         (const void *)function_end);
+    } else {
+        result = 0;
     }
     runtime_restore(&backup);
     REG_IME = old_ime;
@@ -1158,11 +1211,17 @@ static uint32_t flush_journal_with_workspace(
         result = workspace_stack_run(
             &workspace, release_mask, (uintptr_t)pending,
             (uintptr_t)flush_journal_inner);
-    } else {
+    } else if (!workspace_stack_is_active(current_stack_pointer()) ||
+               !journal_rtc_persist_entry_config) {
         /* Preserve the pre-workspace compatibility path when no homogeneous
-         * EWRAM block exists. Nested ROM drivers retain their own one-shot
-         * stack-copy fallback before the first flash command. */
+         * EWRAM block exists. Local ROM drivers retain their dynamically
+         * guarded stack-copy fallback before the first flash command. */
         result = flush_journal_inner(release_mask, pending);
+    } else {
+        /* A collision can request a flush from the EEPROM worker's FWSK.  If
+         * RTC persistence is active, its external callback has no stack bound
+         * this payload can prove, so fail closed without a second workspace. */
+        result = 0;
     }
     runtime_restore(&backup);
     REG_IME = old_ime;
@@ -1313,6 +1372,107 @@ static uint32_t journal_write_core(const uint8_t *source, uint32_t first, uint32
     }
 }
 
+static uint32_t journal_write_eeprom_inner(uint32_t source_address,
+                                           uint32_t first)
+{
+    return journal_write_core((const uint8_t *)source_address, first, 8);
+}
+
+static inline __attribute__((always_inline)) uint32_t
+eeprom_caller_stack_is_safe(const uint8_t *source,
+                            uintptr_t gateway_stack_pointer)
+{
+    uintptr_t source_start = (uintptr_t)source;
+    uintptr_t source_end = source_start + 8u;
+
+    /* A synchronous SDK EEPROM write commonly passes its eight bytes in the
+     * active System-stack frame. Keep the caller stack only for the canonical
+     * frame slot observed after this gateway's two-word prologue. Merely being
+     * close to a high IWRAM SP is insufficient: other games place a temporary
+     * buffer at the free stack top or keep live copied code immediately below
+     * it. Every other layout retains the private EWRAM stack. */
+    /* Sample the mode before rejecting a private-stack case so the gateway's
+     * bounded timing does not depend on where a game keeps its source bytes. */
+    if ((journal_read_cpsr() & 0x1Fu) != 0x1Fu ||
+        journal_rtc_persist_entry_config ||
+        (gateway_stack_pointer & 3u) || (source_start & 3u) ||
+        gateway_stack_pointer <
+            ROM_WORKSPACE_IWRAM_START + ROM_WORKSPACE_STACK_SAFETY_BELOW ||
+        gateway_stack_pointer >= ROM_WORKSPACE_IWRAM_END ||
+        source_end < source_start || source_start < gateway_stack_pointer ||
+        source_end > ROM_WORKSPACE_IWRAM_END ||
+        source_end > gateway_stack_pointer + EEPROM_CALLER_STACK_SOURCE_WINDOW ||
+        source_start !=
+            gateway_stack_pointer + EEPROM_CALLER_STACK_SOURCE_OFFSET)
+        return 0;
+    return 1;
+}
+
+static uint32_t journal_write_eeprom_with_workspace(const uint8_t *source,
+                                                    uint32_t first)
+{
+    RuntimeBackup backup;
+    RomWorkspace workspace;
+    uintptr_t exclude_start = (uintptr_t)source;
+    uintptr_t exclude_end;
+    uint16_t old_ime;
+    uint32_t result = 0;
+
+    if (!source || !config_valid() ||
+        first > journal_logical_size_config ||
+        8u > journal_logical_size_config - first)
+        return 0;
+    exclude_end = exclude_start + 8u;
+    if (exclude_end < exclude_start)
+        return 0;
+
+    /* Keep the complete synchronous EEPROM append off small game stacks.
+     * With IME and DMA sources paused, a homogeneous EWRAM block cannot be
+     * claimed asynchronously between validation, use, and exact restore. */
+    old_ime = REG_IME;
+    REG_IME = 0;
+    runtime_pause(&backup);
+    if (workspace_find(&workspace, exclude_start, exclude_end) &&
+        !workspace_conflicts((uintptr_t)workspace.base,
+                             current_stack_pointer(),
+                             exclude_start, exclude_end) &&
+        workspace_is_homogeneous((uintptr_t)workspace.base,
+                                 &workspace.fill_word)) {
+        result = workspace_stack_run(
+            &workspace, (uintptr_t)source, first,
+            (uintptr_t)journal_write_eeprom_inner);
+    }
+    runtime_restore(&backup);
+    REG_IME = old_ime;
+    return result;
+}
+
+static uint32_t journal_write_eeprom_compat_with_workspace(
+    const uint8_t *source, uint32_t first, uintptr_t gateway_stack_pointer)
+{
+    RuntimeBackup backup;
+    uint16_t old_ime;
+    uint32_t result;
+
+    if (!source || !config_valid() ||
+        first > journal_logical_size_config ||
+        8u > journal_logical_size_config - first)
+        return 0;
+    if (!eeprom_caller_stack_is_safe(source, gateway_stack_pointer))
+        return journal_write_eeprom_with_workspace(source, first);
+
+    /* Only the exact SDK timer-compatibility wrapper is linked to this entry.
+     * Its canonical IWRAM frame needs the original IWRAM execution timing;
+     * every unproven context falls back to the unchanged private-stack path. */
+    old_ime = REG_IME;
+    REG_IME = 0;
+    runtime_pause(&backup);
+    result = journal_write_core(source, first, 8);
+    runtime_restore(&backup);
+    REG_IME = old_ime;
+    return result;
+}
+
 static uint32_t read_core(uint8_t *destination, uint32_t first, uint32_t size)
 {
     uint32_t index;
@@ -1366,7 +1526,16 @@ uint8_t *verify_sram_patched(uint8_t *source, uint8_t *target, uint32_t size)
 
 uint32_t write_eeprom_patched(uint16_t address, uint8_t *source)
 {
-    uint32_t success = journal_write_core(source, (uint32_t)address << 3, 8);
+    uint32_t success = journal_write_eeprom_with_workspace(
+        source, (uint32_t)address << 3);
+    return success ? 0 : 1;
+}
+
+uint32_t write_eeprom_compat_patched(uint16_t address, uint8_t *source)
+{
+    uintptr_t gateway_stack_pointer = current_stack_pointer();
+    uint32_t success = journal_write_eeprom_compat_with_workspace(
+        source, (uint32_t)address << 3, gateway_stack_pointer);
     return success ? 0 : 1;
 }
 

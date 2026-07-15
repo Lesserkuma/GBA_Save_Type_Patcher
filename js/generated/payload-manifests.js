@@ -1,8 +1,8 @@
 // Generated file. Do not edit.
 // Generator: payloads/generate_manifests.py
 // Generator version: 2
-// Source SHA-256: f7f546302877ca2e6c14c49c8be2f45433eaa8248f7890f12f3fcf481db8bb67
-// Payload-set SHA-256: 8a4aa3ad09926aa821fc0a39b7e28eed9a4c8ab50c3a2b3f116159eb3b1d9f34
+// Source SHA-256: 55f2475df7fa980042bd7fba14f8799b0865cce9e0bc84b9d2b2aa181f632063
+// Payload-set SHA-256: 9fe760bfb9966aec415388b37d2c35d78df1d88beeb900353677bb233227b88a
 // Toolchain: devkitARM 16.1.0; GNU Binutils 2.46.0.20260210
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -14,10 +14,10 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "batteryless-sram",
     payloadVersion: 3,
     licenseExpression: "GPL-3.0-or-later AND MIT",
-    sourceSha256: "59ea1a94678912c546d6befc3e6f1fb7f084f428914b01fe31e57f8a8ae503d9",
-    binarySha256: "890c7159932129d3c8c21249e76953ba0cdb5be34e982e4e6102b840f11b1dca",
+    sourceSha256: "7cf458135e191c601d2550af61ab20d7810a8e2eede8085421a0aaf2f585bb72",
+    binarySha256: "866c6278e7c28a2092023c5291a40c1f68451c43c6935e8736357181f5be6b94",
     toolchain: toolchain,
-    size: 4480,
+    size: 4516,
     alignment: 0x40000,
     symbols: Object.freeze({}),
     configOffsets: Object.freeze({"originalEntrypoint":0,"flushMode":4,"saveSize":8,"storageMode":36,"indicatorMode":40,"rtcPersistEntry":48}),
@@ -28,10 +28,10 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "batteryless-sram-gbata",
     payloadVersion: 3,
     licenseExpression: "GPL-3.0-or-later AND MIT",
-    sourceSha256: "59ea1a94678912c546d6befc3e6f1fb7f084f428914b01fe31e57f8a8ae503d9",
-    binarySha256: "910192d33eeb52564f5470b2122cff9b71a06a51258f0917cbd65fbcbd2f84f8",
+    sourceSha256: "7cf458135e191c601d2550af61ab20d7810a8e2eede8085421a0aaf2f585bb72",
+    binarySha256: "984d4166335a34c18925c5cf78d83d8b363e794262b1f6285974b0b893877fd3",
     toolchain: toolchain,
-    size: 4576,
+    size: 4612,
     alignment: 0x40000,
     symbols: Object.freeze({}),
     configOffsets: Object.freeze({"originalEntrypoint":0,"flushMode":4,"saveSize":8,"storageMode":36,"indicatorMode":40,"rtcPersistEntry":48}),
@@ -42,10 +42,10 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "flash-journal",
     payloadVersion: 3,
     licenseExpression: "GPL-3.0-or-later AND MIT",
-    sourceSha256: "41e03da2bee6a3ec7631df41692f849ee666f96f975833dfbbceb5e02f39696f",
-    binarySha256: "fc7ed04345094b0a18aa34166fcc2a57ba0bfe7ac78aa13f66568008b9d5a837",
+    sourceSha256: "5ed3c7b8e3d60db19a2b3fec286c6da48d5c0cac2db840a672cd995125e2358b",
+    binarySha256: "05f0abc43205ba2a50c2fe2a4c4ba1bd4b99270401adb5c2bd4f364571172ef6",
     toolchain: toolchain,
-    size: 6272,
+    size: 6992,
     alignment: 0x40000,
     symbols: Object.freeze({}),
     configOffsets: Object.freeze({"journalBase":28,"logicalSaveSize":32,"layout":36,"countdown":40,"indicator":44,"rtcPersistEntry":48}),
@@ -56,10 +56,10 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "custom-flash-journal",
     payloadVersion: 3,
     licenseExpression: "GPL-3.0-only AND MIT",
-    sourceSha256: "97327350157d88fe2dd2581db9beaeaadb3ea03df3732d8fa1d3aa2445eb2c87",
-    binarySha256: "fa33aeb55ba80f11f01f4dbdf45892f01c6964ad901f895bd22d59c31854c0f1",
+    sourceSha256: "51c972c56c2ca919e32e18a4ff9cb7b4767a4806a9dbc27bef8b928c693d098f",
+    binarySha256: "87c681a550259c1cd993eb31a8732523aba746167363950fdb8efd4561634089",
     toolchain: toolchain,
-    size: 6336,
+    size: 7048,
     alignment: 0x40000,
     symbols: Object.freeze({}),
     configOffsets: Object.freeze({"journalBase":28,"logicalSaveSize":32,"layout":36,"countdown":40,"indicator":44,"rtcPersistEntry":48,"saveChipType":52}),
@@ -84,12 +84,12 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "shared-irq",
     payloadVersion: 6,
     licenseExpression: "GPL-3.0-or-later",
-    sourceSha256: "899f4cbe8987151c288e77109f1a3e4a9f48abbef94ec75f46017703f2de3530",
-    binarySha256: "bf11ff9672b814abe4b62f6f39fab1e9ec1e44d7b575991aad5d6c40671f276a",
+    sourceSha256: "bc2bd276a32f5c46a790727d467d4e52beb02327ac869b269be55b8640ee63c7",
+    binarySha256: "16f2b7ae2ac445dd2b9ef6c4b522460eb3653e0efe379fd077cdaad73451cfbb",
     toolchain: toolchain,
-    size: 660,
+    size: 984,
     alignment: 0x100,
-    symbols: Object.freeze({"bootstrap":36,"handler":204,"continuousHandler":60}),
+    symbols: Object.freeze({"bootstrap":40,"startupHandler":64,"handler":376,"continuousHandler":160}),
     configOffsets: Object.freeze({"originalEntrypoint":4,"flags":8,"rtcMenuEntry":12,"saveFlushEntry":16,"countdownFrames":20,"indicatorMode":24,"hotkeyMask":28,"handlerEntry":32}),
     relocations: Object.freeze([]),
   }),

@@ -66,7 +66,7 @@ export function findSaveTypeCandidates(bytes) {
 
 export function findSaveType(bytes) {
   const candidates = findSaveTypeCandidates(bytes);
-  return candidates.length === 1 ? candidates[0].library : null;
+  return resolveSaveTypeCandidate(bytes, candidates)?.candidate.library ?? null;
 }
 
 function isEepromConfigTable(bytes, offset) {
@@ -177,16 +177,41 @@ export function detectEepromSize(bytes) {
   return distinct[0] === 4 ? 512 : 8192;
 }
 
+function resolveSaveTypeCandidate(bytes, candidates) {
+  if (candidates.length === 1) return { candidate: candidates[0], structuralEvidence: null };
+  if (candidates.length < 2) return null;
+
+  const eepromCandidates = candidates.filter((candidate) => candidate.library.startsWith("EEPROM"));
+  const onlyEepromAndSram = candidates.every((candidate) => (
+    candidate.library.startsWith("EEPROM") || candidate.library.startsWith("SRAM")
+  ));
+  if (!onlyEepromAndSram || eepromCandidates.length !== 1) return null;
+
+  const eepromSize = detectEepromSize(bytes);
+  if (eepromSize === null) return null;
+  return {
+    candidate: eepromCandidates[0],
+    structuralEvidence: {
+      library: eepromCandidates[0].library,
+      offset: null,
+      evidence: "eepromStructure",
+      size: eepromSize,
+    },
+  };
+}
+
 export function detectRomSaveMetadata(bytes, explicitSaveType) {
   const candidates = explicitSaveType
     ? [{ library: explicitSaveType, offset: null, evidence: "explicit" }]
     : findSaveTypeCandidates(bytes);
-  const saveType = candidates.length === 1 ? candidates[0].library : null;
+  const resolution = resolveSaveTypeCandidate(bytes, candidates);
+  const saveType = resolution?.candidate.library ?? null;
   const evidence = candidates.map((candidate) => ({ ...candidate }));
-  const ambiguousCandidates = candidates.length > 1
+  if (resolution?.structuralEvidence) evidence.push(resolution.structuralEvidence);
+  const ambiguousCandidates = !resolution && candidates.length > 1
     ? candidates.map((candidate) => candidate.library)
     : [];
-  const confidence = candidates.length === 1 ? "high" : candidates.length > 1 ? "ambiguous" : "unknown";
+  const confidence = resolution ? "high" : candidates.length > 1 ? "ambiguous" : "unknown";
   const common = { confidence, evidence, ambiguousCandidates };
   if (!saveType) return { library: null, medium: "none", size: null, label: "Unknown", ...common };
 

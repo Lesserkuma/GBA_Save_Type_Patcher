@@ -35,10 +35,6 @@ fieldset {
   border-bottom: 1px solid var(--bg3)
 }
 
-fieldset:last-child {
-  border-bottom: 0
-}
-
 legend {
   color: var(--text2);
   font-size: .72rem;

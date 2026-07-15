@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-export const APP_VERSION = "1.7";
+export const APP_VERSION = "1.8";
 export const WORKER_PROTOCOL_VERSION = 2;
 
 export const GBA_MAX_ROM_SIZE_BYTES = 32 * 1024 * 1024;

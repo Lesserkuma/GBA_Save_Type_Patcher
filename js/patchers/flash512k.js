@@ -110,6 +110,7 @@ export function defineJournalDescriptor(rawData, spec = {}) {
     entries: {
       sramWrite: required("FLASH512K_WRITE_SRAM_ENTRY"),
       eepromWrite: required("FLASH512K_WRITE_EEPROM_ENTRY"),
+      eepromWriteCompat: required("FLASH512K_WRITE_EEPROM_COMPAT_ENTRY"),
       sramRead: required("FLASH512K_READ_SRAM_ENTRY"),
       eepromRead: required("FLASH512K_READ_EEPROM_ENTRY"),
       sramVerify: required("FLASH512K_VERIFY_SRAM_ENTRY"),
@@ -544,7 +545,15 @@ function normalizeFlashSource(input, sourceSaveType, descriptor) {
   }
   return {
     normalized,
-    hooks: detectFlash512kHookSet(normalized.bytes, descriptor.label),
+    // Some ROMs retain unused EEPROM/SRAM library fragments. The detected
+    // source type identifies which normalized hook family is live, so do not
+    // let remnants from the other family turn that proven choice into a
+    // conflict.
+    hooks: detectFlash512kHookSet(
+      normalized.bytes,
+      descriptor.label,
+      sourceSaveType.startsWith("EEPROM") ? "eeprom" : "sram",
+    ),
   };
 }
 

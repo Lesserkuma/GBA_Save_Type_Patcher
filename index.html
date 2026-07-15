@@ -41,7 +41,7 @@
             <label class="option-line"><input type="radio" name="patchMode" value="none"> <span class="option-copy"><span class="option-label">None</span></span></label>
             <label class="option-line"><input type="radio" name="patchMode" value="sram" checked><span class="option-copy"><span class="option-label">SRAM</span><span class="option-hint">(for SRAM-based cartridges with battery)</span></span></label>
             <label class="option-line"><input type="radio" name="patchMode" value="batteryless-sram"><span class="option-copy"><span class="option-label">Batteryless SRAM</span><span class="option-hint">(for SRAM-based cartridges without battery)</span></span></label>
-            <label class="option-line"><input type="radio" name="patchMode" value="flash512k"><span class="option-copy"><span class="option-label">512K FLASH</span><span class="option-hint">(for cartridges with a genuine SST 512K FLASH save chip)</span></span></label>
+            <label class="option-line"><input type="radio" name="patchMode" value="flash512k"><span class="option-copy"><span class="option-label">512K FLASH</span><span class="option-hint">(for cartridges with a genuine SST 39VF512 save chip)</span></span></label>
             <label class="option-line"><input type="radio" name="patchMode" value="custom-flash"><span class="option-copy"><span class="option-label">Off-spec 512K/1M FLASH</span><span class="option-hint">(for cartridges with a non-standard FLASH save chip)</span></span></label>
           </fieldset>
 
@@ -78,7 +78,7 @@
             </fieldset>
             <fieldset id="rtc-options" class="sub-options" hidden><legend>Fake RTC Settings</legend>
               <div class="inline-group stacked-mobile"><span>Clock update:</span><label><input type="radio" name="rtcTickMode" value="vblank" checked> Continuous on VBlank</label><label><input type="radio" name="rtcTickMode" value="read"> Only when the game reads the clock</label></div>
-              <div class="inline-group stacked-mobile"><span>Save RTC State on Menu Close:</span><label><input type="radio" name="rtcSaveOnGlobalHotkey" value="enabled" checked> Enabled</label><label><input type="radio" name="rtcSaveOnGlobalHotkey" value="disabled"> Disabled</label></div>
+              <div class="inline-group stacked-mobile"><span>Save RTC State on Menu Close:</span><label><input type="radio" name="rtcSaveOnGlobalHotkey" value="enabled" checked> Enabled</label><label><input type="radio" name="rtcSaveOnGlobalHotkey" value="disabled"> Disabled (saves memory)</label></div>
             </fieldset>
           </section>
 
@@ -88,7 +88,7 @@
               <div class="inline-group hotkey-badge-group"><label><input type="checkbox" name="batterylessHotkey" value="start"> START</label><label><input type="checkbox" name="batterylessHotkey" value="select" checked> SELECT</label><label><input type="checkbox" name="batterylessHotkey" value="l" checked> L</label><label><input type="checkbox" name="batterylessHotkey" value="r"> R</label><label><input type="checkbox" name="batterylessHotkey" value="up"> &uarr;</label><label><input type="checkbox" name="batterylessHotkey" value="down"> &darr;</label><label><input type="checkbox" name="batterylessHotkey" value="left"> &larr;</label><label><input type="checkbox" name="batterylessHotkey" value="right"> &rarr;</label><label><input type="checkbox" name="batterylessHotkey" value="a"> A</label><label><input type="checkbox" name="batterylessHotkey" value="b"> B</label><div><span>Buttons to push at the same time</span></div></div>
             </fieldset>
             <fieldset id="last-block-options" class="sub-options"><legend>Storage Layout</legend>
-              <div class="inline-group stacked-mobile"><span>Last 256 KiB Block:</span><label><input type="radio" name="batterylessLastBlock" value="usable" checked> Usable</label><label><input type="radio" name="batterylessLastBlock" value="keep-empty"> Keep empty</label><div></div>
+              <div class="inline-group stacked-mobile"><span>Last 256 KiB Block:</span><label><input type="radio" name="batterylessLastBlock" value="usable" checked> Usable</label><label><input type="radio" name="batterylessLastBlock" value="keep-empty"> Keep empty</label></div>
             </fieldset>
           </section>
         </div>

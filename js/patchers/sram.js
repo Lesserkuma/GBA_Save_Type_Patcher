@@ -628,10 +628,12 @@ function applySramIrq(context) {
       countdownFrames: context.batterylessCountdown,
       indicatorMode: context.batterylessIndicatorMode,
       hotkeyMask: context.batterylessHotkeyMask,
+      startupCallbackEntry: context.batterylessResult?.initEntry || 0,
     },
     {
       excludedRanges: irqExcludedRanges(context),
       payloadOffset: context.irqHandlerPayloadOffset,
+      entrypointSource: context.originalData,
     },
   );
 }

@@ -102,6 +102,7 @@ flush_sram_entry:
     .word flush_sram
 rtc_persist_entry:
     .word 0
+    .word batteryless_initialize
 
 .thumb
 # If you are writing a manual batteryless save patch, you can branch here
@@ -235,6 +236,20 @@ eeprom_v111_expand_sram_raw:
 .ltorg
 
 patched_entrypoint:
+    bl batteryless_initialize
+    ldr pc, original_entrypoint
+
+.global batteryless_initialize
+.type batteryless_initialize, %function
+batteryless_initialize:
+    # The BIOS-provided reset register state is observable. Several custom
+    # CRTs reuse those values while relocating their first IRQ handler, so the
+    # initializer must be transparent whether it runs at reset or from a
+    # proven post-CRT handoff. Keep the stack 8-byte aligned for nested calls.
+    stmfd sp!, {r0-r12, lr}
+    mrs r12, cpsr
+    stmfd sp!, {r11, r12}
+
     mov r1, # 0x0e000000
     # Lock 369in1 mapper
     mov r4, # 0x80
@@ -273,7 +288,10 @@ sram_init_storage_done:
     mov r4, # 0
     bl sram_bank_select_arm_r4
 
-    ldr pc, original_entrypoint
+    ldmfd sp!, {r11, r12}
+    msr cpsr_f, r12
+    ldmfd sp!, {r0-r12, lr}
+    bx lr
 
 .thumb
 # r0 = sector number, # r1 = source data 0x1000 bytes

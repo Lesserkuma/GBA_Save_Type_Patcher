@@ -9,6 +9,10 @@ import {
 import { PatchError } from "../core/errors.js";
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
 import { stagePatchOperation } from "../patch-engine/draft.js";
+import {
+  buildEepromV120FlashTimingHook,
+  buildEepromV12xWriteCompatHook,
+} from "./eeprom-v12x-write-compat.js";
 
 
 export const FLASH512K_THUMB_BRANCH_THUNK = hexToBytes("004b1847");
@@ -150,7 +154,10 @@ export function allFlash512kMatches(bytes, marker, alignment = 2) {
   return matches;
 }
 
-export function detectFlash512kHookSet(bytes, label = "512K FLASH") {
+export function detectFlash512kHookSet(bytes, label = "512K FLASH", expectedFamily = null) {
+  if (expectedFamily !== null && expectedFamily !== "sram" && expectedFamily !== "eeprom") {
+    throw new PatchError(`${label} received an invalid expected hook family.`);
+  }
   const sramWrite = FLASH512K_HOOKS.sramWrite.map((hook) => ({ ...hook, offsets: allFlash512kMatches(bytes, hook.marker) }));
   const sramRead = allFlash512kMatches(bytes, FLASH512K_HOOKS.sramRead.marker);
   const sramVerify = allFlash512kMatches(bytes, FLASH512K_HOOKS.sramVerify.marker);
@@ -167,15 +174,22 @@ export function detectFlash512kHookSet(bytes, label = "512K FLASH") {
   const sramAny = sramWriteCount > 0 || sramRead.length > 0 || sramVerify.length > 0;
   const eepromAny = eepromWrite.length > 0 || eepromRead.length > 0 || eepromVerify.length > 0 || eepromMeta.length > 0;
 
-  if ((sramComplete && eepromAny) || (eepromComplete && sramAny)) {
+  const details = `SRAM write/read ${sramWriteCount}/${sramRead.length}, EEPROM write/read ${eepromWrite.length}/${eepromRead.length}`;
+  if (expectedFamily === "sram" && !sramComplete) {
+    throw new PatchError(`${label} could not find the expected SRAM save hook set (${details}).`);
+  }
+  if (expectedFamily === "eeprom" && !eepromComplete) {
+    throw new PatchError(`${label} could not find the expected EEPROM save hook set (${details}).`);
+  }
+
+  if (expectedFamily === null && ((sramComplete && eepromAny) || (eepromComplete && sramAny))) {
     throw new PatchError(`${label} found conflicting or incomplete SRAM and EEPROM hook sets.`);
   }
-  if (!sramComplete && !eepromComplete) {
-    const details = `SRAM write/read ${sramWriteCount}/${sramRead.length}, EEPROM write/read ${eepromWrite.length}/${eepromRead.length}`;
+  if (expectedFamily === null && !sramComplete && !eepromComplete) {
     throw new PatchError(`${label} could not find a complete save hook set (${details}).`);
   }
 
-  if (eepromComplete) {
+  if (expectedFamily === "eeprom" || (expectedFamily === null && eepromComplete)) {
     return { family: "eeprom", sramWrite, sramRead, sramVerify, eepromWrite, eepromRead, eepromVerify, eepromMeta };
   }
   return {
@@ -207,6 +221,75 @@ function patchThumbHook(bytes, operations, label, name, offset, target) {
       name: `${label} ${name} hook`,
       value: target,
       codeName: "flash512k_thumb_hook",
+    },
+  });
+}
+
+function patchEepromWriteHook(
+  bytes,
+  operations,
+  label,
+  name,
+  offset,
+  target,
+  compatTarget,
+  gbaRomBase,
+) {
+  const normalizationOperations = operations.filter((operation) => (
+    operation.offset === offset
+    && operation.metadata?.codeName === "eeprom_write"
+    && operation.expectedBefore instanceof Uint8Array
+  ));
+  const timing = normalizationOperations.length === 1
+    ? buildEepromV120FlashTimingHook(
+      bytes,
+      offset,
+      target,
+      normalizationOperations[0].expectedBefore,
+      gbaRomBase,
+    )
+    : null;
+  if (timing !== null) {
+    stagePatchOperation(bytes, operations, {
+      id: `flash-journal-${operations.length}`,
+      kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
+      component: "flashJournal",
+      offset,
+      byteLength: timing.replacement.length,
+      expectedBefore: bytes.slice(offset, offset + timing.replacement.length),
+      replacement: timing.replacement,
+      labelKey: "operation.flashJournal",
+      metadata: {
+        name: `${label} ${name} V120 timer-edge compatibility hook`,
+        value: target,
+        codeName: "flash512k_eeprom_v120_timing_hook",
+      },
+    });
+    return;
+  }
+  const compat = buildEepromV12xWriteCompatHook(
+    bytes,
+    offset,
+    compatTarget,
+    gbaRomBase,
+  );
+  if (compat === null) {
+    patchThumbHook(bytes, operations, label, name, offset, target);
+    return;
+  }
+  stagePatchOperation(bytes, operations, {
+    id: `flash-journal-${operations.length}`,
+    kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
+    component: "flashJournal",
+    offset,
+    byteLength: compat.replacement.length,
+    expectedBefore: bytes.slice(offset, offset + compat.replacement.length),
+    replacement: compat.replacement,
+    labelKey: "operation.flashJournal",
+    metadata: {
+      name: `${label} ${name} SDK timer compatibility hook`,
+      value: compatTarget,
+      codeName: "flash512k_eeprom_v12x_compat_hook",
     },
   });
 }
@@ -269,8 +352,22 @@ export function applyFlash512kDetectedHooks(bytes, operations, hooks, payloadBas
     }
   } else {
     const writeTarget = flash512kTargetAddress(payloadBase, entries.eepromWrite, descriptor.gbaRomBase);
+    const writeCompatTarget = flash512kTargetAddress(
+      payloadBase,
+      entries.eepromWriteCompat,
+      descriptor.gbaRomBase,
+    );
     for (const offset of hooks.eepromWrite) {
-      patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.eepromWrite.name, offset, writeTarget);
+      patchEepromWriteHook(
+        bytes,
+        operations,
+        label,
+        FLASH512K_HOOKS.eepromWrite.name,
+        offset,
+        writeTarget,
+        writeCompatTarget,
+        descriptor.gbaRomBase,
+      );
       counts.eepromWrite += 1;
     }
     const readTarget = flash512kTargetAddress(payloadBase, entries.eepromRead, descriptor.gbaRomBase);
