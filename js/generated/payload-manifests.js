@@ -1,8 +1,8 @@
 // Generated file. Do not edit.
 // Generator: payloads/generate_manifests.py
 // Generator version: 2
-// Source SHA-256: 55f2475df7fa980042bd7fba14f8799b0865cce9e0bc84b9d2b2aa181f632063
-// Payload-set SHA-256: 9fe760bfb9966aec415388b37d2c35d78df1d88beeb900353677bb233227b88a
+// Source SHA-256: 8f749cd1857f454932352a61e98747fad952afcab80434f47ca03d5015af5d21
+// Payload-set SHA-256: 40486b7976624b612f30d64d263c802226823c01f051d3d84d2688456866480b
 // Toolchain: devkitARM 16.1.0; GNU Binutils 2.46.0.20260210
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -42,10 +42,10 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "flash-journal",
     payloadVersion: 3,
     licenseExpression: "GPL-3.0-or-later AND MIT",
-    sourceSha256: "5ed3c7b8e3d60db19a2b3fec286c6da48d5c0cac2db840a672cd995125e2358b",
-    binarySha256: "05f0abc43205ba2a50c2fe2a4c4ba1bd4b99270401adb5c2bd4f364571172ef6",
+    sourceSha256: "378e82b4be72d9c1c92377a2df928e4204c7664e0c05557d8f279c256e42be48",
+    binarySha256: "021cdb6520f4a4d472f685f43700195c62ecbeb3c2289c1a93a83d1222831e7b",
     toolchain: toolchain,
-    size: 6992,
+    size: 7016,
     alignment: 0x40000,
     symbols: Object.freeze({}),
     configOffsets: Object.freeze({"journalBase":28,"logicalSaveSize":32,"layout":36,"countdown":40,"indicator":44,"rtcPersistEntry":48}),
@@ -56,10 +56,10 @@ export const PAYLOAD_MANIFESTS = Object.freeze({
     payloadId: "custom-flash-journal",
     payloadVersion: 3,
     licenseExpression: "GPL-3.0-only AND MIT",
-    sourceSha256: "51c972c56c2ca919e32e18a4ff9cb7b4767a4806a9dbc27bef8b928c693d098f",
-    binarySha256: "87c681a550259c1cd993eb31a8732523aba746167363950fdb8efd4561634089",
+    sourceSha256: "92e95e7945f3c183c58df5571b3b13a800d5ad37479e6477036ed98b5b413701",
+    binarySha256: "c80f5a20103167fab2ba990ab8c9d97c1730e464ef654f72a91cd5d082b92877",
     toolchain: toolchain,
-    size: 7048,
+    size: 7072,
     alignment: 0x40000,
     symbols: Object.freeze({}),
     configOffsets: Object.freeze({"journalBase":28,"logicalSaveSize":32,"layout":36,"countdown":40,"indicator":44,"rtcPersistEntry":48,"saveChipType":52}),

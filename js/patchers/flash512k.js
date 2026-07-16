@@ -15,6 +15,7 @@ import {
   alignDown,
   alignUp,
   isFreeRegion,
+  normalizeExcludedRanges,
   overlapsPowerOfTwoTailBlock,
   rangesOverlap,
 } from "./payload-placement.js";
@@ -24,6 +25,7 @@ import {
   PATCH_SAVE_MEDIUM,
 } from "./patch-state.js";
 import { findSaveType, patchSramBytes } from "./sram.js";
+import { findStartupRomCopySourceRanges } from "./startup-rom-copy-ranges.js";
 import * as FLASH512K_DATA from "./flash512k-data.js";
 import {
   applyFlash512kDetectedHooks,
@@ -111,6 +113,7 @@ export function defineJournalDescriptor(rawData, spec = {}) {
       sramWrite: required("FLASH512K_WRITE_SRAM_ENTRY"),
       eepromWrite: required("FLASH512K_WRITE_EEPROM_ENTRY"),
       eepromWriteCompat: required("FLASH512K_WRITE_EEPROM_COMPAT_ENTRY"),
+      eepromWriteDirect: required("FLASH512K_WRITE_EEPROM_DIRECT_ENTRY"),
       sramRead: required("FLASH512K_READ_SRAM_ENTRY"),
       eepromRead: required("FLASH512K_READ_EEPROM_ENTRY"),
       sramVerify: required("FLASH512K_VERIFY_SRAM_ENTRY"),
@@ -449,10 +452,14 @@ function validatedFlashOptions(input, options) {
   if (addonPrefixSize + descriptor.payloadSize > PATCH_BLOCK_ALIGNMENT) {
     throw new PatchError("512K FLASH: add-on prefix and payload do not fit in one 256 KiB code block.");
   }
-  const placementExcludedRanges = options.placementExcludedRanges ?? [];
-  if (!Array.isArray(placementExcludedRanges)) {
+  const requestedPlacementExcludedRanges = options.placementExcludedRanges ?? [];
+  if (!Array.isArray(requestedPlacementExcludedRanges)) {
     throw new PatchError("512K FLASH: placement exclusions must be an array of ranges.");
   }
+  const placementExcludedRanges = normalizeExcludedRanges([
+    ...requestedPlacementExcludedRanges,
+    ...findStartupRomCopySourceRanges(input),
+  ]);
   return {
     descriptor,
     saveChipType,
@@ -511,11 +518,15 @@ function normalizeFlashSource(input, sourceSaveType, descriptor) {
     };
     return {
       normalized,
-      hooks: detectFlash512kEepromV11xHookSet(
-        normalized.bytes,
+      hooks: {
+        ...detectFlash512kEepromV11xHookSet(
+          normalized.bytes,
+          sourceSaveType,
+          descriptor.label,
+        ),
         sourceSaveType,
-        descriptor.label,
-      ),
+        sourceLength: normalized.bytes.length,
+      },
     };
   }
   if (DIRECT_SRAM_SAVE_TYPES.has(sourceSaveType)) {
@@ -525,11 +536,15 @@ function normalizeFlashSource(input, sourceSaveType, descriptor) {
     };
     return {
       normalized,
-      hooks: detectFlash512kDirectSramHookSet(
-        normalized.bytes,
+      hooks: {
+        ...detectFlash512kDirectSramHookSet(
+          normalized.bytes,
+          sourceSaveType,
+          descriptor.label,
+        ),
         sourceSaveType,
-        descriptor.label,
-      ),
+        sourceLength: normalized.bytes.length,
+      },
     };
   }
   const normalized = patchSramBytes(input, {
@@ -549,11 +564,15 @@ function normalizeFlashSource(input, sourceSaveType, descriptor) {
     // source type identifies which normalized hook family is live, so do not
     // let remnants from the other family turn that proven choice into a
     // conflict.
-    hooks: detectFlash512kHookSet(
-      normalized.bytes,
-      descriptor.label,
-      sourceSaveType.startsWith("EEPROM") ? "eeprom" : "sram",
-    ),
+    hooks: {
+      ...detectFlash512kHookSet(
+        normalized.bytes,
+        descriptor.label,
+        sourceSaveType.startsWith("EEPROM") ? "eeprom" : "sram",
+      ),
+      sourceSaveType,
+      sourceLength: normalized.bytes.length,
+    },
   };
 }
 

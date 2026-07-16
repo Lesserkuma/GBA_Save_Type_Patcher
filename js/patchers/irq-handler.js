@@ -23,6 +23,8 @@ const IRQ_INSTALLER_STUB_SIZE = 9 * 4;
 const IRQ_POST_CLEAR_STUB_SIZE = 11 * 4;
 const IWRAM_START = 0x03000000;
 const IWRAM_END = 0x03008000;
+const PRE_MAIN_STACK_MIN = IWRAM_END - 0x1000;
+const PRE_MAIN_STACK_MAX = 0x03007ff0;
 const DMA3_SOURCE_REGISTER = 0x040000d4;
 
 export const IRQ_HANDLER_PAYLOAD_SIZE = C.IRQ_HANDLER_SIZE;
@@ -239,7 +241,12 @@ function isArmImmediateStore(instruction, baseRegister) {
 function isArmPcRelativeLoadInto(instruction, targetRegister) {
   return (
     instruction >>> 28 === 0x0e
-    && (instruction & 0x0e5f0000) === 0x041f0000
+    && ((instruction >>> 25) & 0x07) === 0x02
+    && (instruction & 0x01000000) !== 0 // pre-indexed
+    && (instruction & 0x00400000) === 0 // word, not byte
+    && (instruction & 0x00200000) === 0 // no writeback
+    && (instruction & 0x00100000) !== 0 // load, not store
+    && ((instruction >>> 16) & 0x0f) === 15
     && ((instruction >>> 12) & 0x0f) === targetRegister
   );
 }
@@ -283,8 +290,29 @@ function findArmIrqInstallerSites(bytes, excludedRanges = []) {
       if (setLink !== 0xe1a0e00f) continue;
       if (branchMain !== ((0xe12fff10 | slotRegister) >>> 0)) continue;
 
+      const stackProducer = resolveArmConstantProducerInfo(bytes, storeOffset, 13, 0x40);
       seenStores.add(storeOffset);
-      sites.push({ literalOffset, storeOffset, slotRegister, handlerRegister });
+      sites.push({
+        literalOffset,
+        storeOffset,
+        slotRegister,
+        handlerRegister,
+        originalHandlerAddress: resolveArmConstantProducer(
+          bytes,
+          storeOffset,
+          handlerRegister,
+          4,
+        ),
+        mainAddress: resolveArmConstantProducer(
+          bytes,
+          storeOffset + 8,
+          slotRegister,
+          4,
+        ),
+        stackAddress: stackProducer?.value ?? null,
+        hasStableStack: stackProducer !== null
+          && hasStableArmStackBetween(bytes, stackProducer.offset + 4, storeOffset),
+      });
     }
   }
 }
@@ -309,7 +337,7 @@ function armDataProcessingDestination(instruction) {
   return (instruction >>> 12) & 0x0f;
 }
 
-function resolveArmConstantProducer(bytes, endOffset, register, maxDistance = 0x80) {
+function resolveArmConstantProducerInfo(bytes, endOffset, register, maxDistance = 0x80) {
   const start = align4(Math.max(0, endOffset - maxDistance));
   for (let offset = endOffset - 4; offset >= start; offset -= 4) {
     const instruction = readU32(bytes, offset);
@@ -317,7 +345,7 @@ function resolveArmConstantProducer(bytes, endOffset, register, maxDistance = 0x
       const immediate = instruction & 0x0fff;
       const literalOffset = offset + 8 + ((instruction & 0x00800000) ? immediate : -immediate);
       if (literalOffset < 0 || literalOffset + 4 > bytes.length) return null;
-      return readU32(bytes, literalOffset);
+      return { value: readU32(bytes, literalOffset), offset };
     }
 
     const destination = armDataProcessingDestination(instruction);
@@ -326,12 +354,42 @@ function resolveArmConstantProducer(bytes, endOffset, register, maxDistance = 0x
     const opcode = (instruction >>> 21) & 0x0f;
     const sourceRegister = (instruction >>> 16) & 0x0f;
     const immediate = decodeArmImmediate(instruction);
-    if (opcode === 13) return immediate; // mov Rd, #imm
-    if (sourceRegister === 15 && opcode === 4) return (GBA_ROM_BASE + offset + 8 + immediate) >>> 0; // add Rd, pc, #imm
-    if (sourceRegister === 15 && opcode === 2) return (GBA_ROM_BASE + offset + 8 - immediate) >>> 0; // sub Rd, pc, #imm
+    if (opcode === 13) return { value: immediate, offset }; // mov Rd, #imm
+    if (sourceRegister === 15 && opcode === 4) {
+      return { value: (GBA_ROM_BASE + offset + 8 + immediate) >>> 0, offset }; // add Rd, pc, #imm
+    }
+    if (sourceRegister === 15 && opcode === 2) {
+      return { value: (GBA_ROM_BASE + offset + 8 - immediate) >>> 0, offset }; // sub Rd, pc, #imm
+    }
     return null;
   }
   return null;
+}
+
+function resolveArmConstantProducer(bytes, endOffset, register, maxDistance = 0x80) {
+  return resolveArmConstantProducerInfo(bytes, endOffset, register, maxDistance)?.value ?? null;
+}
+
+function isProvenStackNeutralLinearArmInstruction(instruction) {
+  // Fail closed: the recognized SDK handoff only needs unconditional data
+  // processing and PC-relative literal loads. Reject every other instruction
+  // class instead of trying to enumerate all possible SP/control hazards.
+  if (instruction >>> 28 !== 0x0e) return false;
+  const transferRegister = (instruction >>> 12) & 0x0f;
+  if (isArmPcRelativeLoadInto(instruction, transferRegister)) {
+    return transferRegister < 13;
+  }
+  if (((instruction >>> 25) & 0x07) !== 0x01) return false;
+  const destination = armDataProcessingDestination(instruction);
+  return destination !== null && destination < 13;
+}
+
+function hasStableArmStackBetween(bytes, startOffset, endOffset) {
+  if ((startOffset & 3) || (endOffset & 3) || startOffset > endOffset) return false;
+  for (let offset = startOffset; offset < endOffset; offset += 4) {
+    if (!isProvenStackNeutralLinearArmInstruction(readU32(bytes, offset))) return false;
+  }
+  return true;
 }
 
 function armZeroFillHelperRegisters(bytes, targetOffset) {
@@ -675,7 +733,12 @@ function align4(value) {
   return (value + 3) & ~3;
 }
 
-function makeArmIrqInstallerStub(site, handlerAddress) {
+function makeArmIrqInstallerStub(
+  site,
+  handlerAddress,
+  startupCallbackEntry = 0,
+  stubAddress = 0,
+) {
   const scratchRegister = [12, 3, 2, 4, 5, 6, 7, 8, 9, 10, 11]
     .find((register) => register !== site.slotRegister && register !== site.handlerRegister);
   if (scratchRegister === undefined) throw new PatchError("Shared IRQ: no scratch register for startup hook");
@@ -686,6 +749,37 @@ function makeArmIrqInstallerStub(site, handlerAddress) {
     | (site.slotRegister << 16)
     | (site.handlerRegister << 12)
   ) >>> 0;
+  if (startupCallbackEntry) {
+    // The unique, proven CRT installer runs after its stack setup and at the
+    // exact handoff to main. Keep the game's handler live
+    // while the ABI-transparent Batteryless initializer runs, then replace it
+    // with the regular shared handler before returning to the CRT handoff.
+    const savedRegisters = 0x500f; // r0-r3, r12 and lr; 24 bytes preserve alignment
+    const storeOriginalHandler = (
+      0xe5800008
+      | (site.slotRegister << 16)
+      | (site.handlerRegister << 12)
+    ) >>> 0;
+    const loadSharedHandler = (0xe59f0008 | (scratchRegister << 12)) >>> 0;
+    const storeSharedHandler = (
+      0xe5800008
+      | (site.slotRegister << 16)
+      | (scratchRegister << 12)
+    ) >>> 0;
+    [
+      originalStore,
+      storeOriginalHandler,
+      (0xe92d0000 | savedRegisters) >>> 0,
+      encodeArmBranch((stubAddress + 12) >>> 0, startupCallbackEntry, true),
+      loadSharedHandler,
+      storeSharedHandler,
+      (0xe8bd0000 | savedRegisters) >>> 0,
+      0xe12fff1e,
+      handlerAddress,
+    ].forEach((word, index) => writeU32(stub, index * 4, word));
+    return stub;
+  }
+
   const pushScratch = (0xe52d0004 | (scratchRegister << 12)) >>> 0;
   const loadSharedHandler = (0xe59f0008 | (scratchRegister << 12)) >>> 0;
   const storeSharedHandler = (
@@ -706,7 +800,14 @@ function makeArmIrqInstallerStub(site, handlerAddress) {
   return stub;
 }
 
-function installArmIrqStartupHooks(bytes, operations, sites, payloadBase, handlerAddress) {
+function installArmIrqStartupHooks(
+  bytes,
+  operations,
+  sites,
+  payloadBase,
+  handlerAddress,
+  startupCallbackEntry = 0,
+) {
   const markerEnd = payloadBase + IRQ_HANDLER_PAYLOAD.length + IRQ_HANDLER_ROM_MARKER.length;
   const stubBase = align4(markerEnd);
   if (sites.length === 0) return { count: 0, nextStubOffset: stubBase };
@@ -731,7 +832,12 @@ function installArmIrqStartupHooks(bytes, operations, sites, payloadBase, handle
     const site = group[0];
     const stubOffset = stubBase + index * IRQ_INSTALLER_STUB_SIZE;
     const stubAddress = (GBA_ROM_BASE + stubOffset) >>> 0;
-    const stub = makeArmIrqInstallerStub(site, handlerAddress);
+    const stub = makeArmIrqInstallerStub(
+      site,
+      handlerAddress,
+      startupCallbackEntry,
+      stubAddress,
+    );
     stageIrqWrite(bytes, operations, "Shared IRQ post-CRT startup hook", stubOffset, stub, {
       kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
       codeName: "shared_irq_post_crt_stub",
@@ -968,10 +1074,11 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       }
     }
     const thumbStartupSites = findThumbIrqInstallerSites(workRom.bytes, excludedRanges);
-    const hasActiveEntrypointInstaller = startupSites.some((site) => (
+    const activeEntrypointInstallers = startupSites.filter((site) => (
       site.storeOffset >= entrypointOffset
       && site.storeOffset <= entrypointOffset + 0x1000
     ));
+    const hasActiveEntrypointInstaller = activeEntrypointInstallers.length > 0;
     const hasActiveThumbReinstaller = thumbStartupSites.some((site) => (
       site.storeOffset >= entrypointOffset
       && site.storeOffset <= entrypointOffset + 0x20000
@@ -979,9 +1086,84 @@ function installIrqHandler(rom, operations, warnings, options, context) {
     const startupCallbackEntry = hasActiveEntrypointInstaller && hasActiveThumbReinstaller
       ? (options.startupCallbackEntry || 0)
       : 0;
+    const uniqueActiveInstaller = activeEntrypointInstallers.length === 1
+      ? activeEntrypointInstallers[0]
+      : null;
+    const originalLength = context.entrypointSource?.length || 0;
+    const originalHandlerOffset = Number.isSafeInteger(uniqueActiveInstaller?.originalHandlerAddress)
+      ? ((uniqueActiveInstaller.originalHandlerAddress & 0xfffffffe) >>> 0) - GBA_ROM_BASE
+      : -1;
+    const mainOffset = Number.isSafeInteger(uniqueActiveInstaller?.mainAddress)
+      ? ((uniqueActiveInstaller.mainAddress & 0xfffffffe) >>> 0) - GBA_ROM_BASE
+      : -1;
+    const hasProvenAlignedIwramStack = (
+      Number.isSafeInteger(uniqueActiveInstaller?.stackAddress)
+      && uniqueActiveInstaller.hasStableStack === true
+      && uniqueActiveInstaller.stackAddress >= PRE_MAIN_STACK_MIN
+      // The stub's 24-byte push must not overlap the private handler slot at
+      // 03007FF4. 03007FF0 is the highest aligned safe initial SP.
+      && uniqueActiveInstaller.stackAddress <= PRE_MAIN_STACK_MAX
+      && (uniqueActiveInstaller.stackAddress & 7) === 0
+    );
+    const hasProvenArmHandler = (
+      originalHandlerOffset >= 0
+      && originalHandlerOffset + 4 <= originalLength
+      && (uniqueActiveInstaller.originalHandlerAddress & 3) === 0
+    );
+    const hasProvenThumbMain = (
+      mainOffset >= 0
+      && mainOffset + 2 <= originalLength
+      && (uniqueActiveInstaller.mainAddress & 1) === 1
+    );
+    const associatedThumbReinstallers = hasProvenThumbMain
+      ? thumbStartupSites.filter((site) => (
+        site.storeOffset >= mainOffset
+        && site.storeOffset <= mainOffset + 0x1000
+      ))
+      : [];
+    const hasUniqueAssociatedThumbReinstaller = associatedThumbReinstallers.length === 1;
+    const startupCallbackOffset = Number.isSafeInteger(startupCallbackEntry)
+      ? startupCallbackEntry - GBA_ROM_BASE
+      : -1;
+    const hasUpperIwramDmaFill = (
+      options.allowPreMainStartupCallback === true
+      && startupCallbackEntry !== 0
+      && startupSites.length === 1
+      && uniqueActiveInstaller !== null
+      && hasProvenArmHandler
+      && hasProvenAlignedIwramStack
+      && hasUniqueAssociatedThumbReinstaller
+      && postClearSites.length === 0
+    )
+      ? patchUpperIwramDmaFills(
+        new Uint8Array(workRom.bytes),
+        [],
+        thumbStartupSites,
+        excludedRanges,
+      ) > 0
+      : false;
+    const preMainStartupCallbackEntry = (
+      options.allowPreMainStartupCallback === true
+      && startupCallbackOffset >= 0
+      && startupCallbackOffset + 4 <= workRom.bytes.length
+      && (startupCallbackEntry & 3) === 0
+      && context.entrypointSource?.length >= 4
+      && startupSites.length === 1
+      && uniqueActiveInstaller !== null
+      && hasProvenArmHandler
+      && hasProvenAlignedIwramStack
+      && hasUniqueAssociatedThumbReinstaller
+      && postClearSites.length === 0
+      && !hasUpperIwramDmaFill
+    )
+      ? startupCallbackEntry
+      : 0;
+    const deferredStartupCallbackEntry = preMainStartupCallbackEntry
+      ? 0
+      : startupCallbackEntry;
     const configured = configuredIrqPayload(workRom.bytes, payloadBase, {
       ...options,
-      startupCallbackEntry,
+      startupCallbackEntry: deferredStartupCallbackEntry,
     });
     stageIrqWrite(workRom.bytes, localOperations, "Shared IRQ payload", payloadBase, configured.payload, {
       kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
@@ -995,6 +1177,7 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       startupSites,
       payloadBase,
       configured.installHandlerAddress,
+      preMainStartupCallbackEntry,
     );
     const postClearHooks = installArmPostClearHooks(
       workRom.bytes,

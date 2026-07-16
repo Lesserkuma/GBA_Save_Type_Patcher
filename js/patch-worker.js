@@ -27,6 +27,7 @@ import {
 } from "./patchers/rtc-persistence-placement.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, updateGbaHeaderChecksum } from "./patchers/patch-state.js";
 import { detectRomSaveMetadata } from "./patchers/save-type.js";
+import { findStartupRomCopySourceRanges } from "./patchers/startup-rom-copy-ranges.js";
 import { PATCH_OPERATION_KIND, RTC_TICK_MODES, WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
 import {
   assertCancelRequest,
@@ -205,7 +206,10 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
   // [Waitstate] [Shared IRQ] | 0x40000-byte writable RTC block. Disabled
   // persistence uses the regular add-on placement and reserves no block.
   ensureResultArrays(patched);
-  const excludedRanges = [...(context.excludedRanges || [])].filter(validRange);
+  const excludedRanges = [
+    ...findStartupRomCopySourceRanges(patched.bytes),
+    ...(context.excludedRanges || []),
+  ].filter(validRange);
   let rtcPayloadOffset = context.rtcPayloadOffset ?? null;
   let waitstatePayloadOffset = context.waitstatePayloadOffset ?? null;
   let irqPayloadOffset = context.irqPayloadOffset ?? null;

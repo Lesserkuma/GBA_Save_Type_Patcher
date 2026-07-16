@@ -429,6 +429,16 @@ function findRtcHandlers(bytes, excludedRanges = []) {
   return matches;
 }
 
+export function hasRecognizedRtcHandlerSet(bytes, excludedRanges = []) {
+  try {
+    return findRtcHandlers(bytes, excludedRanges).length === PATCH_ORDER.length;
+  } catch {
+    // Partial or ambiguous RTC implementations are not enough to justify a
+    // startup-timing change. Callers can retain their established fallback.
+    return false;
+  }
+}
+
 function makeThumbJumpStub(targetAddr, totalSize) {
   if (totalSize < 8) throw new PatchError(`RTC: need at least 8 bytes for Thumb jump stub, got ${totalSize}`);
   const stub = new Uint8Array(totalSize);

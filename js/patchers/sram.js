@@ -8,6 +8,7 @@ import { PatchError } from "../core/errors.js";
 import { applyWaitstateForPipeline, waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./waitstate.js";
 import {
   applyRtcForPipeline,
+  hasRecognizedRtcHandlerSet,
   rtcPayloadSpanForLayout,
   RTC_PAYLOAD_SIZE,
   RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
@@ -20,6 +21,7 @@ import {
 } from "./sram-data.js";
 import { alignedPayloadSpan } from "./payload-placement.js";
 import { ensureStandaloneRtcPersistenceLayout } from "./rtc-persistence-placement.js";
+import { findStartupRomCopySourceRanges } from "./startup-rom-copy-ranges.js";
 import { detectRomSaveMetadata, findSaveType } from "./save-type.js";
 import {
   BATTERYLESS_LAST_BLOCK_KEEP_EMPTY,
@@ -236,6 +238,7 @@ function createSramPatchContext(inputBytes, options) {
     rtcPayloadSpan,
     waitstatePayloadSpan,
     waitstateFixedWriteRanges: waitstateFixedWriteRangesForLayout(originalData, options.waitstate),
+    startupRomCopySourceRanges: findStartupRomCopySourceRanges(originalData),
     batterylessMode: options.batterylessMode || "auto",
     batterylessCountdown: options.batterylessCountdown ?? C.BATTERYLESS_DEFAULT_COUNTDOWN,
     batterylessIndicatorMode: options.batterylessIndicatorMode || "off",
@@ -251,6 +254,13 @@ function createSramPatchContext(inputBytes, options) {
       ? irqHandlerPayloadSpanForLayout()
       : 0,
   };
+}
+
+function payloadPlacementExcludedRanges(context) {
+  return [
+    ...context.waitstateFixedWriteRanges,
+    ...context.startupRomCopySourceRanges,
+  ];
 }
 
 function unsupportedSramResult(context, saveType) {
@@ -353,7 +363,7 @@ function planBatterylessLayout(context) {
     context.batterylessWaitstatePrefixSize,
     context.batterylessIrqPrefixSize,
     context.keepBatterylessLastBlockEmpty,
-    context.waitstateFixedWriteRanges,
+    payloadPlacementExcludedRanges(context),
   );
   if (layout === null) {
     context.batterylessResult = {
@@ -419,7 +429,7 @@ function planNonBatterylessAddons(context) {
         waitstateSpan,
         irqSpan: irqHandlerPayloadSpanForLayout(),
       },
-      context.waitstateFixedWriteRanges,
+      payloadPlacementExcludedRanges(context),
     );
     if (layout === null) {
       context.rtcResult = { requested: true, status: "failed", size: RTC_PAYLOAD_SIZE };
@@ -446,7 +456,7 @@ function planNonBatterylessAddons(context) {
     context.warnings,
     rtcSpan,
     waitstateSpan,
-    context.waitstateFixedWriteRanges,
+    payloadPlacementExcludedRanges(context),
   );
   if (layout === null) {
     if (rtcSpan) context.rtcResult = { requested: true, status: "failed", size: RTC_PAYLOAD_SIZE };
@@ -629,6 +639,11 @@ function applySramIrq(context) {
       indicatorMode: context.batterylessIndicatorMode,
       hotkeyMask: context.batterylessHotkeyMask,
       startupCallbackEntry: context.batterylessResult?.initEntry || 0,
+      // Only the 128 KiB initialization is long enough to starve Direct Sound,
+      // and the affected RTC titles share a uniquely recognized source ABI.
+      // Every other ROM retains the established first-VBlank fallback.
+      allowPreMainStartupCallback: context.batterylessResult?.saveSize === 128 * 1024
+        && hasRecognizedRtcHandlerSet(context.originalData),
     },
     {
       excludedRanges: irqExcludedRanges(context),

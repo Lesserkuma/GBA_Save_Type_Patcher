@@ -12,6 +12,7 @@ import { stagePatchOperation } from "../patch-engine/draft.js";
 import {
   buildEepromV120FlashTimingHook,
   buildEepromV12xWriteCompatHook,
+  detectEepromV124DirectWriteCaller,
 } from "./eeprom-v12x-write-compat.js";
 
 
@@ -204,7 +205,15 @@ export function detectFlash512kHookSet(bytes, label = "512K FLASH", expectedFami
   };
 }
 
-function patchThumbHook(bytes, operations, label, name, offset, target) {
+function patchThumbHook(
+  bytes,
+  operations,
+  label,
+  name,
+  offset,
+  target,
+  codeName = "flash512k_thumb_hook",
+) {
   const replacement = new Uint8Array(8);
   replacement.set(FLASH512K_THUMB_BRANCH_THUNK);
   writeU32(replacement, FLASH512K_THUMB_BRANCH_THUNK.length, target);
@@ -220,7 +229,7 @@ function patchThumbHook(bytes, operations, label, name, offset, target) {
     metadata: {
       name: `${label} ${name} hook`,
       value: target,
-      codeName: "flash512k_thumb_hook",
+      codeName,
     },
   });
 }
@@ -233,6 +242,9 @@ function patchEepromWriteHook(
   offset,
   target,
   compatTarget,
+  directTarget,
+  sourceSaveType,
+  sourceLength,
   gbaRomBase,
 ) {
   const normalizationOperations = operations.filter((operation) => (
@@ -265,6 +277,27 @@ function patchEepromWriteHook(
         codeName: "flash512k_eeprom_v120_timing_hook",
       },
     });
+    return;
+  }
+  const direct = normalizationOperations.length === 1
+    ? detectEepromV124DirectWriteCaller(
+      bytes,
+      offset,
+      normalizationOperations[0].expectedBefore,
+      sourceSaveType,
+      sourceLength,
+    )
+    : null;
+  if (direct !== null) {
+    patchThumbHook(
+      bytes,
+      operations,
+      label,
+      `${name} exact V124 direct`,
+      offset,
+      directTarget,
+      "flash512k_eeprom_v124_direct_hook",
+    );
     return;
   }
   const compat = buildEepromV12xWriteCompatHook(
@@ -357,6 +390,11 @@ export function applyFlash512kDetectedHooks(bytes, operations, hooks, payloadBas
       entries.eepromWriteCompat,
       descriptor.gbaRomBase,
     );
+    const writeDirectTarget = flash512kTargetAddress(
+      payloadBase,
+      entries.eepromWriteDirect,
+      descriptor.gbaRomBase,
+    );
     for (const offset of hooks.eepromWrite) {
       patchEepromWriteHook(
         bytes,
@@ -366,6 +404,9 @@ export function applyFlash512kDetectedHooks(bytes, operations, hooks, payloadBas
         offset,
         writeTarget,
         writeCompatTarget,
+        writeDirectTarget,
+        hooks.sourceSaveType,
+        hooks.sourceLength,
         descriptor.gbaRomBase,
       );
       counts.eepromWrite += 1;

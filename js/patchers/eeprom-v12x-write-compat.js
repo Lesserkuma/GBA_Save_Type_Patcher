@@ -22,6 +22,18 @@ const WRAPPER_SIZE = 40;
 const GENERIC_EEPROM_WRITE = hexToBytes(
   "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847",
 );
+const EEPROM_V124_DIRECT_ORIGINAL_WRITE = hexToBytes(
+  "f0b5acb00d1c0004010c1206170e034800688088814205d301489de000340003ff8000000f480068",
+);
+const EEPROM_V124_DIRECT_WRAPPER = hexToBytes(
+  "00b50004000c012200f004f80004000c02bc0847",
+);
+const EEPROM_V124_DIRECT_RETRY_CALLER = hexToBytes(
+  "70b50d1c0004040c002602e0701c0006060e022e0fd8201c291cfff70bff0004020c002af2d1201c291cfff7bdff0004020c002aead1101c70bc02bc0847",
+);
+const EEPROM_V124_DIRECT_GAME_CALLER = hexToBytes(
+  "f0b50f1c051c0126e5f72afd002401e0083501340f2c0adc380100190004000c291c1ff06bf900040028f1d00026e5f745fd301cf0bc02bc0847",
+);
 const EEPROM_V12X_TIMER_TAIL = hexToBytes(
   "0e48fff7b5fe0024d021090501230c4a08881840002808d110780028f8d0088801210840002800d1064cfff7e5fe201c29b030bc02bc0847",
 );
@@ -62,18 +74,21 @@ const EEPROM_V120_LARGE_ORIGINAL_HEAD = hexToBytes(
 );
 const EEPROM_V120_LARGE_ORIGINAL_TAIL = hexToBytes("0f480068007a4000");
 const EEPROM_V120_FLASH_TIMING_WRAPPER = hexToBytes(
-  "70b504000d00114800780826864010490e80104800f000f80d490888304209d10e4908880b490988884203d10c4908780028f1d000f000f820002900064b00f003f870bc02bc08471847c04600000000000000000000000000000000000000000000000000000000",
+  // After setup, skip the synthetic timer-edge wait when the SDK timer
+  // register pointer is still null. Setup and cleanup remain paired so their
+  // IRQ bookkeeping is preserved; initialized callers retain the old wait.
+  "70b504000d00134800780826864012490e80124800f000f80e49886800280dd00d490888304209d10e4908880b490988884203d10c4908780028f1d000f000f820002900064b00f003f870bc02bc08471847c04600000000000000000000000000000000000000000000000000000000",
 );
 
 const EEPROM_V120_FLASH_TIMING_OFFSETS = Object.freeze({
   setupCall: 0x14,
-  cleanupCall: 0x34,
-  timerIndexAddress: 0x4c,
-  ifAddress: 0x50,
-  configAddress: 0x54,
-  payloadAddress: 0x58,
-  timerCountAddress: 0x5c,
-  timeoutFlagAddress: 0x60,
+  cleanupCall: 0x3c,
+  timerIndexAddress: 0x54,
+  ifAddress: 0x58,
+  configAddress: 0x5c,
+  payloadAddress: 0x60,
+  timerCountAddress: 0x64,
+  timeoutFlagAddress: 0x68,
 });
 
 function decodeThumbBlTarget(bytes, offset) {
@@ -85,6 +100,66 @@ function decodeThumbBlTarget(bytes, offset) {
   let displacement = ((high & 0x07ff) << 12) | ((low & 0x07ff) << 1);
   if (displacement & 0x00400000) displacement -= 0x00800000;
   return offset + 4 + displacement;
+}
+
+function thumbBlCallers(bytes, targetOffset, scanLimit) {
+  const callers = [];
+  for (let offset = 0; offset + 4 <= scanLimit; offset += 2) {
+    if (decodeThumbBlTarget(bytes, offset) === targetOffset) callers.push(offset);
+  }
+  return callers;
+}
+
+/**
+ * Recognize the exact EEPROM V124 wrapper/caller graph used by both retail
+ * Tomb Raider: Legend ROMs. This deliberately checks game-side code in
+ * addition to the common SDK routines: EEPROM V124 alone is not sufficient
+ * to opt out of the private workspace path.
+ */
+export function detectEepromV124DirectWriteCaller(
+  bytes,
+  writeOffset,
+  originalWritePrefix,
+  sourceSaveType,
+  scanLimit = bytes.length,
+) {
+  if (
+    sourceSaveType !== "EEPROM_V124"
+    || !Number.isSafeInteger(writeOffset)
+    || (writeOffset & 3) !== 0
+    || writeOffset < EEPROM_V124_DIRECT_WRAPPER.length
+    || !(originalWritePrefix instanceof Uint8Array)
+    || originalWritePrefix.length !== GENERIC_EEPROM_WRITE.length
+    || !Number.isSafeInteger(scanLimit)
+    || scanLimit < 0
+    || scanLimit > bytes.length
+    || writeOffset + 0x1f6 > scanLimit
+    || !startsWithBytes(bytes, writeOffset, GENERIC_EEPROM_WRITE)
+    || !startsWithBytes(originalWritePrefix, 0, EEPROM_V124_DIRECT_ORIGINAL_WRITE)
+  ) return null;
+
+  const wrapperOffset = writeOffset - EEPROM_V124_DIRECT_WRAPPER.length;
+  const retryOffset = writeOffset + 0x1b8;
+  if (
+    !startsWithBytes(bytes, wrapperOffset, EEPROM_V124_DIRECT_WRAPPER)
+    || decodeThumbBlTarget(bytes, wrapperOffset + 0x08) !== writeOffset
+    || !startsWithBytes(bytes, retryOffset, EEPROM_V124_DIRECT_RETRY_CALLER)
+    || decodeThumbBlTarget(bytes, retryOffset + 0x1a) !== wrapperOffset
+  ) return null;
+
+  const wrapperCallers = thumbBlCallers(bytes, wrapperOffset, scanLimit);
+  if (wrapperCallers.length !== 1 || wrapperCallers[0] !== retryOffset + 0x1a) return null;
+
+  const retryCallers = thumbBlCallers(bytes, retryOffset, scanLimit);
+  if (retryCallers.length !== 1) return null;
+  const gameCallerOffset = retryCallers[0] - 0x22;
+  if (
+    gameCallerOffset < 0
+    || !startsWithBytes(bytes, gameCallerOffset, EEPROM_V124_DIRECT_GAME_CALLER)
+    || decodeThumbBlTarget(bytes, gameCallerOffset + 0x22) !== retryOffset
+  ) return null;
+
+  return { wrapperOffset, retryOffset, gameCallerOffset };
 }
 
 function writeThumbBl(replacement, replacementOffset, sourceOffset, targetOffset) {

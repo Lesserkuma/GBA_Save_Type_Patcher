@@ -1531,6 +1531,16 @@ uint32_t write_eeprom_patched(uint16_t address, uint8_t *source)
     return success ? 0 : 1;
 }
 
+/* Some exact EEPROM V124 callers execute their save probe with every EWRAM
+ * block occupied and depend on the original synchronous timing. Host-side
+ * structural classification is the sole route to this minimal entry; keep it
+ * free of workspace scans, runtime pausing, and additional predicates. */
+uint32_t write_eeprom_direct_patched(uint16_t address, uint8_t *source)
+{
+    uint32_t success = journal_write_core(source, (uint32_t)address << 3, 8);
+    return success ? 0 : 1;
+}
+
 uint32_t write_eeprom_compat_patched(uint16_t address, uint8_t *source)
 {
     uintptr_t gateway_stack_pointer = current_stack_pointer();
