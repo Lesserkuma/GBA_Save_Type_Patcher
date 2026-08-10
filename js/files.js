@@ -6,12 +6,15 @@ import {
   MAX_FILE_COUNT,
   MAX_SAVE_FILE_SIZE_BYTES,
   MAX_TOTAL_INPUT_BYTES,
+  PATCH_MODES,
   PATCH_STATUS,
 } from "./domain/constants.js";
 import { PatchError } from "./core/errors.js";
+import { createUuid } from "./core/ids.js";
 import { UI_TEXT, uiMessage } from "./domain/messages.js";
 import { GBA_HEADER_STATUS, parseRomMetadata, ROM_EXTENSIONS, SAVE_EXTENSION, splitFileName } from "./core/rom.js";
 import { detectRomSaveMetadata } from "./patchers/save-type.js";
+import { inspectConvertedFlashSave } from "./save-layouts/converted-flash.js";
 import { addSave, appendRoms, removeRom as removeStateRom } from "./state.js";
 
 const AUTO_REMOVE_PATCH_STATUSES = new Set([PATCH_STATUS.CHANGED]);
@@ -21,17 +24,6 @@ function yieldToBrowser() {
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
     else setTimeout(resolve, 0);
   });
-}
-
-function createId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
-  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
-  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
 }
 
 function assertInputLimits(files, state) {
@@ -74,13 +66,15 @@ function validateFileSize(file, extension) {
   }
 }
 
-function addSaveFile(state, file, baseName) {
+async function addSaveFile(state, file, baseName) {
+  const inspection = inspectConvertedFlashSave(new Uint8Array(await file.arrayBuffer()));
   const record = {
     file,
     name: file.name.normalize("NFC"),
     size: file.size,
     baseName,
     sizeWarning: !DOCUMENTED_SAVE_SIZES_BYTES.has(file.size),
+    format: inspection.format,
   };
   addSave(state, baseName, record);
 }
@@ -121,7 +115,7 @@ export async function addFilesToState(inputFiles, state, options = {}) {
         ? detectRomSaveMetadata(romBytes)
         : { library: null, medium: "none", size: null, label: "Unknown" };
       additions.push({
-        id: createId(),
+        id: createUuid(),
         file,
         name: file.name.normalize("NFC"),
         baseName,
@@ -142,7 +136,7 @@ export async function addFilesToState(inputFiles, state, options = {}) {
         result: null,
       });
     } else {
-      addSaveFile(state, file, baseName);
+      await addSaveFile(state, file, baseName);
     }
 
     options.onProgress?.({ current: index + 1, total, fileName: file.name });
@@ -162,13 +156,23 @@ export function isRomPatchable(rom) {
   return Boolean(rom?.isHeaderValid);
 }
 
-export function saveFileMatchesRom(saveRecord, rom) {
+export function saveFileMatchesRom(saveRecord, rom, patchMode = null) {
   const actualSize = saveRecord?.size ?? saveRecord?.file?.size;
+  if (patchMode === PATCH_MODES.NONE
+      && (rom?.saveType?.startsWith("EEPROM") || rom?.saveType?.startsWith("SRAM"))) {
+    return [65536, 131072].includes(actualSize);
+  }
+  const directMode = [PATCH_MODES.FLASH_512K, PATCH_MODES.CUSTOM_FLASH].includes(patchMode);
+  if (directMode && rom?.saveType?.startsWith("EEPROM")) {
+    return [512, 8192, 65536, 131072].includes(actualSize);
+  }
+  if (directMode && rom?.saveType?.startsWith("SRAM")) {
+    return [32768, 65536, 131072].includes(actualSize);
+  }
   return Number.isSafeInteger(actualSize)
     && Number.isSafeInteger(rom?.saveSizeBytes)
     && actualSize === rom.saveSizeBytes;
 }
-
 export function removeRom(state, id) {
   removeStateRom(state, id);
 }

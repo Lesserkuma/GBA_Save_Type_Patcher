@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { PatchError } from "../core/errors.js";
+import { alignDown, alignUp, isBlankRegion, overlapsAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
-import { stagePatchOperation, stageRomExpansion } from "../patch-engine/draft.js";
+import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
+import { stageErasedRomExpansion, stagePatchOperation } from "../patch-engine/draft.js";
 import {
-  GBA_MAX_ROM_SIZE,
   PATCH_BLOCK_ALIGNMENT,
   PAYLOAD_ALIGNMENT,
-  alignDown,
-  alignUp,
-  isFreeRegion,
-  lastNonFreeEnd,
+  lastNonBlankEnd,
   normalizeExcludedRanges,
-  rangesOverlap,
 } from "./payload-placement.js";
 
 export const RTC_PERSISTENCE_BLOCK_SIZE = PATCH_BLOCK_ALIGNMENT;
@@ -102,9 +99,9 @@ export function findStandaloneRtcPersistenceLayout(bytes, spans = {}, excludedRa
   const normalizedSpans = validatedSpans(spans);
   if (normalizedSpans.rtcSpan + normalizedSpans.waitstateSpan + normalizedSpans.irqSpan
       > PATCH_BLOCK_ALIGNMENT) return null;
-  if (bytes.length > GBA_MAX_ROM_SIZE) return null;
+  if (bytes.length > GBA_MAX_ROM_SIZE_BYTES) return null;
   const normalizedRanges = normalizeExcludedRanges(excludedRanges);
-  const contentEnd = lastNonFreeEnd(bytes);
+  const contentEnd = lastNonBlankEnd(bytes);
   const firstCodeBlockStart = alignDown(Math.max(0, contentEnd - 1), PATCH_BLOCK_ALIGNMENT);
 
   for (
@@ -119,10 +116,10 @@ export function findStandaloneRtcPersistenceLayout(bytes, spans = {}, excludedRa
 
     if (addonLayout.prefixOffset < codeBlockStart) continue;
     if (reserveContainsForbiddenOffset(persistenceBlockOffset, persistenceBlockEnd)) continue;
-    if (rangesOverlap(addonLayout.prefixOffset, codeBlockEnd, normalizedRanges)) continue;
-    if (rangesOverlap(persistenceBlockOffset, persistenceBlockEnd, normalizedRanges)) continue;
-    if (!isFreeRegion(bytes, addonLayout.prefixOffset, codeBlockEnd - addonLayout.prefixOffset)) continue;
-    if (!isFreeRegion(bytes, persistenceBlockOffset, RTC_PERSISTENCE_BLOCK_SIZE)) continue;
+    if (overlapsAnyRange(addonLayout.prefixOffset, codeBlockEnd, normalizedRanges)) continue;
+    if (overlapsAnyRange(persistenceBlockOffset, persistenceBlockEnd, normalizedRanges)) continue;
+    if (!isBlankRegion(bytes, addonLayout.prefixOffset, codeBlockEnd - addonLayout.prefixOffset)) continue;
+    if (!isBlankRegion(bytes, persistenceBlockOffset, RTC_PERSISTENCE_BLOCK_SIZE)) continue;
 
     return {
       ...addonLayout,
@@ -135,18 +132,11 @@ export function findStandaloneRtcPersistenceLayout(bytes, spans = {}, excludedRa
   return null;
 }
 
-function stagePersistenceExpansion(rom, operations, oldSize, newSize) {
-  const byteLength = newSize - oldSize;
-  const erasedBytes = new Uint8Array(byteLength).fill(0xff);
-  stageRomExpansion(rom, operations, {
+function stagePersistenceExpansion(rom, operations, newSize) {
+  stageErasedRomExpansion(rom, operations, {
     id: `rtc-persistence-expand-${operations.length}`,
-    kind: PATCH_OPERATION_KIND.ROM_EXPAND,
     component: "rtcPersistence",
-    offset: oldSize,
-    byteLength,
-    expectedBefore: erasedBytes,
-    replacement: new Uint8Array(erasedBytes),
-    labelKey: "operation.romExpand",
+    newLength: newSize,
     metadata: {
       name: "Fake RTC persistence ROM expansion",
       value: newSize,
@@ -206,7 +196,7 @@ export function ensureStandaloneRtcPersistenceLayout(
   let failureWarning = null;
 
   while (true) {
-    if (workRom.bytes.length > GBA_MAX_ROM_SIZE) {
+    if (workRom.bytes.length > GBA_MAX_ROM_SIZE_BYTES) {
       failureWarning = "Fake RTC persistence: ROM is larger than 32 MiB";
       break;
     }
@@ -223,7 +213,7 @@ export function ensureStandaloneRtcPersistenceLayout(
       return layout;
     }
 
-    if (workRom.bytes.length >= GBA_MAX_ROM_SIZE) {
+    if (workRom.bytes.length >= GBA_MAX_ROM_SIZE_BYTES) {
       failureWarning = "Fake RTC persistence: no free payload-plus-reserve area and ROM is already 32 MiB";
       break;
     }
@@ -231,13 +221,13 @@ export function ensureStandaloneRtcPersistenceLayout(
     const oldSize = workRom.bytes.length;
     const newSize = Math.min(
       alignUp(oldSize, PATCH_BLOCK_ALIGNMENT) + PATCH_BLOCK_ALIGNMENT,
-      GBA_MAX_ROM_SIZE,
+      GBA_MAX_ROM_SIZE_BYTES,
     );
     if (newSize <= oldSize) {
       failureWarning = "Fake RTC persistence: ROM could not be expanded";
       break;
     }
-    stagePersistenceExpansion(workRom, localOperations, oldSize, newSize);
+    stagePersistenceExpansion(workRom, localOperations, newSize);
   }
 
   if (failureWarning) warnings.push(failureWarning);

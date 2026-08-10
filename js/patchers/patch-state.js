@@ -35,6 +35,19 @@ export function patchHeaderSaveSizeCode(saveSize) {
   return code;
 }
 
+export function readDirectFlashHeaderSaveSize(bytes) {
+  if (bytes.length <= PATCH_HEADER.markerOffset + 1
+      || bytes[PATCH_HEADER.markerOffset] !== PATCH_HEADER.markerValue) return null;
+  const flags = bytes[PATCH_HEADER.markerOffset + 1];
+  const flashMedium = PATCH_SAVE_MEDIUM.FLASH << PATCH_HEADER.saveMediumShift;
+  if ((flags & PATCH_HEADER.saveMediumMask) !== flashMedium) return null;
+  const code = flags & PATCH_HEADER.saveSizeMask;
+  for (const [size, value] of Object.entries(PATCH_HEADER.saveSizeCodes)) {
+    if (size !== "none" && value === code) return Number(size);
+  }
+  return null;
+}
+
 export function makePatchHeaderFlags(options = {}) {
   let flags = 0;
   const saveMedium = options.saveMedium;

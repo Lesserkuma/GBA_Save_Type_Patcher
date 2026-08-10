@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { patchSramBytes } from "./patchers/sram.js";
-import { CUSTOM_JOURNAL_DESCRIPTOR, patchCustomFlashBytes } from "./patchers/custom-flash.js";
-import {
-  STANDARD_JOURNAL_DESCRIPTOR,
-  patchFlash512kBytes,
-  patchInstalledJournalRtcPersistEntry,
-} from "./patchers/flash512k.js";
+import { patchCustomFlashBytes } from "./patchers/custom-flash.js";
+import { patchFlash512kBytes } from "./patchers/flash512k.js";
 import { applyWaitstateForPipeline } from "./patchers/waitstate.js";
 import { waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./patchers/waitstate.js";
 import {
@@ -14,21 +10,27 @@ import {
   rtcPayloadSpanForLayout,
   RTC_PAYLOAD_SIZE,
   RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG,
-  RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
 } from "./patchers/rtc.js";
 import {
   applyIrqHandlerForPipeline,
   irqHandlerPayloadSpanForLayout,
 } from "./patchers/irq-handler.js";
-import { PATCH_BLOCK_ALIGNMENT, alignDown, alignedPayloadSpan, isFreeRegion } from "./patchers/payload-placement.js";
+import { alignedPayloadSpan } from "./patchers/payload-placement.js";
 import {
   ensureStandaloneRtcPersistenceLayout,
   RTC_PERSISTENCE_BLOCK_SIZE,
 } from "./patchers/rtc-persistence-placement.js";
-import { applyPatchHeaderMarker, makePatchHeaderFlags, updateGbaHeaderChecksum } from "./patchers/patch-state.js";
+import {
+  applyPatchHeaderMarker,
+  makePatchHeaderFlags,
+  readDirectFlashHeaderSaveSize,
+  updateGbaHeaderChecksum,
+} from "./patchers/patch-state.js";
 import { detectRomSaveMetadata } from "./patchers/save-type.js";
 import { findStartupRomCopySourceRanges } from "./patchers/startup-rom-copy-ranges.js";
-import { PATCH_OPERATION_KIND, RTC_TICK_MODES, WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
+import { PATCH_MODES, PATCH_OPERATION_KIND, RTC_TICK_MODES, WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
+import { GBA_MAX_ROM_SIZE_BYTES } from "./domain/gba-constants.js";
+import { sha256Hex } from "./core/hash.js";
 import {
   assertCancelRequest,
   assertPatchRequest,
@@ -38,6 +40,12 @@ import {
 import { normalizePatchResult } from "./worker/result-adapter.js";
 import { validatePayloadArtifacts } from "./generated/validate-payloads.js";
 import { applyPatchPlan, createPatchPlan } from "./patch-engine/transaction.js";
+import {
+  decodeDirectEepromSave,
+  exportDirectSramSave,
+  inspectConvertedFlashSave,
+  prepareDirectSave,
+} from "./save-layouts/converted-flash.js";
 
 
 function ensureResultArrays(patched) {
@@ -100,7 +108,7 @@ function persistenceRangeAt(offset) {
   if (!Number.isInteger(offset)
       || offset < 0
       || offset % RTC_PERSISTENCE_BLOCK_SIZE
-      || offset + RTC_PERSISTENCE_BLOCK_SIZE > 0x02000000) return null;
+      || offset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_MAX_ROM_SIZE_BYTES) return null;
   return [offset, offset + RTC_PERSISTENCE_BLOCK_SIZE];
 }
 
@@ -120,85 +128,12 @@ function shouldPersistRtc(options = {}) {
     && options.rtc?.saveOnGlobalHotkey !== false;
 }
 
-function journalWaitstateExcludedRanges(result) {
-  const ranges = [];
-  const journalPatch = result?.flashJournal;
-  const journal = journalPatch?.journal;
-  const runtimeWriteRanges = journal?.runtimeWriteRanges || result?.runtimeWriteRanges;
-  if (Array.isArray(runtimeWriteRanges)) {
-    ranges.push(...runtimeWriteRanges.filter(validRange).map(([start, end]) => [start, end]));
-  }
-
-  if (!ranges.length && Number.isInteger(journal?.offset) && Number.isInteger(journal?.activeSize) && journal.activeSize > 0) {
-    ranges.push([journal.offset, journal.offset + journal.activeSize]);
-  }
-
-  const reservedRanges = journal?.reservedRanges;
-  if (Array.isArray(reservedRanges)) {
-    ranges.push(...reservedRanges.filter(validRange).map(([start, end]) => [start, end]));
-  }
-
-  if (!ranges.length) {
-    const reserved = result?.reservedRanges || journal?.reservedRanges;
-    if (Array.isArray(reserved)) ranges.push(...reserved.filter(validRange).map(([start, end]) => [start, end]));
-  }
-
-  // The generated journal runtime code itself must also remain intact, even
-  // though it is read-only at runtime.
-  if (Number.isInteger(journalPatch?.payloadOffset) && Number.isInteger(journalPatch?.payloadSize) && journalPatch.payloadSize > 0) {
-    ranges.push([journalPatch.payloadOffset, journalPatch.payloadOffset + journalPatch.payloadSize]);
-  }
-  return ranges;
-}
-
-function planJournalAddons(bytes, options = {}, descriptor = STANDARD_JOURNAL_DESCRIPTOR) {
-  const rtcSpan = options.rtc?.enabled
-    ? rtcPayloadSpanForLayout()
-    : 0;
-  const waitstateSpan = waitstatePayloadSpanForLayout(bytes, options.waitstate || {});
-  const irqSpan = irqHandlerPayloadSpanForLayout();
-  const plan = {
-    rtcSpan,
-    waitstateSpan,
-    irqSpan,
-    waitstateFixedWriteRanges: waitstateFixedWriteRangesForLayout(bytes, options.waitstate || {}),
-  };
-  const representativePayloadOffset = PATCH_BLOCK_ALIGNMENT - descriptor.payloadSize;
-  const layout = layoutJournalAddonsBeforePayload(representativePayloadOffset, plan);
-  return { ...plan, totalSpan: representativePayloadOffset - layout.prefixOffset };
-}
-
-function layoutJournalAddonsBeforePayload(payloadOffset, plan) {
-  let cursor = payloadOffset;
-  let irqPayloadOffset = null;
-  let waitstatePayloadOffset = null;
-  let rtcPayloadOffset = null;
-
-  if (plan.irqSpan) {
-    cursor = alignDown(cursor - plan.irqSpan, 0x100);
-    irqPayloadOffset = cursor;
-  }
-  if (plan.waitstateSpan) {
-    cursor = alignDown(cursor - plan.waitstateSpan, 0x100);
-    waitstatePayloadOffset = cursor;
-  }
-  if (plan.rtcSpan) {
-    cursor = alignDown(cursor - plan.rtcSpan, 0x100);
-    rtcPayloadOffset = cursor;
-  }
-  return { rtcPayloadOffset, waitstatePayloadOffset, irqPayloadOffset, prefixOffset: cursor };
-}
-
-function preparedJournalAddonLayout(patched, plan) {
-  const journalPatch = patched.result.flashJournal;
-  const payloadOffset = journalPatch?.payloadOffset;
-  if (!Number.isInteger(payloadOffset)) return {};
-  const blockStart = alignDown(payloadOffset, PATCH_BLOCK_ALIGNMENT);
-  const ceiling = payloadOffset;
-  const layout = layoutJournalAddonsBeforePayload(ceiling, plan);
-  if (layout.prefixOffset < blockStart) return {};
-  if (!isFreeRegion(patched.bytes, layout.prefixOffset, ceiling - layout.prefixOffset)) return {};
-  return layout;
+function directRuntimeExcludedRanges(result) {
+  const runtime = result?.saveRuntime;
+  if (!Number.isInteger(runtime?.payloadOffset)
+      || !Number.isInteger(runtime?.payloadSize)
+      || runtime.payloadSize <= 0) return [];
+  return [[runtime.payloadOffset, runtime.payloadOffset + alignedPayloadSpan(runtime.payloadSize)]];
 }
 
 function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
@@ -267,14 +202,6 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
       persistenceFlags,
     });
   }
-  if (patched.result.flashJournal?.journal && patched.result.rtc?.persistenceFlushEntry) {
-    patchInstalledJournalRtcPersistEntry(
-      patched.bytes,
-      patched.result.operations,
-      patched.result.flashJournal,
-      patched.result.rtc.persistenceFlushEntry,
-    );
-  }
   const rtcRange = payloadRange(patched.result.rtc, patched.result.rtc?.payloadOffset);
   if (rtcRange) excludedRanges.push(rtcRange);
 
@@ -290,7 +217,8 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
 
   const rtcMenuEntry = patched.result.rtc?.runtimeMenuEntry || 0;
   const rtcTickMode = patched.result.rtc?.tickMode;
-  const pipelineSaveFlushEntry = context.saveFlushEntry || 0;
+  const pipelineSaveFlushEntry = context.saveFlushEntry
+    || (context.directRtcAutoFlush ? (patched.result.rtc?.persistenceFlushEntry || 0) : 0);
   const standalonePersistenceFlushEntry = pipelineSaveFlushEntry
     ? 0
     : (patched.result.rtc?.persistenceFlushEntry || 0);
@@ -304,7 +232,9 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
       rtcMenuEntry,
       rtcTickMode,
       saveFlushEntry,
-      saveFlushAuto: standalonePersistenceFlushEntry ? false : context.saveFlushAuto === true,
+      saveFlushAuto: standalonePersistenceFlushEntry ? false : (
+        context.directRtcAutoFlush === true || context.saveFlushAuto === true
+      ),
       saveFlushHotkey: standalonePersistenceFlushEntry ? true : context.saveFlushHotkey !== false,
       countdownFrames: context.countdownFrames || 0,
       indicatorMode: context.indicatorMode || "off",
@@ -320,42 +250,66 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
   return patched;
 }
 
-function targetHeaderSaveMetadata(patched, options, sourceSaveMetadata) {
-  if (options.patchMode === "sram") {
+function targetHeaderSaveMetadata(
+  patched,
+  options,
+  sourceSaveMetadata,
+  sourceHeaderSaveSize = null,
+) {
+  if (options.patchMode === PATCH_MODES.SRAM) {
     return { medium: "sram", size: sourceSaveMetadata.size, batteryless: false };
   }
-  if (options.patchMode === "batteryless-sram") {
+  if (options.patchMode === PATCH_MODES.BATTERYLESS_SRAM) {
     return {
       medium: "sram",
       size: patched.result.batteryless?.saveSize ?? sourceSaveMetadata.size,
       batteryless: true,
     };
   }
-  if (options.patchMode === "flash512k") {
-    return { medium: "flash", size: 65536, batteryless: false };
-  }
-  if (options.patchMode === "custom-flash") {
+  if (options.patchMode === PATCH_MODES.FLASH_512K) {
     return {
       medium: "flash",
-      size: patched.result.targetSaveSizeBytes ?? sourceSaveMetadata.size,
+      size: Object.hasOwn(patched.result, "headerSaveSizeBytes")
+        ? patched.result.headerSaveSizeBytes
+        : 65536,
       batteryless: false,
     };
+  }
+  if (options.patchMode === PATCH_MODES.CUSTOM_FLASH) {
+    return {
+      medium: "flash",
+      size: Object.hasOwn(patched.result, "headerSaveSizeBytes")
+        ? patched.result.headerSaveSizeBytes
+        : (patched.result.targetSaveSizeBytes ?? sourceSaveMetadata.size),
+      batteryless: false,
+    };
+  }
+  if (options.patchMode === PATCH_MODES.NONE && Number.isInteger(sourceHeaderSaveSize)) {
+    return { medium: "flash", size: sourceHeaderSaveSize, batteryless: false };
   }
   return { medium: sourceSaveMetadata.medium, size: sourceSaveMetadata.size, batteryless: false };
 }
 
-function finalizeHeaderChecksum(patched, options, sourceSaveMetadata) {
+function finalizeHeaderChecksum(patched, options, sourceSaveMetadata, sourceHeaderSaveSize) {
   ensureResultArrays(patched);
   const hasPatchOperations = patched.result.operations.length > 0;
   if (hasPatchOperations) {
-    const saveMetadata = targetHeaderSaveMetadata(patched, options, sourceSaveMetadata);
-    const headerFlags = makePatchHeaderFlags({
+    const saveMetadata = targetHeaderSaveMetadata(
+      patched,
+      options,
+      sourceSaveMetadata,
+      sourceHeaderSaveSize,
+    );
+    let headerFlags = makePatchHeaderFlags({
       saveMedium: saveMetadata.medium,
       saveSize: saveMetadata.size,
       batteryless: saveMetadata.batteryless,
       waitstateResult: patched.result.waitstate,
       rtcResult: patched.result.rtc,
     });
+    if (options.patchMode === PATCH_MODES.NONE && Number.isInteger(sourceHeaderSaveSize)) {
+      headerFlags |= patched.bytes[0xbf] & 0xe0;
+    }
     applyPatchHeaderMarker(patched.bytes, patched.result.operations, headerFlags);
     patched.result.headerSave = { ...saveMetadata, flags: headerFlags };
   }
@@ -379,27 +333,13 @@ function failureWarning(result, prefix) {
 function sharedIrqIsRequired(result) {
   return Boolean(
     result?.batteryless?.flushEntry
-    || result?.flashJournal?.journal?.flushEntry
     || (result?.rtc?.status === "patched" && result.rtc.tickMode === RTC_TICK_MODES.VBLANK),
   );
 }
 
-function ensureJournalReserveIntegrity(patched) {
-  const journal = patched.result?.flashJournal?.journal;
-  if (!journal) return;
-  const tailStart = journal.offset + journal.activeSize;
-  const tailEnd = journal.offset + journal.reservedSize;
-  if (tailStart < journal.offset || tailEnd > patched.bytes.length) {
-    throw new Error("Journal reserve is truncated after add-on installation.");
-  }
-  for (let offset = tailStart; offset < tailEnd; offset += 1) {
-    if (patched.bytes[offset] !== 0xff) throw new Error("Journal inactive reserve tail was modified by an add-on.");
-  }
-}
-
 function ensureSuccessfulPatch(result, options = {}) {
   if (result?.batteryless?.status === "failed") throw new Error(failureWarning(result, "Batteryless SRAM:"));
-  if (options.patchMode === "sram" && ["failed", "unsupported"].includes(result?.savePatch?.status)) throw new Error(firstWarning(result));
+  if (options.patchMode === PATCH_MODES.SRAM && ["failed", "unsupported"].includes(result?.savePatch?.status)) throw new Error(firstWarning(result));
   if (result?.rtc?.status === "patched"
       && result.rtc.tickMode === RTC_TICK_MODES.VBLANK
       && result?.irqHandler?.status !== "patched") {
@@ -407,11 +347,6 @@ function ensureSuccessfulPatch(result, options = {}) {
   }
   if (result?.irqHandler?.status === "failed" && sharedIrqIsRequired(result)) throw new Error(failureWarning(result, "Shared IRQ:"));
   if (result?.status === "unsupported") throw new Error(firstWarning(result));
-}
-
-async function sha256Hex(bytes) {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 const activeRequestIds = new Set();
@@ -443,83 +378,47 @@ self.addEventListener("message", async (event) => {
     const sourceRomBytes = romBytes.slice();
     const inputSha256 = await sha256Hex(romBytes);
     const sourceSaveMetadata = detectRomSaveMetadata(romBytes);
+    const sourceHeaderSaveSize = readDirectFlashHeaderSaveSize(romBytes);
     let patched;
 
-    if (message.options.patchMode === "flash512k") {
-      const flash512kOptions = message.options.flash512k || {};
-      const persistRtc = shouldPersistRtc(message.options);
-      const countdownFrames = Number.isInteger(flash512kOptions.countdownFrames) ? flash512kOptions.countdownFrames : 100;
-      const indicatorMode = flash512kOptions.indicator || "save";
-      const addonPlan = planJournalAddons(romBytes, message.options, STANDARD_JOURNAL_DESCRIPTOR);
+    if (message.options.patchMode === PATCH_MODES.FLASH_512K) {
       patched = patchFlash512kBytes(romBytes, {
-        countdownFrames,
-        indicatorMode,
-        addonPrefixSize: addonPlan.totalSpan,
-        placementExcludedRanges: addonPlan.waitstateFixedWriteRanges,
-        keepLastBlockEmpty: message.options.batteryless?.lastBlock === "keep-empty",
+        placementExcludedRanges: waitstateFixedWriteRangesForLayout(
+          romBytes,
+          message.options.waitstate || {},
+        ),
         deferHeaderFinalization: true,
       });
-      const journal = patched.result.flashJournal?.journal;
-      const effectiveCountdownFrames = journal?.countdownFrames ?? countdownFrames;
-      const effectiveIndicatorMode = journal?.indicatorMode ?? indicatorMode;
-      const addonLayout = journal ? preparedJournalAddonLayout(patched, addonPlan) : {};
       patched = applyStandaloneAddonPatches(patched, message.options, {
-        excludedRanges: journalWaitstateExcludedRanges(patched.result),
-        waitstateExcludedRanges: journalWaitstateExcludedRanges(patched.result),
-        saveFlushEntry: journal?.flushEntry || 0,
-        saveFlushAuto: Boolean(journal?.flushEntry),
-        saveFlushHotkey: Boolean(journal?.flushEntry && persistRtc),
-        persistenceBlockOffset: persistRtc ? (journal?.offset ?? null) : null,
-        persistenceFlags: persistRtc && journal ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG : 0,
-        countdownFrames: effectiveCountdownFrames,
-        indicatorMode: effectiveIndicatorMode,
+        excludedRanges: directRuntimeExcludedRanges(patched.result),
+        waitstateExcludedRanges: directRuntimeExcludedRanges(patched.result),
+        indicatorMode: "off",
         hotkeyMask: message.options.batteryless?.hotkeyMask,
-        ...addonLayout,
       });
-    } else if (message.options.patchMode === "custom-flash") {
-      const flash512kOptions = message.options.flash512k || {};
-      const persistRtc = shouldPersistRtc(message.options);
-      const countdownFrames = Number.isInteger(flash512kOptions.countdownFrames) ? flash512kOptions.countdownFrames : 100;
-      const indicatorMode = flash512kOptions.indicator || "save";
-      const addonPlan = planJournalAddons(romBytes, message.options, CUSTOM_JOURNAL_DESCRIPTOR);
+    } else if (message.options.patchMode === PATCH_MODES.CUSTOM_FLASH) {
       patched = patchCustomFlashBytes(romBytes, {
         saveChipType: message.options.customFlash?.saveChipType,
-        countdownFrames,
-        indicatorMode,
-        addonPrefixSize: addonPlan.totalSpan,
-        placementExcludedRanges: addonPlan.waitstateFixedWriteRanges,
-        keepLastBlockEmpty: message.options.batteryless?.lastBlock === "keep-empty",
+        placementExcludedRanges: waitstateFixedWriteRangesForLayout(
+          romBytes,
+          message.options.waitstate || {},
+        ),
         deferHeaderFinalization: true,
       });
-      const journal = patched.result.flashJournal?.journal;
-      if (journal) {
-        const addonLayout = preparedJournalAddonLayout(patched, addonPlan);
-        patched = applyStandaloneAddonPatches(patched, message.options, {
-          excludedRanges: journalWaitstateExcludedRanges(patched.result),
-          waitstateExcludedRanges: journalWaitstateExcludedRanges(patched.result),
-          saveFlushEntry: journal.flushEntry,
-          saveFlushAuto: true,
-          saveFlushHotkey: persistRtc,
-          countdownFrames: journal.countdownFrames,
-          indicatorMode: journal.indicatorMode,
-          persistenceBlockOffset: persistRtc ? journal.offset : null,
-          persistenceFlags: persistRtc
-            ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG
-              | RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG
-            : 0,
-          ...addonLayout,
-        });
-      } else {
-        patched = applyStandaloneAddonPatches(patched, message.options, {
-          persistenceFlags: persistRtc ? RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG : 0,
-        });
-      }
-    } else if (message.options.patchMode === "none") {
+      patched = applyStandaloneAddonPatches(patched, message.options, {
+        excludedRanges: directRuntimeExcludedRanges(patched.result),
+        waitstateExcludedRanges: directRuntimeExcludedRanges(patched.result),
+        indicatorMode: "off",
+        persistenceFlags: shouldPersistRtc(message.options)
+          ? RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG
+          : 0,
+      });
+    } else if (message.options.patchMode === PATCH_MODES.NONE) {
       patched = { bytes: romBytes, result: { operations: [], warnings: [], status: "unchanged" } };
       patched = applyStandaloneAddonPatches(patched, message.options);
-    } else if (["sram", "batteryless-sram"].includes(message.options.patchMode)) {
+    } else if ([PATCH_MODES.SRAM, PATCH_MODES.BATTERYLESS_SRAM].includes(message.options.patchMode)) {
+      const batteryless = message.options.patchMode === PATCH_MODES.BATTERYLESS_SRAM;
       patched = patchSramBytes(romBytes, {
-        batteryless: message.options.patchMode === "batteryless-sram",
+        batteryless,
         batterylessMode: message.options.batteryless.mode,
         batterylessCountdown: message.options.batteryless.countdownFrames,
         batterylessIndicatorMode: message.options.batteryless.indicator,
@@ -535,7 +434,6 @@ self.addEventListener("message", async (event) => {
       throw new Error(`Unsupported patch mode: ${message.options.patchMode}.`);
     }
 
-    ensureJournalReserveIntegrity(patched);
     const contractPreview = normalizePatchResult(patched.result);
     if (!["none", "flash1m"].includes(contractPreview.bankSwitchMode)) {
       throw new Error("Internal patch plan selected an invalid bank-switch mode.");
@@ -543,16 +441,52 @@ self.addEventListener("message", async (event) => {
     if (contractPreview.bankSwitchMode === "flash1m" && contractPreview.targetSaveSizeBytes !== 131072) {
       throw new Error("Internal patch plan selected FLASH1M banking for a non-128 KiB target.");
     }
-    if (contractPreview.flashJournal && contractPreview.bankSwitchMode !== "none") {
-      throw new Error("Internal patch plan selected bank switching for a journal target.");
+    if (contractPreview.saveRuntime && contractPreview.bankSwitchMode !== "none") {
+      throw new Error("Internal patch plan selected bank switching for a Direct save target.");
     }
-    if (["flash512k", "custom-flash"].includes(message.options.patchMode)
+    if ([PATCH_MODES.FLASH_512K, PATCH_MODES.CUSTOM_FLASH].includes(message.options.patchMode)
         && contractPreview.bankSwitchMode !== "flash1m"
         && contractPreview.operations?.some((operation) => operation.kind === PATCH_OPERATION_KIND.BANK_SWITCH_PATCH)) {
       throw new Error("Internal patch plan contains a bank-switch operation for a non-FLASH1M target.");
     }
     ensureSuccessfulPatch(patched.result, message.options);
-    patched = finalizeHeaderChecksum(patched, message.options, sourceSaveMetadata);
+    let convertedSave = null;
+    if (message.saveBuffer && ["sram", "eeprom"].includes(patched.result.saveRuntime?.family)) {
+      const sourceSave = new Uint8Array(message.saveBuffer);
+      convertedSave = prepareDirectSave(
+        sourceSave,
+        patched.result.saveRuntime.family,
+        patched.result.saveRuntime.storageFormat,
+      );
+    } else if (message.saveBuffer && message.options.patchMode === PATCH_MODES.NONE) {
+      const sourceSave = new Uint8Array(message.saveBuffer);
+      const inspection = inspectConvertedFlashSave(sourceSave);
+      const direct128Eeprom = sourceSave.length === 0x20000
+        && ["direct-eeprom-delta-v5", "blank-physical-save"].includes(inspection.format);
+      const direct128Sram = sourceSave.length === 0x20000
+        && ["direct-sram-sector-log-v16", "direct-sram-snapshot-v3", "blank-physical-save"]
+          .includes(inspection.format);
+      if ((sourceSave.length === 0x10000 || direct128Eeprom)
+          && sourceSaveMetadata.medium === "eeprom") {
+        if (![512, 8192].includes(sourceHeaderSaveSize)) {
+          throw new RangeError("The ROM has no valid Direct EEPROM export-size marker.");
+        }
+        const decoded = decodeDirectEepromSave(sourceSave);
+        convertedSave = decoded.slice(0, sourceHeaderSaveSize);
+      } else if ((sourceSave.length === 0x10000 || direct128Sram)
+          && sourceSaveMetadata.medium === "sram") {
+        convertedSave = exportDirectSramSave(sourceSave);
+      }
+      if (!convertedSave && ["eeprom", "sram"].includes(sourceSaveMetadata.medium)) {
+        throw new RangeError("The attached save is not a supported Direct physical image.");
+      }
+    }
+    patched = finalizeHeaderChecksum(
+      patched,
+      message.options,
+      sourceSaveMetadata,
+      sourceHeaderSaveSize,
+    );
     patched.result = normalizePatchResult(patched.result);
     const patchPlan = createPatchPlan(sourceRomBytes, patched.bytes, patched.result.operations);
     patched.bytes = applyPatchPlan(sourceRomBytes, patchPlan);
@@ -564,14 +498,24 @@ self.addEventListener("message", async (event) => {
     };
     patched.result.inputSha256 = inputSha256;
     patched.result.outputSha256 = await sha256Hex(patched.bytes);
-    self.postMessage({
+    const convertedSaveBuffer = convertedSave?.buffer || null;
+    const convertedSaveFileName = convertedSave
+      ? message.outputFileName.replace(/\.[^.]+$/, ".sav")
+      : null;
+    const response = {
       protocolVersion: WORKER_PROTOCOL_VERSION,
       type: WORKER_MESSAGE_TYPE.PATCH_COMPLETED,
       requestId: message.requestId,
       outputFileName: message.outputFileName,
       patchedBuffer: patched.bytes.buffer,
+      convertedSaveBuffer,
+      convertedSaveFileName,
       result: patched.result,
-    }, [patched.bytes.buffer]);
+    };
+    const transfers = convertedSaveBuffer
+      ? [patched.bytes.buffer, convertedSaveBuffer]
+      : [patched.bytes.buffer];
+    self.postMessage(response, transfers);
   } catch (error) {
     self.postMessage({
       protocolVersion: WORKER_PROTOCOL_VERSION,

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-export const APP_VERSION = "1.9";
-export const WORKER_PROTOCOL_VERSION = 2;
+export const APP_VERSION = "1.10";
+export const WORKER_PROTOCOL_VERSION = 4;
 
-export const GBA_MAX_ROM_SIZE_BYTES = 32 * 1024 * 1024;
+export { GBA_MAX_ROM_SIZE_BYTES } from "./gba-constants.js";
 export const MAX_FILE_COUNT = 64;
 export const MAX_TOTAL_INPUT_BYTES = 512 * 1024 * 1024;
 export const MAX_RETAINED_OUTPUT_BYTES = MAX_TOTAL_INPUT_BYTES;
@@ -14,9 +14,41 @@ export const PATCH_MODES = Object.freeze({
   NONE: "none",
   SRAM: "sram",
   BATTERYLESS_SRAM: "batteryless-sram",
-  FLASH_JOURNAL: "flash512k",
+  FLASH_512K: "flash512k",
   CUSTOM_FLASH: "custom-flash",
 });
+
+export const CUSTOM_FLASH_SAVE_CHIP_MODELS = Object.freeze({
+  TYPE_1: "customType1",
+  TYPE_2: "customType2",
+});
+
+export const CUSTOM_FLASH_SAVE_CHIP_TYPES = Object.freeze({
+  TYPE_1: 1,
+  TYPE_2: 2,
+});
+
+const CUSTOM_FLASH_TYPE_BY_MODEL = Object.freeze({
+  [CUSTOM_FLASH_SAVE_CHIP_MODELS.TYPE_1]: CUSTOM_FLASH_SAVE_CHIP_TYPES.TYPE_1,
+  [CUSTOM_FLASH_SAVE_CHIP_MODELS.TYPE_2]: CUSTOM_FLASH_SAVE_CHIP_TYPES.TYPE_2,
+});
+
+const CUSTOM_FLASH_MODEL_BY_TYPE = Object.freeze({
+  [CUSTOM_FLASH_SAVE_CHIP_TYPES.TYPE_1]: CUSTOM_FLASH_SAVE_CHIP_MODELS.TYPE_1,
+  [CUSTOM_FLASH_SAVE_CHIP_TYPES.TYPE_2]: CUSTOM_FLASH_SAVE_CHIP_MODELS.TYPE_2,
+});
+
+export function customFlashSaveChipTypeFromModel(model) {
+  return Object.hasOwn(CUSTOM_FLASH_TYPE_BY_MODEL, model)
+    ? CUSTOM_FLASH_TYPE_BY_MODEL[model]
+    : null;
+}
+
+export function customFlashSaveChipModelFromType(type) {
+  return Object.hasOwn(CUSTOM_FLASH_MODEL_BY_TYPE, type)
+    ? CUSTOM_FLASH_MODEL_BY_TYPE[type]
+    : null;
+}
 
 export const PATCH_STATUS = Object.freeze({
   READY: "ready",
@@ -55,9 +87,8 @@ export const DEFAULT_OPTIONS = Object.freeze({
     lastBlock: "usable",
     hotkey: Object.freeze(["select", "l"]),
   }),
-  flash512k: Object.freeze({ countdownFrames: 100, indicator: "save" }),
   sram: Object.freeze({ flash1mBankSwitchStyle: "modern" }),
-  customFlash: Object.freeze({ saveChipModel: "sst25vf064cFamily" }),
+  customFlash: Object.freeze({ saveChipModel: CUSTOM_FLASH_SAVE_CHIP_MODELS.TYPE_1 }),
   waitstate: Object.freeze({ enabled: false, mode: "supercard_exact" }),
   rtc: Object.freeze({
     enabled: false,

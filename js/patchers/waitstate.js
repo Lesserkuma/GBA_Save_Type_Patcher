@@ -29,6 +29,8 @@
  * writes the selected WAITCNT value before continuing to the previous entrypoint.
  */
 
+import { u32ToBytes } from "../core/binary.js";
+import { findTailBlankRegion, isBlankRegion, overlapsAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, updateGbaHeaderChecksum } from "./patch-state.js";
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
@@ -42,7 +44,7 @@ import {
 } from "./superfw-db-parser.js";
 import { applySuperfwWaitcntDbOps } from "./superfw-opcode-interpreter.js";
 import { applySuperfwPatchengineWaitcnt, patchWaitstateStartupLiterals } from "./waitcnt-scanner.js";
-import { stageWaitstateWrite, u32ToBytes } from "./waitstate-common.js";
+import { stageWaitstateWrite } from "./waitstate-common.js";
 import {
   WAITCNT_ENTRYPOINT_MARKER,
   WAITCNT_ENTRYPOINT_MARKER_BYTES,
@@ -53,7 +55,6 @@ import {
   makeWaitstatePayload,
   writeRomMarker,
 } from "./waitstate-payload.js";
-import { findTailFreeRegion, isFreeRegion, rangesOverlap } from "./waitstate-planner.js";
 
 export { waitstateFixedWriteRangesForLayout };
 export {
@@ -140,7 +141,7 @@ function resolveWaitstateLayout(work, options, excludedRanges) {
     return { error: "Waitstate: no free code block for entrypoint payload found" };
   }
   if (payloadOffset === null) {
-    payloadOffset = findTailFreeRegion(
+    payloadOffset = findTailBlankRegion(
       work,
       totalPayloadSpan,
       PAYLOAD_ALIGNMENT,
@@ -150,8 +151,8 @@ function resolveWaitstateLayout(work, options, excludedRanges) {
   } else if (
     payloadOffset < 0
     || payloadOffset % PAYLOAD_ALIGNMENT
-    || !isFreeRegion(work, payloadOffset, totalPayloadSpan)
-    || rangesOverlap(payloadOffset, payloadOffset + totalPayloadSpan, fixedWriteRanges)
+    || !isBlankRegion(work, payloadOffset, totalPayloadSpan)
+    || overlapsAnyRange(payloadOffset, payloadOffset + totalPayloadSpan, fixedWriteRanges)
   ) {
     payloadOffset = null;
   }

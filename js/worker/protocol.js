@@ -10,7 +10,8 @@ const PATCH_REQUEST_KEYS = new Set([
 ]);
 const CANCEL_REQUEST_KEYS = new Set(["protocolVersion", "type", "requestId"]);
 const PATCH_COMPLETED_KEYS = new Set([
-  "protocolVersion", "type", "requestId", "outputFileName", "patchedBuffer", "result",
+  "protocolVersion", "type", "requestId", "outputFileName", "patchedBuffer",
+  "convertedSaveBuffer", "convertedSaveFileName", "result",
 ]);
 const PATCH_FAILED_KEYS = new Set(["protocolVersion", "type", "requestId", "error"]);
 const SERIALIZED_ERROR_KEYS = new Set(["code", "stage", "message", "context", "recoverable"]);
@@ -50,12 +51,21 @@ export function isCancelRequest(message) {
 }
 
 export function isPatchResponse(message) {
-  if (!isRecord(message) || message.protocolVersion !== WORKER_PROTOCOL_VERSION || typeof message.requestId !== "string") {
+  if (!isRecord(message)
+      || message.protocolVersion !== WORKER_PROTOCOL_VERSION
+      || typeof message.requestId !== "string"
+      || message.requestId.length < 8) {
     return false;
   }
   if (message.type === WORKER_MESSAGE_TYPE.PATCH_COMPLETED) {
+    const hasConvertedSave = message.convertedSaveBuffer instanceof ArrayBuffer
+      && typeof message.convertedSaveFileName === "string"
+      && message.convertedSaveFileName.length > 0;
+    const hasNoConvertedSave = message.convertedSaveBuffer === null
+      && message.convertedSaveFileName === null;
     return hasOnlyKeys(message, PATCH_COMPLETED_KEYS)
       && message.patchedBuffer instanceof ArrayBuffer
+      && (hasConvertedSave || hasNoConvertedSave)
       && typeof message.outputFileName === "string"
       && message.outputFileName.length > 0
       && isPatchResult(message.result);

@@ -9,8 +9,10 @@
 
 import { asciiBytes, findBytes, hexToBytes, readU32, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { alignDown, alignUp, isBlankRegion, overlapsAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND, RTC_TICK_MODES } from "../domain/constants.js";
-import { stagePatchOperation, stageRomExpansion } from "../patch-engine/draft.js";
+import { GBA_MAX_ROM_SIZE_BYTES, GBA_ROM_BASE_ADDRESS } from "../domain/gba-constants.js";
+import { stageErasedRomExpansion, stageNamedPatchWrite } from "../patch-engine/draft.js";
 import {
   PAYLOAD_ALIGNMENT as TARGET_PAYLOAD_ALIGNMENT,
   ensureDirectPayloadRegion,
@@ -18,8 +20,6 @@ import {
 } from "./payload-placement.js";
 import { RTC_PAYLOAD_CONSTANTS, RTC_PAYLOAD_HEX } from "./rtc-data.js";
 
-const GBA_ROM_BASE = 0x08000000;
-const GBA_MAX_ROM_SIZE = 0x02000000;
 const RTC_PAYLOAD_ALIGNMENT = TARGET_PAYLOAD_ALIGNMENT;
 const ORIGINAL_PAYLOAD_LINK_ADDR = RTC_PAYLOAD_CONSTANTS.RTC_ORIGINAL_PAYLOAD_LINK_ADDR;
 
@@ -106,7 +106,7 @@ function configureRtcPersistence(payloadBuild, context = {}) {
   if (!Number.isInteger(blockOffset)
       || blockOffset < 0
       || blockOffset % RTC_PERSISTENCE_BLOCK_SIZE
-      || blockOffset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_MAX_ROM_SIZE
+      || blockOffset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_MAX_ROM_SIZE_BYTES
       || (blockOffset <= 0x01000000
         && 0x01000000 < blockOffset + RTC_PERSISTENCE_BLOCK_SIZE)) {
     throw new PatchError("RTC: persistence block is invalid");
@@ -260,46 +260,27 @@ const EMBEDDED_PAYLOAD = validateGeneratedRtcData();
 const RTC_ROM_MARKER_TEXT = "lk_rtc_runtime";
 const RTC_ROM_MARKER = asciiBytes(RTC_ROM_MARKER_TEXT);
 
+// Compatibility alias retained for callers of the previous public helper.
+export const isRtcFreeRegion = isBlankRegion;
+
 export function rtcPayloadSpanForLayout() {
   return markedPayloadSpan(RTC_PAYLOAD_SIZE, RTC_ROM_MARKER.length);
 }
 
 function stageRtcWrite(bytes, operations, name, offset, replacement, details = {}) {
-  return stagePatchOperation(bytes, operations, {
-    id: `rtc-${operations.length}`,
+  return stageNamedPatchWrite(bytes, operations, {
+    idPrefix: "rtc",
     kind: details.kind || PATCH_OPERATION_KIND.HOOK_REPLACE,
     component: "rtc",
     labelKey: details.labelKey || "operation.rtc",
+    name,
     offset,
-    byteLength: replacement.length,
-    expectedBefore: bytes.slice(offset, offset + replacement.length),
     replacement,
     metadata: {
-      name,
       ...(details.codeName === undefined ? {} : { codeName: details.codeName }),
       ...(details.value === undefined ? {} : { value: details.value }),
     },
   });
-}
-
-function alignDown(value, alignment) {
-  return value - (value % alignment);
-}
-
-function alignUp(value, alignment) {
-  return alignDown(value + alignment - 1, alignment);
-}
-
-function isFreeByte(value) {
-  return value === 0x00 || value === 0xff;
-}
-
-export function isRtcFreeRegion(bytes, start, size) {
-  if (start < 0 || size < 0 || start + size > bytes.length) return false;
-  for (let offset = start; offset < start + size; offset += 1) {
-    if (!isFreeByte(bytes[offset])) return false;
-  }
-  return true;
 }
 
 function writeRtcRomMarker(bytes, operations, payloadOffset) {
@@ -310,7 +291,7 @@ function writeRtcRomMarker(bytes, operations, payloadOffset) {
   if (markerEnd > paddingEnd || markerEnd > bytes.length) {
     throw new PatchError("RTC: reserved payload span does not include the ROM marker");
   }
-  if (!isRtcFreeRegion(bytes, markerOffset, marker.length)) {
+  if (!isBlankRegion(bytes, markerOffset, marker.length)) {
     throw new PatchError("RTC: ROM marker region is not free");
   }
   stageRtcWrite(bytes, operations, "RTC ROM marker", markerOffset, marker, {
@@ -318,10 +299,6 @@ function writeRtcRomMarker(bytes, operations, payloadOffset) {
     codeName: "rtc_rom_marker",
   });
   return true;
-}
-
-function rangesOverlap(start, end, ranges) {
-  return ranges.some(([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart);
 }
 
 function embeddedPayloadBytes() {
@@ -410,7 +387,7 @@ function findRtcHandlers(bytes, excludedRanges = []) {
         // Multiple variants may intentionally identify the same handler.
         // Keep the longest replacement window for that offset.
         const size = sig.length * 2;
-        if (rangesOverlap(offset, offset + size, excludedRanges)) continue;
+        if (overlapsAnyRange(offset, offset + size, excludedRanges)) continue;
         candidatesByOffset.set(offset, Math.max(candidatesByOffset.get(offset) || 0, size));
       }
     }
@@ -458,10 +435,10 @@ function validatePayloadOffset(bytes, payloadOffset) {
   const payloadSpan = rtcPayloadSpanForLayout();
   if (!Number.isInteger(payloadOffset)) throw new PatchError("RTC: payload offset is invalid");
   if (payloadOffset % RTC_PAYLOAD_ALIGNMENT) throw new PatchError("RTC: payload offset must be 0x100-byte aligned");
-  if (payloadOffset < 0 || payloadOffset + payloadSpan > GBA_MAX_ROM_SIZE) {
+  if (payloadOffset < 0 || payloadOffset + payloadSpan > GBA_MAX_ROM_SIZE_BYTES) {
     throw new PatchError("RTC: payload would be outside the 32 MiB GBA ROM address space");
   }
-  if (payloadOffset < bytes.length && !isRtcFreeRegion(bytes, payloadOffset, Math.min(payloadSpan, bytes.length - payloadOffset))) {
+  if (payloadOffset < bytes.length && !isBlankRegion(bytes, payloadOffset, Math.min(payloadSpan, bytes.length - payloadOffset))) {
     throw new PatchError("RTC: chosen payload region is not free");
   }
 }
@@ -484,18 +461,10 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
     validatePayloadOffset(workRom.bytes, payloadOffset);
     const end = payloadOffset + rtcPayloadSpanForLayout();
     if (end > workRom.bytes.length) {
-      const oldSize = workRom.bytes.length;
-      const byteLength = end - oldSize;
-      const erasedBytes = new Uint8Array(byteLength).fill(0xff);
-      stageRomExpansion(workRom, operations, {
+      stageErasedRomExpansion(workRom, operations, {
         id: `rtc-expand-${operations.length}`,
-        kind: PATCH_OPERATION_KIND.ROM_EXPAND,
         component: "rtc",
-        offset: oldSize,
-        byteLength,
-        expectedBefore: erasedBytes,
-        replacement: new Uint8Array(erasedBytes),
-        labelKey: "operation.romExpand",
+        newLength: end,
         metadata: {
           name: "RTC ROM expansion",
           value: end,
@@ -506,9 +475,9 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
 
   const end = payloadOffset + RTC_PAYLOAD_SIZE;
   const region = workRom.bytes.slice(payloadOffset, end);
-  if (!isRtcFreeRegion(region, 0, region.length)) throw new PatchError("RTC: chosen payload region is not free");
+  if (!isBlankRegion(region, 0, region.length)) throw new PatchError("RTC: chosen payload region is not free");
 
-  const linkAddr = (GBA_ROM_BASE + payloadOffset) >>> 0;
+  const linkAddr = (GBA_ROM_BASE_ADDRESS + payloadOffset) >>> 0;
   const payloadBuild = relocatePayload(embeddedPayloadBytes(), linkAddr);
   configureRtcTickMode(payloadBuild, tickMode);
   const persistenceContext = rtcOptions.saveOnGlobalHotkey === false

@@ -2,20 +2,14 @@
 
 import { asciiBytes, findBytes, hexToBytes, readAscii, readU32, startsWithBytes, writeU16 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
-import { PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { customFlashSaveChipModelFromType, PATCH_MODES, PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { GBA_ROM_BASE_ADDRESS } from "../domain/gba-constants.js";
 import { stagePatchOperation } from "../patch-engine/draft.js";
-import { findSaveType } from "./sram.js";
+import { findSaveType } from "./save-type.js";
 import { applyWaitstateToBytes } from "./waitstate.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, PATCH_SAVE_MEDIUM } from "./patch-state.js";
-import * as CUSTOM_JOURNAL_DATA from "./custom-journal-data.js";
-import {
-  STANDARD_JOURNAL_DESCRIPTOR,
-  defineJournalDescriptor,
-  patchJournalConvertedSave,
-} from "./flash512k.js";
+import { patchCustomDirectSave } from "./flash512k.js";
 
-const GBA_ROM_BASE = 0x08000000;
-const SAVE_CHIP_TYPES = { 1: "SST25VF064C, SST49LF080A, 0xFFFF", 2: "SST39VF6401B" };
 const PTR_ADD = {
   FLASH1M_V103: 0x10,
   FLASH1M_V102: 0x10,
@@ -65,16 +59,7 @@ const ID_MARKERS = {
 };
 const BL_PLACEHOLDER = hexToBytes("F7000000");
 
-export const CUSTOM_JOURNAL_DESCRIPTOR = defineJournalDescriptor(CUSTOM_JOURNAL_DATA, {
-  id: "custom-journal-v2",
-  label: "Custom FLASH journal",
-});
-if (findBytes(CUSTOM_JOURNAL_DESCRIPTOR.payload, STANDARD_JOURNAL_DESCRIPTOR.signature) >= 0
-    || findBytes(STANDARD_JOURNAL_DESCRIPTOR.payload, CUSTOM_JOURNAL_DESCRIPTOR.signature) >= 0) {
-  throw new Error("Standard and Custom journal signatures must be mutually exclusive.");
-}
-
-export function customFlashSaveSize(libraryNames) {
+function customFlashSaveSize(libraryNames) {
   const names = Array.from(libraryNames || []);
   const has1M = names.some((name) => FLASH_1M.has(name));
   const has512K = names.some((name) => !FLASH_1M.has(name));
@@ -108,7 +93,19 @@ function functionSizeFromTail(out, offset, head, tail) {
   const tailOffset = findBytes(out, tail, offset);
   return tailOffset < 0 ? null : tailOffset - offset + tail.length;
 }
-function replaceFunction(out, operations, library, fn, offset, size, code, kind = PATCH_OPERATION_KIND.HOOK_REPLACE) {
+/**
+ * @param {string} kind
+ */
+function replaceFunction(
+  out,
+  operations,
+  library,
+  fn,
+  offset,
+  size,
+  code,
+  kind = PATCH_OPERATION_KIND.HOOK_REPLACE,
+) {
   if (code.length > size) throw new PatchError(`${library}: ${fn} does not have enough room for new code`);
   const replacement = new Uint8Array(size);
   replacement.set(code);
@@ -134,7 +131,7 @@ function readFunctionPointer(out, library, tableAdd, fn, warnings) {
     warnings.push(`${library.name}: ${fn} pointer is outside the ROM`);
     return null;
   }
-  const functionOffset = readU32(out, pointerOffset) - GBA_ROM_BASE - 1;
+  const functionOffset = readU32(out, pointerOffset) - GBA_ROM_BASE_ADDRESS - 1;
   if (functionOffset < 0 || functionOffset >= out.length) {
     warnings.push(`${library.name}: ${fn} address is invalid`);
     return null;
@@ -151,7 +148,7 @@ function findFlashLibraries(out) {
       const stringOffset = findBytes(out, marker, pos);
       if (stringOffset < 0) break;
       const pointerOffset = stringOffset + PTR_ADD[name];
-      if (pointerOffset + 4 <= out.length) hits.push({ name, stringOffset, baseOffset: readU32(out, pointerOffset) - GBA_ROM_BASE });
+      if (pointerOffset + 4 <= out.length) hits.push({ name, stringOffset, baseOffset: readU32(out, pointerOffset) - GBA_ROM_BASE_ADDRESS });
       pos = stringOffset + marker.length;
     }
   }
@@ -180,11 +177,11 @@ function customFlashContext(inputBytes, options) {
   };
 }
 
-function journalFallback(context) {
+function directFallback(context) {
   if (context.libraries.length) return null;
   const sourceSaveType = findSaveType(context.data);
   if (sourceSaveType?.startsWith("SRAM") || sourceSaveType?.startsWith("EEPROM")) {
-    return patchJournalConvertedSave(context.data, context.options, CUSTOM_JOURNAL_DESCRIPTOR);
+    return patchCustomDirectSave(context.data, context.options);
   }
   throw new PatchError(
     sourceSaveType
@@ -429,7 +426,7 @@ function customFlashResult(context, bytes, waitstate, has1M, targetSaveSize) {
     applyPatchHeaderMarker(bytes, context.operations, flags);
   }
   const result = {
-    mode: "custom-flash",
+    mode: PATCH_MODES.CUSTOM_FLASH,
     status: "patched",
     saveType: [...new Set(context.libraries.map((library) => library.name))].join(","),
     sourceSaveType: findSaveType(context.data),
@@ -438,9 +435,8 @@ function customFlashResult(context, bytes, waitstate, has1M, targetSaveSize) {
     logicalSaveSizeBytes: targetSaveSize,
     targetSaveSizeBytes: targetSaveSize,
     bankSwitchMode: has1M ? "flash1m" : "none",
-    flashJournal: null,
     saveChipType: context.type,
-    saveChipName: SAVE_CHIP_TYPES[context.type],
+    saveChipTypeId: customFlashSaveChipModelFromType(context.type),
     flashLibraries: context.libraries,
     operations: context.operations,
     warnings: context.warnings,
@@ -453,7 +449,7 @@ function customFlashResult(context, bytes, waitstate, has1M, targetSaveSize) {
 
 export function patchCustomFlashBytes(inputBytes, options = {}) {
   const context = customFlashContext(inputBytes, options);
-  const fallback = journalFallback(context);
+  const fallback = directFallback(context);
   if (fallback) return fallback;
   const has1M = context.libraries.some((library) => FLASH_1M.has(library.name));
   const targetSaveSize = customFlashSaveSize(
@@ -464,5 +460,3 @@ export function patchCustomFlashBytes(inputBytes, options = {}) {
   const patched = applyCustomWaitstate(context);
   return customFlashResult(context, patched.bytes, patched.waitstate, has1M, targetSaveSize);
 }
-
-export { SAVE_CHIP_TYPES };

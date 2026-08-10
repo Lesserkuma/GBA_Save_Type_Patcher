@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { DEFAULT_OPTIONS, PATCH_MODES, PATCH_STATUS, RTC_TICK_MODES } from "./domain/constants.js";
+import {
+  customFlashSaveChipModelFromType,
+  customFlashSaveChipTypeFromModel,
+  DEFAULT_OPTIONS,
+  PATCH_MODES,
+  PATCH_STATUS,
+  RTC_TICK_MODES,
+} from "./domain/constants.js";
 import { statusMessage, UI_TEXT, uiMessage } from "./domain/messages.js";
 import { PatchError } from "./core/errors.js";
 import { saveFileMatchesRom } from "./files.js";
@@ -42,7 +49,6 @@ export function bindElements() {
     optionsPanel: requireElement("#save-options-panel"),
     otherPatchesPanel: requireElement("#other-patches-panel"),
     batterylessOptions: requireElement("#batteryless-options"),
-    flash512kOptions: requireElement("#flash512k-options"),
     sharedHotkeyOptions: requireElement("#shared-hotkey-options"),
     countdownField: requireElement("#countdown-field"),
     batterylessCountdownIndicator: requireElement("#batteryless-countdown-indicator"),
@@ -112,17 +118,15 @@ export function hideImportProgress(delayMs = 0) {
 }
 
 export function renderOptions(state) {
-  const isSram = state.options.patchMode === "sram";
-  const isBatteryless = state.options.patchMode === "batteryless-sram";
-  const isFlash512k = state.options.patchMode === "flash512k";
-  const isCustomFlash = state.options.patchMode === "custom-flash";
+  const isSram = state.options.patchMode === PATCH_MODES.SRAM;
+  const isBatteryless = state.options.patchMode === PATCH_MODES.BATTERYLESS_SRAM;
+  const isCustomFlash = state.options.patchMode === PATCH_MODES.CUSTOM_FLASH;
   const isRtc = state.options.rtc.enabled;
   elements.batterylessOptions.hidden = !isBatteryless;
-  if (elements.flash512kOptions) elements.flash512kOptions.hidden = !(isFlash512k || isCustomFlash);
   if (elements.sharedHotkeyOptions) elements.sharedHotkeyOptions.hidden = !(isBatteryless || isRtc);
   if (elements.rtcOptions) elements.rtcOptions.hidden = !isRtc;
   if (elements.sramOptions) elements.sramOptions.hidden = !(isSram || isBatteryless);
-  elements.customFlashOptions.hidden = state.options.patchMode !== "custom-flash";
+  elements.customFlashOptions.hidden = state.options.patchMode !== PATCH_MODES.CUSTOM_FLASH;
   const isAutoModeEnabled = state.options.batteryless.mode === "auto";
   const isBatterylessAutoMode = isBatteryless && isAutoModeEnabled;
   if (elements.batterylessCountdownIndicator) {
@@ -134,7 +138,7 @@ export function renderOptions(state) {
   }
   elements.countdownField.hidden = !isBatterylessAutoMode;
   if (elements.batterylessAutoFlushCopy) elements.batterylessAutoFlushCopy.hidden = !isBatterylessAutoMode;
-  elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === "none");
+  elements.optionsPanel.classList.toggle("no-extra-options", state.options.patchMode === PATCH_MODES.NONE);
   elements.otherPatchesPanel.classList.toggle("no-extra-options", !isRtc);
 }
 
@@ -198,12 +202,22 @@ function updateRomCard(item, rom, state, isAdded) {
   item.querySelector('[data-role="name"]').textContent = rom.name;
   const saveBadge = item.querySelector('[data-role="save"]');
   const saveRecord = state.saveFilesByBaseName.get(rom.baseName);
-  const hasSave = state.options.patchMode === PATCH_MODES.BATTERYLESS_SRAM
+  const hasSave = [
+    PATCH_MODES.BATTERYLESS_SRAM,
+    PATCH_MODES.NONE,
+    PATCH_MODES.FLASH_512K,
+    PATCH_MODES.CUSTOM_FLASH,
+  ].includes(state.options.patchMode)
     && !state.saveConflictsByBaseName.has(rom.baseName)
-    && saveFileMatchesRom(saveRecord, rom);
+    && saveFileMatchesRom(saveRecord, rom, state.options.patchMode);
   saveBadge.hidden = !hasSave;
-  if (hasSave) saveBadge.dataset.saveBase = rom.baseName;
-  else delete saveBadge.dataset.saveBase;
+  if (hasSave) {
+    saveBadge.dataset.saveBase = rom.baseName;
+    saveBadge.title = saveRecord?.format || "save";
+  } else {
+    delete saveBadge.dataset.saveBase;
+    saveBadge.removeAttribute("title");
+  }
 
   const errorMessage = item.querySelector('[data-role="error"]');
   errorMessage.hidden = !rom.error;
@@ -307,9 +321,6 @@ export function syncOptionsFromForm(state) {
     f.elements.indicator.value = "save";
   }
   options.batteryless.lastBlock = f.elements.batterylessLastBlock?.value || "usable";
-  options.flash512k ||= {};
-  options.flash512k.countdownFrames = Number.parseInt(f.elements.flash512kCountdownFrames.value, 10);
-  options.flash512k.indicator = f.elements.flash512kIndicator.value;
   options.customFlash.saveChipModel = f.elements.saveChipModel.value;
   options.sram.flash1mBankSwitchStyle = f.elements.flash1mBankSwitchStyle?.value || "modern";
   options.waitstate.enabled = f.elements.waitstateEnabled.checked;
@@ -333,7 +344,7 @@ export function readValidatedOptions(state) {
     throw optionError(uiMessage.unsupportedPatchMode(options.patchMode), "patchMode");
   }
 
-  if (options.patchMode === "batteryless-sram" && options.batteryless.mode === "auto") {
+  if (options.patchMode === PATCH_MODES.BATTERYLESS_SRAM && options.batteryless.mode === "auto") {
     if (!Number.isInteger(options.batteryless.countdownFrames) || options.batteryless.countdownFrames < 0 || options.batteryless.countdownFrames > 255) {
       throw optionError(UI_TEXT.BATTERYLESS_DELAY_INVALID, "batteryless.countdownFrames");
     }
@@ -342,24 +353,14 @@ export function readValidatedOptions(state) {
   }
   if (options.batteryless.mode !== "auto" && options.batteryless.indicator === "countdown") options.batteryless.indicator = "save";
 
-  options.flash512k ||= structuredClone(DEFAULT_OPTIONS.flash512k);
-  if (["flash512k", "custom-flash"].includes(options.patchMode)) {
-    if (!Number.isInteger(options.flash512k.countdownFrames) || options.flash512k.countdownFrames < 1 || options.flash512k.countdownFrames > 255) {
-      throw optionError(UI_TEXT.JOURNAL_DELAY_INVALID, "flash512k.countdownFrames");
-    }
-    if (!["save", "countdown", "off"].includes(options.flash512k.indicator)) {
-      throw optionError(UI_TEXT.JOURNAL_INDICATOR_INVALID, "flash512k.indicator");
-    }
-  } else {
-    options.flash512k.countdownFrames = DEFAULT_OPTIONS.flash512k.countdownFrames;
-  }
-
   options.customFlash = options.customFlash || {};
-  if (options.patchMode === "custom-flash") {
-    const chipTypeByModel = { sst25vf064cFamily: 1, sst39vf6401b: 2 };
-    const chipType = chipTypeByModel[options.customFlash.saveChipModel];
-    if (!chipType) throw optionError(UI_TEXT.CUSTOM_FLASH_MODEL_INVALID, "customFlash.saveChipModel");
+  if (options.patchMode === PATCH_MODES.CUSTOM_FLASH) {
+    const chipType = customFlashSaveChipTypeFromModel(options.customFlash.saveChipModel);
+    if (chipType === null) {
+      throw optionError(UI_TEXT.CUSTOM_FLASH_MODEL_INVALID, "customFlash.saveChipModel");
+    }
     options.customFlash.saveChipType = chipType;
+    options.customFlash.saveChipModel = customFlashSaveChipModelFromType(chipType);
   }
 
   options.sram = options.sram || {};
@@ -367,7 +368,7 @@ export function readValidatedOptions(state) {
 
   options.batteryless.lastBlock = options.batteryless.lastBlock === "keep-empty" ? "keep-empty" : "usable";
   options.batteryless.hotkey = normalizeHotkeyKeys(options.batteryless.hotkey);
-  const needsHotkey = options.patchMode === "batteryless-sram" || options.rtc?.enabled;
+  const needsHotkey = options.patchMode === PATCH_MODES.BATTERYLESS_SRAM || options.rtc?.enabled;
   if (!options.batteryless.hotkey.length) {
     if (needsHotkey) throw optionError(UI_TEXT.HOTKEY_REQUIRED, "batteryless.hotkey");
     options.batteryless.hotkey = DEFAULT_BATTERYLESS_HOTKEY;
@@ -390,7 +391,7 @@ export function readValidatedOptions(state) {
     saveOnGlobalHotkey: rtcSaveOnGlobalHotkey,
   };
 
-  if (options.patchMode === "none" && !options.waitstate.enabled && !options.rtc.enabled) {
+  if (options.patchMode === PATCH_MODES.NONE && !options.waitstate.enabled && !options.rtc.enabled) {
     throw optionError(UI_TEXT.PATCH_SELECTION_REQUIRED, "patchMode");
   }
 

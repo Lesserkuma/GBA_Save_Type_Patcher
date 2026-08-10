@@ -646,7 +646,7 @@ restore:
 
 uint32_t rtc_persist_flush_initial(void)
 {
-    /* A shared Batteryless/Journal block may contain live save data. Its owner
+    /* A shared Batteryless block may contain live save data. Its owner
      * must perform the coordinated erase/commit sequence on the next save;
      * a cold-boot menu confirmation must never erase that block by itself. */
     if (rtc_persist_flags_config & RTC_PERSIST_FLAG_SHARED_SAVE_AREA)

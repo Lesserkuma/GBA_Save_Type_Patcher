@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import { tryReadU32 } from "../core/binary.js";
+import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
 import { markedPayloadSpan } from "./payload-placement.js";
 import { SUPERFW_PATCH_DB_BASE64 } from "./superfw-db-data.generated.js";
-import { MAX_GBA_ROM_SIZE, readU32At } from "./waitstate-common.js";
 
 const GBA_HEADER_GAME_CODE_OFFSET = 0xac;
 const GBA_HEADER_VERSION_OFFSET = 0xbc;
@@ -57,7 +58,7 @@ function readIndex(bytes, patchCount, indexOffset, entriesOffset) {
     const entryOffset = indexOffset + entryIndex * 8;
     if (entryOffset + 8 > entriesOffset || entryOffset + 8 > bytes.length) break;
     const codeBytes = bytes.subarray(entryOffset, entryOffset + 4);
-    const offsetField = readU32At(bytes, entryOffset + 4);
+    const offsetField = tryReadU32(bytes, entryOffset + 4);
     const gameVersion = offsetField & 0xff;
     index.set(makeDbKeyFromParts(codeBytes, gameVersion), offsetField >>> 8);
   }
@@ -68,14 +69,14 @@ function parseSuperfwPatchDb() {
   if (parsedSuperfwPatchDb !== null) return parsedSuperfwPatchDb;
   const bytes = decodeBase64Bytes(SUPERFW_PATCH_DB_BASE64);
   if (
-    readU32At(bytes, 0) !== SUPERFW_DB_SIGNATURE
-    || readU32At(bytes, 4) !== SUPERFW_DB_VERSION
+    tryReadU32(bytes, 0) !== SUPERFW_DB_SIGNATURE
+    || tryReadU32(bytes, 4) !== SUPERFW_DB_VERSION
   ) {
     throw new Error("Unsupported superfw patch database format.");
   }
 
-  const patchCount = readU32At(bytes, 8);
-  const indexCount = readU32At(bytes, 12);
+  const patchCount = tryReadU32(bytes, 8);
+  const indexCount = tryReadU32(bytes, 12);
   const indexOffset = 1024;
   const entriesOffset = indexOffset + 512 * indexCount;
   parsedSuperfwPatchDb = {
@@ -95,12 +96,12 @@ export function getSuperfwDbEntryForRom(bytes) {
   if (patchEntryWordOffset === undefined) return null;
 
   const entryOffset = db.entriesOffset + patchEntryWordOffset * 4;
-  const patchHeader = readU32At(db.bytes, entryOffset);
+  const patchHeader = tryReadU32(db.bytes, entryOffset);
   if (patchHeader === null) throw new Error("Invalid superfw patch database entry.");
   const wcntOps = patchHeader & 0xff;
   const ops = [];
   for (let index = 0; index < wcntOps; index += 1) {
-    const operation = readU32At(db.bytes, entryOffset + 4 * (1 + index));
+    const operation = tryReadU32(db.bytes, entryOffset + 4 * (1 + index));
     if (operation === null) throw new Error("Truncated superfw WAITCNT operation list.");
     ops.push(operation);
   }
@@ -119,7 +120,7 @@ function collectSuperfwProgramWrites(entry, markerSize = 0) {
     if (opcode === 0x0) {
       const program = entry.programs[argument] || new Uint8Array(0);
       const key = `${argument}:${offset}:${program.length}`;
-      if (program.length && offset < MAX_GBA_ROM_SIZE && !seen.has(key)) {
+      if (program.length && offset < GBA_MAX_ROM_SIZE_BYTES && !seen.has(key)) {
         seen.add(key);
         writes.push({
           programIndex: argument,
@@ -172,8 +173,8 @@ export function collectSuperfwFixedWriteRanges(entry) {
     } else if (opcode === 0x5) {
       size = argument === 0 || argument === 1 ? 4 : (argument === 4 || argument === 5 ? 8 : 0);
     }
-    if (size > 0 && offset < MAX_GBA_ROM_SIZE) {
-      ranges.push([offset, Math.min(offset + size, MAX_GBA_ROM_SIZE)]);
+    if (size > 0 && offset < GBA_MAX_ROM_SIZE_BYTES) {
+      ranges.push([offset, Math.min(offset + size, GBA_MAX_ROM_SIZE_BYTES)]);
     }
   }
   return ranges;

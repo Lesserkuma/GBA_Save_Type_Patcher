@@ -2,6 +2,8 @@
 
 import { PatchError } from "./errors.js";
 
+const HEX_BYTES_CACHE = new Map();
+
 function assertBytes(bytes, name = "bytes") {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError(`${name} must be a Uint8Array.`);
@@ -47,6 +49,20 @@ export function hexToBytes(hex) {
     output[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return output;
+}
+
+export function cachedHexToBytes(hex) {
+  let bytes = HEX_BYTES_CACHE.get(hex);
+  if (!bytes) {
+    bytes = hexToBytes(hex);
+    HEX_BYTES_CACHE.set(hex, bytes);
+  }
+  return bytes;
+}
+
+export function bytesToHex(bytes, separator = "") {
+  assertBytes(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(separator);
 }
 
 export function formattedHexToBytes(hex) {
@@ -120,6 +136,32 @@ export function writeU32(bytes, offset, value) {
   bytes[offset + 3] = (normalized >>> 24) & 0xff;
 }
 
+export function tryReadU32(bytes, offset) {
+  if (!(bytes instanceof Uint8Array) || offset < 0 || offset + 4 > bytes.length) return null;
+  return readU32(bytes, offset);
+}
+
+export function u16ToBytes(value) {
+  return Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
+}
+
+export function u32ToBytes(value) {
+  return Uint8Array.of(
+    value & 0xff,
+    (value >>> 8) & 0xff,
+    (value >>> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  );
+}
+
+export function u32WordsToBytes(words) {
+  const output = new Uint8Array(words.length * 4);
+  for (let index = 0; index < words.length; index += 1) {
+    writeU32(output, index * 4, words[index]);
+  }
+  return output;
+}
+
 export function findBytes(bytes, pattern, start = 0, end = bytes.length) {
   assertBytes(bytes);
   assertBytes(pattern, "pattern");
@@ -142,6 +184,18 @@ export function findBytes(bytes, pattern, start = 0, end = bytes.length) {
     if (matched) return position;
   }
   return -1;
+}
+
+export function findAlignedBytes(bytes, pattern, start = 0, end = bytes.length, alignment = 1) {
+  const limit = Math.min(end, bytes.length);
+  let position = Math.max(0, start);
+  while (position < limit) {
+    position = findBytes(bytes, pattern, position, limit);
+    if (position < 0) return null;
+    if (alignment <= 1 || position % alignment === 0) return position;
+    position += 1;
+  }
+  return null;
 }
 
 export function startsWithBytes(bytes, offset, pattern) {

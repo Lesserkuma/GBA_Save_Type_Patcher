@@ -3,12 +3,12 @@
 import {
   addFilesToState,
   isRomPatchable,
-  removeRom,
   saveFileMatchesRom,
 } from "./files.js";
 import {
   clearFiles,
   clearZipUrl,
+  removeRom,
   removeSave,
   replaceZipUrl,
   setImporting,
@@ -98,6 +98,15 @@ async function readRomBuffer(rom) {
   return rom.file.arrayBuffer();
 }
 
+function appendRetainedOutput(zipEntries, name, bytes) {
+  const retainedBytes = zipEntries.reduce(
+    (total, entry) => total + entry.bytes.byteLength,
+    0,
+  );
+  assertRetainedOutputBudget(retainedBytes, bytes.byteLength);
+  zipEntries.push({ name, bytes });
+}
+
 async function patchOneRom(romEntry, options, zipEntries) {
   let rom = romEntry;
   if (!rom.isHeaderValid) {
@@ -121,7 +130,10 @@ async function patchOneRom(romEntry, options, zipEntries) {
   updateRom(state, rom.id, { cachedBytes: null });
   rom = { ...rom, cachedBytes: null };
   let saveBuffer = null;
-  if (options.patchMode === PATCH_MODES.BATTERYLESS_SRAM) {
+  const acceptsSave = options.patchMode === PATCH_MODES.BATTERYLESS_SRAM
+    || ([PATCH_MODES.NONE, PATCH_MODES.FLASH_512K, PATCH_MODES.CUSTOM_FLASH].includes(options.patchMode)
+      && (rom.saveType?.startsWith("SRAM") || rom.saveType?.startsWith("EEPROM")));
+  if (acceptsSave) {
     if (state.saveConflictsByBaseName.has(rom.baseName)) {
       throw new PatchError(UI_TEXT.SAVE_BASENAME_CONFLICT, {
         code: "SAVE_BASENAME_CONFLICT",
@@ -131,9 +143,20 @@ async function patchOneRom(romEntry, options, zipEntries) {
       });
     }
     const saveRecord = state.saveFilesByBaseName.get(rom.baseName);
-    if (saveRecord && !saveFileMatchesRom(saveRecord, rom)) {
+    if (saveRecord && !saveFileMatchesRom(saveRecord, rom, options.patchMode)) {
+      const directMode = [PATCH_MODES.FLASH_512K, PATCH_MODES.CUSTOM_FLASH]
+        .includes(options.patchMode);
+      const fileName = saveRecord.name || saveRecord.file.name;
+      let message = uiMessage.exactSaveSize(fileName, rom.saveSizeBytes);
+      if (options.patchMode === PATCH_MODES.NONE) {
+        message = uiMessage.directPhysicalSaveSize(fileName);
+      } else if (directMode && rom.saveType?.startsWith("EEPROM")) {
+        message = uiMessage.directEepromSaveSize(fileName);
+      } else if (directMode && rom.saveType?.startsWith("SRAM")) {
+        message = uiMessage.directSramSaveSize(fileName);
+      }
       throw new PatchError(
-        uiMessage.exactSaveSize(saveRecord.name || saveRecord.file.name, rom.saveSizeBytes),
+        message,
         {
           code: "SAVE_SIZE_MISMATCH",
           stage: "fileValidation",
@@ -163,10 +186,18 @@ async function patchOneRom(romEntry, options, zipEntries) {
     statusCode: patchResultStatusCode(response.result, changed, Boolean(warning)),
   });
   if (changed) {
-    const outputBytes = new Uint8Array(response.patchedBuffer);
-    const retainedBytes = zipEntries.reduce((total, entry) => total + entry.bytes.byteLength, 0);
-    assertRetainedOutputBudget(retainedBytes, outputBytes.byteLength);
-    zipEntries.push({ name: response.outputFileName, bytes: outputBytes });
+    appendRetainedOutput(
+      zipEntries,
+      response.outputFileName,
+      new Uint8Array(response.patchedBuffer),
+    );
+  }
+  if (response.convertedSaveBuffer) {
+    appendRetainedOutput(
+      zipEntries,
+      response.convertedSaveFileName,
+      new Uint8Array(response.convertedSaveBuffer),
+    );
   }
 }
 

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { asciiBytes, readU16, readU32, startsWithBytes } from "../core/binary.js";
+import { decodeThumbBlTarget } from "../core/thumb.js";
+import { GBA_ROM_BASE_ADDRESS } from "../domain/gba-constants.js";
 import { KNOWN_SAVE_TYPES } from "./sram-data.js";
 
-const GBA_ROM_BASE = 0x08000000;
 const SAVE_TYPE_PREFIXES = ["EEPROM", "SRAM_F", "SRAM", "FLASH512", "FLASH1M", "FLASH"];
+const EEPROM_4K_ONLY_TYPES = new Set(["EEPROM_V110", "EEPROM_V111"]);
 
 function patternsByFirstByte(values) {
   const patterns = [];
@@ -123,29 +125,19 @@ function findIdentifyEepromFunctions(bytes, tableOffsets) {
     if (!has64KComparison) continue;
 
     const tableOffset = tableOffsets.find((candidate) => {
-      const tableAddress = GBA_ROM_BASE + candidate;
+      const tableAddress = GBA_ROM_BASE_ADDRESS + candidate;
       return (
         rangeContainsU32(bytes, core, core + 80, tableAddress)
         && rangeContainsU32(bytes, core, core + 80, tableAddress + 12)
       );
     });
     if (tableOffset === undefined) continue;
-
     const previous = core >= 2 ? readU16(bytes, core - 2) : null;
-    const start = previous !== null && (previous & 0xff00) === 0xb500 ? core - 2 : core;
-    functions.push(start);
+    functions.push(previous !== null && (previous & 0xff00) === 0xb500
+      ? core - 2
+      : core);
   }
   return [...new Set(functions)];
-}
-
-function decodeThumbBlTarget(bytes, offset) {
-  const high = readU16(bytes, offset);
-  const low = readU16(bytes, offset + 2);
-  if (high === null || low === null || (high & 0xf800) !== 0xf000 || (low & 0xf800) !== 0xf800) return null;
-
-  let displacement = ((high & 0x07ff) << 12) | ((low & 0x07ff) << 1);
-  if (displacement & 0x00400000) displacement -= 0x00800000;
-  return offset + 4 + displacement;
 }
 
 function identifyEepromCallArguments(bytes, functionOffsets) {
@@ -162,18 +154,19 @@ function identifyEepromCallArguments(bytes, functionOffsets) {
   return argumentsFound;
 }
 
-export function detectEepromSize(bytes) {
+export function detectEepromSize(bytes, saveType = null) {
+  const fallback = EEPROM_4K_ONLY_TYPES.has(saveType) ? 512 : null;
   const tables = findEepromConfigTables(bytes);
-  if (!tables.length) return null;
+  if (!tables.length) return fallback;
 
   const identifyFunctions = findIdentifyEepromFunctions(bytes, tables);
-  if (!identifyFunctions.length) return null;
+  if (!identifyFunctions.length) return fallback;
 
   const argumentsFound = identifyEepromCallArguments(bytes, identifyFunctions);
-  if (!argumentsFound.length || argumentsFound.some((value) => value !== 4 && value !== 64)) return null;
+  if (!argumentsFound.length || argumentsFound.some((value) => value !== 4 && value !== 64)) return fallback;
 
   const distinct = [...new Set(argumentsFound)];
-  if (distinct.length !== 1) return null;
+  if (distinct.length !== 1) return fallback;
   return distinct[0] === 4 ? 512 : 8192;
 }
 
@@ -216,7 +209,7 @@ export function detectRomSaveMetadata(bytes, explicitSaveType) {
   if (!saveType) return { library: null, medium: "none", size: null, label: "Unknown", ...common };
 
   if (saveType.startsWith("EEPROM")) {
-    const size = detectEepromSize(bytes);
+    const size = detectEepromSize(bytes, saveType);
     return {
       library: saveType,
       medium: "eeprom",

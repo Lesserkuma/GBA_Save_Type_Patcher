@@ -23,8 +23,8 @@ save files are never uploaded.
 | --- | --- | --- |
 | **SRAM** | Battery-backed SRAM cartridge | Converts a supported EEPROM or FLASH save library to SRAM. Includes selectable 1M FLASH bank-switch compatibility. |
 | **Batteryless SRAM** | SRAM cartridge without a battery | Adds a runtime that keeps the logical save in a reserved 256-KiB ROM-FLASH area. It can flush automatically or through a configurable hotkey. An existing `.sav` can be embedded. |
-| **512K FLASH** | Cartridge with a genuine SST 512K FLASH save chip | Adapts a supported game to the target FLASH and installs a journal runtime where required. |
-| **Off-spec 512K/1M FLASH** | Cartridge with a supported non-standard FLASH chip | Patches for the selected SST25VF064C-family, SST49LF080A, or SST39VF6401B behavior. |
+| **512K FLASH** | Cartridge with a genuine SST 512K FLASH save chip | Converts SRAM/EEPROM games to a synchronous Direct Save-FLASH backend. Native FLASH games stay native. |
+| **Off-spec 512K/1M FLASH** | Cartridge using Custom Type 1 or Type 2 | Keeps native FLASH patches and uses the same Direct SRAM/EEPROM layouts with the selected command protocol. Custom Type 1 is one compatibility model. |
 | **None** | Original save hardware | Leaves the save type unchanged, allowing only the optional RTC or Waitstate patches to be applied. |
 
 The patcher recognizes save-library signatures rather than relying on a game
@@ -46,21 +46,15 @@ optimistically.
     consecutive reads advance the clock by one second.
   - The speed multiplier ranges from `0` to `9999`. Holding
     Up or Down accelerates changes when the speed field is selected.
-  - **Save RTC State on Global Hotkey** is enabled by default. It restores the
-    timestamp, speed, and sub-second phase after a cold boot from a checksummed
-    32-byte record at the very end of an aligned 256-KiB writable ROM-FLASH
-    block. Batteryless SRAM and FLASH Journal patches share their existing
-    256-KiB save reservation; other modes reserve the block directly after the
-    add-on payload block. On a cold boot, the saved values are loaded into the
-    RTC settings menu.
-  - A persistence update erases the 256-KiB block as two consecutive 128-KiB
-    halves before programming anything. The Batteryless and Journal runtimes
-    coordinate that erase with their normal game-save flush so save data and
-    the RTC record are written back in the same operation. Without one of those
-    save runtimes, the record is updated after the initial RTC menu and when
-    the RTC hotkey menu is confirmed.
-  - When **Save RTC State on Global Hotkey** is disabled, no persistence block is
-    reserved and RTC values are neither saved nor restored.
+  - **Save RTC State on Menu Close** restores the timestamp, speed, and
+    sub-second phase after a cold boot from a checksummed 32-byte record in
+    writable ROM-FLASH. It is available with every save target, including
+    **None**.
+  - Batteryless SRAM coordinates the RTC record with its existing writable
+    save block. The other modes reserve a separate aligned 256-KiB ROM-FLASH
+    block, erase it as two consecutive 128-KiB halves, and write the RTC record
+    when the RTC menu closes. Disabling this option reserves no persistence
+    block and neither saves nor restores RTC state.
 - **Waitstate** adjusts `WAITCNT` initialization for cartridges that require
   slower ROM access timings.
 
@@ -75,13 +69,11 @@ that cannot advance.
 
 1. Open the web application in a current Chromium-based browser.
 2. Drop one or more `.gba`, `.bin`, or `.srl` files onto the page.
-3. For Batteryless SRAM, optionally add a `.sav` with the same base name as its
-   ROM and exactly the detected save size.
-4. Select the save hardware present on the target cartridge and any optional
+3. Select the save hardware present on the target cartridge and any optional
    patches.
-5. Choose **Patch ROMs**, review all warnings, and save the generated file or
+4. Choose **Patch ROMs**, review all warnings, and save the generated file or
    ZIP archive.
-6. Test the patched ROM and saving behavior before writing it to hardware.
+5. Test the patched ROM and saving behavior before writing it to hardware.
 
 Supported session limits:
 
@@ -97,8 +89,8 @@ For each ROM, the application:
 
 1. validates the fixed header byte and complement checksum and checks the
    Nintendo logo and reserved header fields;
-2. detects known EEPROM, SRAM, and FLASH library signatures and determines the
-   logical save size when possible;
+2. detects known EEPROM, SRAM, and FLASH library signatures and, for EEPROM,
+   determines the canonical export length recorded in the ROM when possible;
 3. builds an atomic patch plan containing code replacements, hooks, payloads,
    configuration, optional ROM expansion, and embedded save data;
 4. verifies that all writes fit, do not conflict, and still match the bytes the
@@ -106,7 +98,8 @@ For each ROM, the application:
 5. applies the plan in a Web Worker, records the patch metadata in two reserved
    header bytes, validates the resulting header, and records input/output
    SHA-256 hashes; and
-6. returns only the patched output to the browser download flow.
+6. returns the patched ROM and, when requested, the converted Direct save to the
+   browser download flow.
 
 The application has no upload endpoint or analytics. Its Content Security
 Policy blocks network connections, foreign scripts, embedded objects, and
@@ -122,15 +115,15 @@ part of Nintendo's original header specification.
 | ROM offset | Name | Meaning |
 | ---: | --- | --- |
 | `0xBE` | Patch marker | Fixed value `0x4C` (ASCII `L`). The complete byte is a signature; its individual bits have no separate meaning. |
-| `0xBF` | Patch flags | Encodes the target save size, target save medium, and successfully installed optional features. |
+| `0xBF` | Patch flags | Encodes the save/export size, target save medium, and successfully installed optional features. |
 
 ### Bit layout of byte `0xBF`
 
 | Bits | Mask | Value | Meaning |
 | ---: | ---: | ---: | --- |
-| `2..0` | `0x07` | `000` | No or unknown save size |
+| `2..0` | `0x07` | `000` | No save/export size recorded |
 |  |  | `001` | 512 B (4K EEPROM) |
-|  |  | `010` | 8 KiB (64K EEPROM) |
+|  |  | `010` | 8 KiB (64K or unclassified Direct EEPROM) |
 |  |  | `011` | 32 KiB (256K SRAM) |
 |  |  | `100` | 64 KiB (512K FLASH) |
 |  |  | `101` | 128 KiB (1M FLASH) |

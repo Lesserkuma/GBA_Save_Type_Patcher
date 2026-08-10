@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { PatchError } from "./core/errors.js";
+import { createWorkerRequestId } from "./core/ids.js";
 import { WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
 import { isPatchResponse, WORKER_MESSAGE_TYPE } from "./worker/protocol.js";
 
 let worker = null;
 const pendingJobs = new Map();
-
-function createRequestId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
 
 function rejectAll(error) {
   for (const job of pendingJobs.values()) {
@@ -72,7 +68,7 @@ function getWorker() {
 
 export function patchRomInWorker(payload, options = {}) {
   return new Promise((resolve, reject) => {
-    const requestId = options.requestId || createRequestId();
+    const requestId = options.requestId || createWorkerRequestId();
     if (pendingJobs.has(requestId)) {
       reject(new PatchError("Duplicate worker request ID.", {
         code: "WORKER_DUPLICATE_REQUEST_ID",

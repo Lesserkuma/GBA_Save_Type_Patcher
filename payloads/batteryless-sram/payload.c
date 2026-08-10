@@ -41,33 +41,19 @@ static inline void sram_bank_select(unsigned bank_no)
 }
 
 #if SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_GBATA
-#define SRAM_BANK_SELECT_THUMB_ASM R"(
-    ldr r2, =0x09000000
+#define SRAM_BANK_SELECT_THUMB_RAM_ASM R"(
     mov r1, # 0x80
     lsl r1, # 8
     strh r1, [r2]
     lsl r0, # 11
     strh r0, [r2]
 )"
-#define SRAM_BANK_SELECT_ARM_ASM R"(
-    ldr r2, =0x09000000
-    mov r1, # 0x8000
-    strh r1, [r2]
-    lsl r0, r4, # 11
-    strh r0, [r2]
-)"
 #else
-#define SRAM_BANK_SELECT_THUMB_ASM R"(
-    ldr r2, =0x09000000
+#define SRAM_BANK_SELECT_THUMB_RAM_ASM R"(
     strb r0, [r2]
+    # Match the GBATA tail size so both payload variants retain identical
+    # configuration and entry-point offsets.
     nop
-    nop
-    nop
-    nop
-)"
-#define SRAM_BANK_SELECT_ARM_ASM R"(
-    ldr r2, =0x09000000
-    strb r4, [r2]
     nop
     nop
     nop
@@ -143,19 +129,64 @@ flush_sram_manual_entry_ref:
 sram_bank_select_payload_entry:
     push {r0, r1, r2, r3, r4}
     push {lr}
-    ldr r0, [sp, # 4]
-)" SRAM_BANK_SELECT_THUMB_ASM R"(
+
+    # The mapper register lives in Game Pak ROM space. Some repro carts do
+    # not complete a bank change reliably while the following instructions
+    # are still fetched from ROM. Copy the position-independent selector to
+    # a private 32-byte stack slot and execute the register write from RAM.
+    # The saved input r0 is 32 bytes of code plus the saved lr above sp.
+    sub sp, # 32
+    adr r1, sram_bank_select_tail_start
+    mov r2, sp
+    mov r3, # sram_bank_select_tail_end - sram_bank_select_tail_start
+sram_bank_select_copy_loop:
+    ldrb r4, [r1]
+    strb r4, [r2]
+    add r1, # 1
+    add r2, # 1
+    sub r3, # 1
+    bne sram_bank_select_copy_loop
+
+    ldr r0, [sp, # 36]
+    mov r3, sp
+    add r3, # 1
+    bl sram_bank_select_bx_r3
+
+    add sp, # 32
     pop {r0}
     mov lr, r0
     pop {r0, r1, r2, r3, r4}
     bx lr
+
+sram_bank_select_bx_r3:
+    bx r3
+
+.balign 4
+sram_bank_select_tail_start:
+    ldr r2, sram_bank_select_tail_address
+)" SRAM_BANK_SELECT_THUMB_RAM_ASM R"(
+    # Keep the post-write instruction stream in RAM long enough for the
+    # mapper state to settle before returning to Game Pak ROM.
+    nop
+    nop
+    nop
+    nop
+    bx lr
+.balign 4
+sram_bank_select_tail_address:
+    .word 0x09000000
+sram_bank_select_tail_end:
 
 .ltorg
 
 .arm
 sram_bank_select_arm_r4:
     stmfd sp!, {r0, r1, r2, r3, lr}
-)" SRAM_BANK_SELECT_ARM_ASM R"(
+    mov r0, r4
+    adr r3, sram_bank_select_payload_entry
+    add r3, r3, # 1
+    mov lr, pc
+    bx r3
     ldmfd sp!, {r0, r1, r2, r3, lr}
     bx lr
 
@@ -1074,12 +1105,20 @@ int identify_flash_1()
 {
     unsigned rom_data, data;
     // stop_dma_interrupts();
+
+    /* The preceding game write may leave either SRAM mapper bank selected.
+     * Normalize it while this routine is already executing from RAM. */
+    sram_bank_select(0);
+
+    /* Intel status errors are sticky until Clear Status or hardware reset. */
+    _FLASH_WRITE(0, 0x50);
+    _FLASH_WRITE(0, 0xFF);
     rom_data = *(unsigned *)AGB_ROM;
 
     // Type 1 or 4
-    _FLASH_WRITE(0, 0xFF);
     _FLASH_WRITE(0, 0x90);
     data = *(unsigned *)AGB_ROM;
+    _FLASH_WRITE(0, 0x50);
     _FLASH_WRITE(0, 0xFF);
     if (rom_data != data) {
         // Check if the chip is responding to this command,
@@ -1087,6 +1126,7 @@ int identify_flash_1()
         _FLASH_WRITE(0x59, 0x42);
         data = *(unsigned char *)(AGB_ROM + 0xB2);
         _FLASH_WRITE(0x59, 0x96);
+        _FLASH_WRITE(0, 0x50);
         _FLASH_WRITE(0, 0xFF);
         if (data != 0x96) {
             // resume_interrupts();
@@ -1096,6 +1136,7 @@ int identify_flash_1()
 
             return 0;
         }
+
         // resume_interrupts();
         return 1;
     }
@@ -1106,24 +1147,31 @@ asm("identify_flash_1_end:");
 int erase_flash_1(unsigned sa, unsigned save_size)
 {
     volatile unsigned timeout;
+    unsigned status;
 
     // Erase at each possible 64 KiB boundary within a 128 KiB save area.
     for (unsigned i = 0; i < save_size && i < 0x20000; i += AGB_SRAM_SIZE) {
         unsigned erase_addr = sa + i;
 
+        _FLASH_WRITE(erase_addr, 0x50);
         _FLASH_WRITE(erase_addr, 0xFF);
         _FLASH_WRITE(erase_addr, 0x60);
         _FLASH_WRITE(erase_addr, 0xD0);
         _FLASH_WRITE(erase_addr, 0x20);
         _FLASH_WRITE(erase_addr, 0xD0);
+        _FLASH_WRITE(erase_addr, 0x70);
         for (timeout = 0x1000000; timeout; --timeout) {
             __asm("nop");
-            if (*(((unsigned short *)AGB_ROM)+(erase_addr/2)) == 0x80) {
+            status = *(((volatile unsigned short *)AGB_ROM)+(erase_addr/2));
+            if (status & 0x80) {
                 break;
             }
         }
+        _FLASH_WRITE(erase_addr, 0x50);
         _FLASH_WRITE(erase_addr, 0xFF);
-        if (timeout == 0)
+        /* Preserve the old all-clear requirement, but do not time out on an
+         * already-ready error status. This also catches swapped low bits. */
+        if (timeout == 0 || status != 0x80)
             return 0;
     }
 
@@ -1134,29 +1182,44 @@ asm("erase_flash_1_end:");
 int program_flash_1(unsigned sa, unsigned save_size)
 {
     volatile unsigned timeout;
+    unsigned status;
+    unsigned address = sa;
+    int result = 1;
 
     // Write data
     sram_bank_select(0);
+    _FLASH_WRITE(sa, 0x50);
+    _FLASH_WRITE(sa, 0xFF);
     for (unsigned i=0; i<save_size; i+=2) {
-        if (i == AGB_SRAM_SIZE)
+        address = sa + i;
+        if (i == AGB_SRAM_SIZE) {
+            /* Do not switch the SRAM mapper while the flash is in status
+             * mode. Re-normalize the command state after the switch too. */
+            _FLASH_WRITE(address - 2, 0x50);
+            _FLASH_WRITE(address - 2, 0xFF);
             sram_bank_select(1);
-        _FLASH_WRITE(sa+i, 0x40);
-        _FLASH_WRITE(sa+i, (*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))));
+            _FLASH_WRITE(address, 0x50);
+            _FLASH_WRITE(address, 0xFF);
+        }
+        _FLASH_WRITE(address, 0x40);
+        _FLASH_WRITE(address, (*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))));
+        _FLASH_WRITE(address, 0x70);
         for (timeout = 0x4000; timeout; --timeout) {
             __asm("nop");
-            if (*(((unsigned short *)AGB_ROM)+(sa/2)) == 0x80) {
+            status = *(((volatile unsigned short *)AGB_ROM)+(address/2));
+            if (status & 0x80) {
                 break;
             }
         }
-        if (timeout == 0) {
-            _FLASH_WRITE(sa, 0xFF);
-            sram_bank_select(0);
-            return 0;
+        if (timeout == 0 || status != 0x80) {
+            result = 0;
+            break;
         }
     }
-    _FLASH_WRITE(sa, 0xFF);
+    _FLASH_WRITE(address, 0x50);
+    _FLASH_WRITE(address, 0xFF);
     sram_bank_select(0);
-    return 1;
+    return result;
 }
 asm("program_flash_1_end:");
 
@@ -1477,9 +1540,19 @@ flush_sram_finish_wait:
     bxeq lr
     bx r9
 
-# The following footer must come last.
+# The ROM boot vector targets this discovery stub. Keep it immediately before
+# the marker so external tools can find the Batteryless payload by scanning at
+# most 0x2000 bytes forward from the decoded boot-vector destination.
 .ltorg
 .balign 4
+.global batteryless_bootvector
+.type batteryless_bootvector, %function
+batteryless_bootvector:
+    b patched_entrypoint
+
+.global batteryless_marker
+.type batteryless_marker, %object
+batteryless_marker:
 .ascii "thx Maniac"
 .byte 0
 .byte 0

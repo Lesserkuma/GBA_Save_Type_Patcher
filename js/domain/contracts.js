@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import {
+  customFlashSaveChipModelFromType,
+  customFlashSaveChipTypeFromModel,
   PATCH_MODES,
   PATCH_OPERATION_KIND,
   PATCH_STATUS,
@@ -11,7 +13,7 @@ import {
 /** @typedef {{id: string, name: string, baseName: string, size: number, statusCode: string}} RomEntry */
 /** @typedef {{schemaVersion: 1, finalLength: number, metadata: object}} PatchPlanSummary */
 /** @typedef {{id: string, kind: string, component: string, offset: number, byteLength: number, labelKey: string}} PatchOperation */
-/** @typedef {{patchMode: string, batteryless: object, flash512k: object, customFlash: object, sram: object, waitstate: object, rtc: object}} PatchOptions */
+/** @typedef {{patchMode: string, batteryless: object, customFlash: object, sram: object, waitstate: object, rtc: object}} PatchOptions */
 /**
  * @typedef {{statusCode: string, operations: PatchOperation[], warnings: string[],
  * inputSha256: string, outputSha256: string, patchPlan: PatchPlanSummary}} PatchResult
@@ -27,9 +29,8 @@ const RESULT_STATUS_VALUES = new Set([
   PATCH_STATUS.FAILED,
 ]);
 const HOTKEY_VALUES = new Set(["a", "b", "select", "start", "right", "left", "up", "down", "r", "l"]);
-const PATCH_OPTION_KEYS = new Set(["patchMode", "batteryless", "flash512k", "customFlash", "sram", "waitstate", "rtc"]);
+const PATCH_OPTION_KEYS = new Set(["patchMode", "batteryless", "customFlash", "sram", "waitstate", "rtc"]);
 const BATTERYLESS_OPTION_KEYS = new Set(["mode", "countdownFrames", "indicator", "lastBlock", "hotkey", "hotkeyMask"]);
-const FLASH512K_OPTION_KEYS = new Set(["countdownFrames", "indicator"]);
 const CUSTOM_FLASH_OPTION_KEYS = new Set(["saveChipModel", "saveChipType"]);
 const SRAM_OPTION_KEYS = new Set(["flash1mBankSwitchStyle"]);
 const WAITSTATE_OPTION_KEYS = new Set(["enabled", "mode"]);
@@ -71,7 +72,6 @@ export function isPatchOptions(options) {
       || !hasOnlyKeys(options, PATCH_OPTION_KEYS)
       || !PATCH_MODE_VALUES.has(options.patchMode)
       || !isRecord(options.batteryless)
-      || !isRecord(options.flash512k)
       || !isRecord(options.customFlash)
       || !isRecord(options.sram)
       || !isRecord(options.waitstate)
@@ -79,7 +79,6 @@ export function isPatchOptions(options) {
 
   const batteryless = options.batteryless;
   if (!hasOnlyKeys(batteryless, BATTERYLESS_OPTION_KEYS)
-      || !hasOnlyKeys(options.flash512k, FLASH512K_OPTION_KEYS)
       || !hasOnlyKeys(options.customFlash, CUSTOM_FLASH_OPTION_KEYS)
       || !hasOnlyKeys(options.sram, SRAM_OPTION_KEYS)
       || !hasOnlyKeys(options.waitstate, WAITSTATE_OPTION_KEYS)
@@ -92,9 +91,8 @@ export function isPatchOptions(options) {
       || batteryless.hotkey.some((key) => !HOTKEY_VALUES.has(key))
       || (batteryless.hotkeyMask !== undefined && !isIntegerBetween(batteryless.hotkeyMask, 0, 0x03ff))) return false;
 
-  if (!isIntegerBetween(options.flash512k.countdownFrames, 1, 255)
-      || !["save", "countdown", "off"].includes(options.flash512k.indicator)
-      || !["sst25vf064cFamily", "sst39vf6401b"].includes(options.customFlash.saveChipModel)
+  const customFlashType = customFlashSaveChipTypeFromModel(options.customFlash.saveChipModel);
+  if (customFlashType === null
       || !["modern", "gbata"].includes(options.sram.flash1mBankSwitchStyle)
       || typeof options.waitstate.enabled !== "boolean"
       || options.waitstate.mode !== "supercard_exact"
@@ -103,7 +101,7 @@ export function isPatchOptions(options) {
       || !Object.values(RTC_TICK_MODES).includes(options.rtc.tickMode)) return false;
 
   if (options.patchMode === PATCH_MODES.CUSTOM_FLASH
-      && ![1, 2].includes(options.customFlash.saveChipType)) return false;
+      && customFlashSaveChipModelFromType(options.customFlash.saveChipType) === null) return false;
   return true;
 }
 

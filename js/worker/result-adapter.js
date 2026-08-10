@@ -59,7 +59,7 @@ export function normalizePatchResult(result) {
     saveEmbedded: canonical.saveEmbedded ?? false,
     targetSaveSizeBytes: canonical.targetSaveSizeBytes ?? null,
     bankSwitchMode: canonical.bankSwitchMode ?? "none",
-    flashJournal: canonical.flashJournal ?? null,
+    saveRuntime: canonical.saveRuntime ?? null,
     irqHandler: canonical.irqHandler ?? null,
   };
 }

@@ -60,10 +60,8 @@ implementation. In particular:
   Thumb/ARM branch thunks, EEPROM V111 post-hook, and host-side payload
   configuration model. Several signatures were lengthened locally to reduce
   false positives.
-- `payloads/flash-39vf512/rom_flash.c` adapts the upstream ROM-FLASH type 1-3
-  identify/erase/program algorithms for independently copied RAM routines.
-- `payloads/flash-39vf512/payload.c` uses the same general ROM-FLASH execution
-  and hardware-pause foundation as part of the journal runtime.
+- `payloads/flash-direct/payload.c` adapts the Save-FLASH byte-program and
+  sector-erase command foundation for the Direct SRAM/EEPROM runtime.
 - `payloads/fake-rtc/rtc_persist.c` adapts the upstream ROM-FLASH type 1-4
   identify/erase/program structure and copy-to-RAM execution model for the
   Fake RTC persistence record.
@@ -81,19 +79,18 @@ verification/timeouts, and generated payload manifests.
 Copyright (c) 2023 Metroid Maniac. Licensed under the MIT License reproduced
 below.
 
-The local FLASH journal implementation uses the following upstream elements:
+The local Direct Save-FLASH implementation uses the following upstream elements:
 
 - `js/patchers/flash512k-common.js` carries the upstream Thumb and ARM branch
   thunks and the SRAM/EEPROM write, read, verify, and EEPROM-identification
   signatures from `patcher.c`. The local code requires complete hook sets and
   applies them transactionally.
-- `payloads/flash-39vf512/payload.c` retains the upstream public adapter roles
-  for SRAM and EEPROM write/read/verify access and the foundation of saving
-  those logical layouts on 512-Kbit FLASH.
-- `js/patchers/flash512k.js`, `payloads/flash-39vf512/payload.c`, and generated
-  `js/patchers/flash512k-data.js` replace the original proof-of-concept storage
-  flow with a bounded journal, delayed flush, recovery metadata, verification,
-  timeout handling, and a versioned payload ABI.
+- `payloads/flash-direct/payload.c` retains the upstream public SRAM/EEPROM
+  adapter roles and Save-FLASH command foundation. The local implementation
+  adds canonical SRAM scratch commits, EEPROM delta generations, verification,
+  timeout handling, and a versioned Direct ABI.
+- `js/patchers/flash512k.js` and generated `js/patchers/flash-direct-data.js`
+  install that runtime transactionally without a ROM-journal reservation.
 
 The local runtime is a modified implementation built on the upstream hook set,
 adapter contract, and 512-Kbit FLASH-saving design.
@@ -119,16 +116,17 @@ upstream `Custom_1M_FLASH_Patcher.py`. It retains:
   intentionally omitted because the local caller restores bank zero.
 
 The port adds strict bounds checks, atomic operations, support for partial
-failure reporting, and a journal fallback for SRAM/EEPROM sources. The custom
+failure reporting, and a Direct conversion for SRAM/EEPROM sources. The custom
 command protocol is also used by:
 
-- `payloads/flash-39vf512/payload.c`
-- `payloads/flash-39vf512/rom_flash.c`
-- `payloads/custom-flash/compile_payload.py`
-- generated `js/patchers/custom-journal-data.js`
+- `payloads/flash-direct/payload.c`
+- `payloads/flash-direct/compile_payload.py`
+- generated `js/patchers/flash-direct-data.js`
+- generated `js/patchers/flash-direct-snapshot-data.js`
+- generated `js/patchers/flash-direct-transaction-data.js`
 
-These files are covered by GPLv3 in combination with their other applicable
-licenses as indicated by their SPDX identifiers.
+These files are covered by GPL-3.0-only in combination with their other
+applicable licenses as indicated by their SPDX identifiers.
 
 ### SuperFW by David Guillen Fandos
 
@@ -163,8 +161,8 @@ text is provided in this repository's `LICENSE` file.
 - `payloads/fake-rtc/rtc_state.S` follows SuperFW's use of otherwise unused
   banked CPU-mode registers for volatile RTC state.
 - `payloads/fake-rtc/rtc_persist.c` adds the local checksummed cold-boot state
-  format and coordinates its final-block record with Batteryless and Journal
-  save reservations. Its flash command routines are separately attributed to
+  format and coordinates its final-block record with Batteryless persistence;
+  Direct saves use a separate standalone block. Its flash command routines are separately attributed to
   gba-auto-batteryless-patcher above.
 - The complete Fake RTC on-screen menu is an original work of GBA Save Type
   Patcher and is not based on SuperFW. This includes its user-interface design,

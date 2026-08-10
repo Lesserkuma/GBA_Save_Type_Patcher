@@ -2,6 +2,7 @@
 
 import { sameBytes } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { PATCH_OPERATION_KIND } from "../domain/constants.js";
 import { isPatchOperation } from "../domain/contracts.js";
 
 const DRAFT_OPERATION_KEYS = new Set([
@@ -85,6 +86,29 @@ export function stagePatchOperation(bytes, operations, operation) {
   return stagedOperation;
 }
 
+/** Builds and records a named byte replacement with canonical operation fields. */
+export function stageNamedPatchWrite(bytes, operations, details) {
+  const replacement = details?.replacement;
+  if (!(replacement instanceof Uint8Array)) {
+    throw new TypeError("Named patch write requires Uint8Array replacement bytes.");
+  }
+  return stagePatchOperation(bytes, operations, {
+    id: `${details.idPrefix}-${operations.length}`,
+    kind: details.kind,
+    component: details.component,
+    offset: details.offset,
+    byteLength: replacement.length,
+    expectedBefore: bytes.slice(details.offset, details.offset + replacement.length),
+    replacement,
+    labelKey: details.labelKey,
+    metadata: {
+      name: details.name,
+      ...(details.metadata || {}),
+    },
+    ...(details.allowOverlap === true ? { allowOverlap: true } : {}),
+  });
+}
+
 /** Records a ROM extension before replacing the caller's private planning copy. */
 export function stageRomExpansion(rom, operations, operation) {
   if (!(rom?.bytes instanceof Uint8Array) || !Array.isArray(operations)) {
@@ -111,4 +135,32 @@ export function stageRomExpansion(rom, operations, operation) {
   operations.push(operation);
   rom.bytes = expanded;
   return operation;
+}
+
+/** Records a contiguous 0xFF-filled ROM extension with canonical metadata. */
+export function stageErasedRomExpansion(rom, operations, details) {
+  if (!(rom?.bytes instanceof Uint8Array) || !Array.isArray(operations)) {
+    throw new TypeError("ROM expansion draft requires ROM bytes and an operation array.");
+  }
+  const oldLength = rom.bytes.length;
+  const newLength = details?.newLength;
+  if (!Number.isSafeInteger(newLength) || newLength <= oldLength) {
+    throw draftError("ROM expansion target length is invalid.", "PATCH_DRAFT_EXPANSION_LENGTH_INVALID", {
+      oldLength,
+      newLength,
+    });
+  }
+  const byteLength = newLength - oldLength;
+  const erasedBytes = new Uint8Array(byteLength).fill(0xff);
+  return stageRomExpansion(rom, operations, {
+    id: details.id,
+    kind: PATCH_OPERATION_KIND.ROM_EXPAND,
+    component: details.component,
+    offset: oldLength,
+    byteLength,
+    expectedBefore: erasedBytes,
+    replacement: new Uint8Array(erasedBytes),
+    labelKey: details.labelKey || "operation.romExpand",
+    metadata: details.metadata || {},
+  });
 }

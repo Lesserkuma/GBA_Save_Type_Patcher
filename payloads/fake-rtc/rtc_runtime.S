@@ -20,6 +20,12 @@
     .equ RTC_TICK_MODE_VBLANK, 0
     .equ RTC_TICK_MODE_READ, 1
     .equ RTC_MAX_TIMESTAMP, 0xBC19137F // 2099-12-31 23:59:59
+    .equ GBA_REG_IE, 0x04000200
+    .equ GBA_REG_IME_OFFSET, 8
+    .equ GBA_IRQ_ORIGINAL_SLOT, 0x03007FF4
+    .equ CPSR_MODE_MASK, 0x1F
+    .equ CPSR_MODE_USER, 0x10
+    .equ CPSR_IRQ_DISABLE, 0x80
     .extern fake_rtc_menu_run
     .extern rtc_persist_load
     .extern rtc_persist_flush_initial
@@ -41,10 +47,39 @@ payload_probe:
     .arm
 1:
     mrs     r3, cpsr
-    mov     r2, #0x97          // Abort mode, IRQ disabled
+
+    // BIOS SoftReset resumes the game in User mode, while a cold boot enters
+    // System mode. User mode cannot select the banked RTC registers: an MSR
+    // below would silently leave the mode unchanged and rtc_state_write would
+    // later replace the live User SP/LR with RTC data. Read the state through a
+    // private one-shot IRQ without changing the interrupted game's CPU mode.
+    and     r2, r3, #CPSR_MODE_MASK
+    cmp     r2, #CPSR_MODE_USER
+    bne     .Lprobe_check_state
+    tst     r3, #CPSR_IRQ_DISABLE
+    bne     .Lprobe_user_fallback
+    stmdb   sp!, {lr}
+    mov     r0, #0                    // Snapshot only; probe must not tick.
+    ldr     r3, =rtc_user_snapshot
+    mov     lr, pc
+    bx      r3
+    mov     r2, r0                    // Returned ABORT[LR] sentinel.
+    ldmia   sp!, {lr}
+    b       .Lprobe_compare_state
+
+.Lprobe_check_state:
+    mov     r2, #0x97                 // Abort mode, IRQ disabled
     msr     cpsr_c, r2
     mov     r2, lr
     msr     cpsr_c, r3
+    b       .Lprobe_compare_state
+
+.Lprobe_user_fallback:
+    // A caller that masks IRQs in CPSR cannot use the synchronous bridge. Keep
+    // the call non-destructive instead of touching live User SP/LR registers.
+    ldr     r2, =RTC_STATE_MAGIC
+
+.Lprobe_compare_state:
     ldr     r3, =RTC_STATE_MAGIC
     cmp     r2, r3
     add     r3, pc, #1
@@ -70,6 +105,129 @@ payload_probe:
     bx      lr
 
     .size payload_probe, . - payload_probe
+
+// --------------------------------------------------------------------------
+// Privileged snapshot bridge for callers resumed in User mode by BIOS
+// SoftReset. The bridge temporarily lets only VBlank through and points the
+// shared handler's private original-handler slot at rtc_user_snapshot_irq.
+// That IRQ-side stub can read banked state, writes it into this function's
+// stack frame, acknowledges IF, and returns to the unchanged User context.
+// Input: r0 = 0 for a non-ticking probe, 1 for a GetTimeDate read.
+// Output: r0 = init sentinel, r1 = sanitized timestamp.
+// --------------------------------------------------------------------------
+    .section .text.rtc_user_snapshot, "ax", %progbits
+    .arm
+    .align 2
+    .type rtc_user_snapshot, %function
+rtc_user_snapshot:
+    stmdb   sp!, {r4-r7, lr}
+    sub     sp, sp, #16
+    mov     r4, sp                    // Shared IRQ restores this pointer.
+    str     r0, [r4, #12]
+    mov     r3, #0
+    str     r3, [r4, #8]             // Completion flag.
+
+    ldr     r6, =GBA_REG_IE
+    ldrh    r7, [r6]
+    ldrh    r12, [r6, #GBA_REG_IME_OFFSET]
+    strh    r3, [r6, #GBA_REG_IME_OFFSET]
+
+    ldr     r2, =GBA_IRQ_ORIGINAL_SLOT
+    ldr     r5, [r2]
+    ldr     r3, =rtc_user_snapshot_irq
+    str     r3, [r2]
+
+    mov     r3, #1
+    strh    r3, [r6]                 // Allow only VBlank during the request.
+    strh    r3, [r6, #GBA_REG_IME_OFFSET]
+1:
+    ldr     r3, [r4, #8]
+    cmp     r3, #0
+    beq     1b
+
+    mov     r3, #0
+    strh    r3, [r6, #GBA_REG_IME_OFFSET]
+    ldr     r2, =GBA_IRQ_ORIGINAL_SLOT
+    str     r5, [r2]
+    strh    r7, [r6]
+    strh    r12, [r6, #GBA_REG_IME_OFFSET]
+
+    ldr     r0, [r4]
+    ldr     r1, [r4, #4]
+    add     sp, sp, #16
+    ldmia   sp!, {r4-r7, lr}
+    bx      lr
+    .size rtc_user_snapshot, . - rtc_user_snapshot
+
+    .section .text.rtc_user_snapshot_irq, "ax", %progbits
+    .arm
+    .align 2
+    .type rtc_user_snapshot_irq, %function
+rtc_user_snapshot_irq:
+    stmdb   sp!, {r4, r12, lr}
+    ldr     r0, [r4, #12]
+    ldr     r3, =rtc_snapshot_privileged
+    mov     lr, pc
+    bx      r3
+    str     r1, [r4]                 // ABORT[LR] sentinel
+    str     r0, [r4, #4]             // UNDEF[LR] timestamp
+    mov     r3, #1
+    str     r3, [r4, #8]
+    ldr     r1, =GBA_REG_IE
+    strh    r3, [r1, #2]             // REG_IF = VBlank
+    ldmia   sp!, {r4, r12, lr}
+    bx      lr
+    .size rtc_user_snapshot_irq, . - rtc_user_snapshot_irq
+
+// Read and optionally advance the banked RTC state from a privileged mode.
+// Input: r0 = 0 for snapshot only, nonzero for one legacy read tick.
+// Output: r0 = sanitized timestamp, r1 = ABORT[LR] init sentinel.
+    .section .text.rtc_snapshot_privileged, "ax", %progbits
+    .arm
+    .align 2
+    .type rtc_snapshot_privileged, %function
+rtc_snapshot_privileged:
+    mrs     r12, cpsr
+    mov     r2, #0x9B                 // Undefined mode, IRQ disabled
+    msr     cpsr_c, r2
+
+    cmp     r0, #0
+    beq     .Lprivileged_snapshot
+    ldr     r2, =rtc_tick_mode_config
+    ldr     r2, [r2]
+    cmp     r2, #RTC_TICK_MODE_READ
+    bne     .Lprivileged_snapshot
+
+    mov     r2, #0x97                 // Abort mode, IRQ disabled
+    msr     cpsr_c, r2
+    mov     r3, sp, lsr #18           // cached speed
+    mov     r1, sp, lsl #14
+    mov     r1, r1, lsr #14           // fractional phase
+    mov     r2, #0x1100
+    add     r2, r2, #0x25             // 4389 phase units per frame
+    mul     r2, r3, r2
+    add     r1, r1, r2
+    mov     r2, r1, lsr #18
+    mov     r1, r1, lsl #14
+    mov     r1, r1, lsr #14
+    orr     sp, r1, r3, lsl #18
+
+    mov     r1, #0x9B                 // Undefined mode, IRQ disabled
+    msr     cpsr_c, r1
+    add     lr, lr, r2
+
+.Lprivileged_snapshot:
+    ldr     r2, =RTC_MAX_TIMESTAMP
+    cmp     lr, r2
+    movhi   lr, #0
+    mov     r0, lr
+
+    mov     r2, #0x97                 // Abort mode, IRQ disabled
+    msr     cpsr_c, r2
+    mov     r1, lr                    // Read init sentinel as second result.
+    msr     cpsr_c, r12
+    bx      lr
+    .size rtc_snapshot_privileged, . - rtc_snapshot_privileged
 
 // --------------------------------------------------------------------------
 // Reset: keep the menu-selected RTC value. Some games call reset during init;
@@ -130,45 +288,34 @@ payload_gettimedate:
     .arm
 1:
     mrs     r12, cpsr
-    mov     r2, #0x9B          // Undefined mode, IRQ disabled
-    msr     cpsr_c, r2
+    and     r2, r12, #CPSR_MODE_MASK
+    cmp     r2, #CPSR_MODE_USER
+    bne     .Lgettime_privileged
+    tst     r12, #CPSR_IRQ_DISABLE
+    bne     .Lgettime_zero
 
-    // Continuous mode is read-only here and advances exclusively from the
-    // shared VBlank handler. Legacy treats each read as one nominal frame and
-    // uses the same fixed-point speed distribution without touching VBlank.
-    ldr     r2, rtc_tick_mode_config
-    cmp     r2, #RTC_TICK_MODE_READ
-    bne     rtc_read_snapshot
+    mov     r0, #1                    // GetTimeDate advances legacy mode.
+    ldr     r3, =rtc_user_snapshot
+    mov     lr, pc
+    bx      r3
+    ldr     r2, =RTC_STATE_MAGIC
+    cmp     r0, r2
+    movne   r1, #0
+    mov     r5, r1
+    b       .Lgettime_to_thumb
 
-    mov     r2, #0x97          // Abort mode, IRQ disabled
-    msr     cpsr_c, r2
-    mov     r3, sp, lsr #18     // cached speed
-    mov     r1, sp, lsl #14
-    mov     r1, r1, lsr #14     // fractional phase
-    mov     r2, #0x1100
-    add     r2, r2, #0x25       // 0x1100 + 0x25 = 4389
-    mul     r2, r3, r2
-    add     r1, r1, r2
-    mov     r2, r1, lsr #18     // whole timestamp seconds this read accrued
-    mov     r1, r1, lsl #14
-    mov     r1, r1, lsr #14     // remaining fractional phase
-    orr     sp, r1, r3, lsl #18
+.Lgettime_privileged:
+    mov     r0, #1
+    ldr     r3, =rtc_snapshot_privileged
+    mov     lr, pc
+    bx      r3
+    mov     r5, r0
+    b       .Lgettime_to_thumb
 
-    mov     r1, #0x9B          // Undefined mode, IRQ disabled
-    msr     cpsr_c, r1
-    add     lr, lr, r2
+.Lgettime_zero:
+    mov     r5, #0
 
-rtc_read_snapshot:
-    // Wrap legacy read ticks after 2099-12-31 23:59:59.
-    // If the tick goes beyond the valid RTC range, the next visible value is
-    // exactly 2000-01-01 00:00:00, not a modulo carry into the new epoch.
-    ldr     r2, =RTC_MAX_TIMESTAMP
-    cmp     lr, r2
-    movhi   lr, #0             // Also sanitizes any invalid volatile state.
-
-    mov     r5, lr
-    msr     cpsr_c, r12
-
+.Lgettime_to_thumb:
     add     r2, pc, #1
     bx      r2
 

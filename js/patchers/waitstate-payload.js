@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { asciiBytes, readU32, writeU32 } from "../core/binary.js";
+import { decodeArmBranchTargetAt, makeArmBranchInstruction } from "../core/arm.js";
+import { asciiBytes, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { isBlankRegion } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
-import { isFreeRegion, stageWaitstateWrite } from "./waitstate-common.js";
+import { stageWaitstateWrite } from "./waitstate-common.js";
 
 export const WAITCNT_ENTRYPOINT_MARKER = "lk_waitcnt_bootstrap";
 export const WAITCNT_SWI_RESTORE_MARKER = "lk_swi_waitcnt_restore";
@@ -15,18 +17,15 @@ export function decodeEntrypointAddress(bytes) {
   if (bytes.length < 4 || bytes[3] !== 0xea) {
     throw new PatchError("Unexpected entrypoint instruction");
   }
-  const branchWord = readU32(bytes, 0);
-  let branchOffset = branchWord & 0x00ffffff;
-  if (branchOffset & 0x00800000) branchOffset -= 0x01000000;
-  return C.GBA_ROM_BASE + 8 + (branchOffset << 2);
+  return decodeArmBranchTargetAt(bytes, 0, C.GBA_ROM_BASE);
 }
 
 export function encodeArmBranch(sourceAddress, targetAddress) {
-  const branchOffset = (targetAddress - sourceAddress - 8) >> 2;
-  if (branchOffset < -0x800000 || branchOffset > 0x7fffff) {
+  const instruction = makeArmBranchInstruction(sourceAddress, targetAddress);
+  if (instruction === null) {
     throw new PatchError("Entrypoint target is outside ARM branch range");
   }
-  return (0xea000000 | (branchOffset & 0x00ffffff)) >>> 0;
+  return instruction;
 }
 
 export function makeWaitstatePayload(waitstateValue, nextEntrypoint) {
@@ -61,7 +60,7 @@ export function writeRomMarker(
   if (markerEnd > paddingEnd || markerEnd > bytes.length) {
     throw new PatchError(`${label}: reserved payload span does not include the ROM marker`);
   }
-  if (!isFreeRegion(bytes, markerOffset, marker.length)) {
+  if (!isBlankRegion(bytes, markerOffset, marker.length)) {
     throw new PatchError(`${label}: ROM marker region is not free`);
   }
   stageWaitstateWrite(bytes, operations, label, markerOffset, marker, {

@@ -49,20 +49,14 @@
             <div class="inline-group stacked-mobile"><span>1M Bank Switch:</span><label><input type="radio" name="flash1mBankSwitchStyle" value="modern" checked> Repro Cart Method</label><label><input type="radio" name="flash1mBankSwitchStyle" value="gbata"> GBATA Method</label></div>
           </fieldset>
 
-          <fieldset id="batteryless-options" class="sub-options" hidden><legend>Off-spec SRAM options</legend>
+          <fieldset id="batteryless-options" class="sub-options" hidden><legend>Batteryless SRAM options</legend>
             <div class="inline-group"><span>Auto Mode:</span><label><input type="radio" name="batterylessMode" value="auto" checked> Enabled</label><label><input type="radio" name="batterylessMode" value="keypad"> Disabled (less invasive)</label></div>
             <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="indicator" value="save" checked> While saving</label><label><input id="batteryless-countdown-indicator" type="radio" name="indicator" value="countdown"> While delaying</label><label><input type="radio" name="indicator" value="off"> Off</label></div>
             <label id="countdown-field" class="field-label">Flush Delay: <input type="number" name="countdownFrames" min="0" max="255" step="1" value="100" inputmode="numeric"> VBlank frames</label>
             <p id="batteryless-auto-flush-copy" class="small-copy">Pending save data is flushed automatically after the configured delay.</p>
           </fieldset>
 
-          <fieldset id="flash512k-options" class="sub-options" hidden><legend>EEPROM and SRAM Journal Options</legend>
-            <label class="field-label">Flush Delay: <input type="number" name="flash512kCountdownFrames" min="1" max="255" step="1" value="100" inputmode="numeric"> VBlank frames</label>
-            <div class="inline-group stacked-mobile"><span>Save Indicator:</span><label><input type="radio" name="flash512kIndicator" value="save" checked> While saving</label><label><input type="radio" name="flash512kIndicator" value="countdown"> While delaying</label><label><input type="radio" name="flash512kIndicator" value="off"> Off</label></div>
-            <p class="small-copy">Pending SRAM/EEPROM journal data is flushed automatically after the configured delay.</p>
-          </fieldset>
-
-          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Non-standard Flash options</legend><div class="choice-stack"><span>Flash chip model:</span><label><input type="radio" name="saveChipModel" value="sst25vf064cFamily" checked> SST25VF064C, SST49LF080A, 0xFFFF</label><label><input type="radio" name="saveChipModel" value="sst39vf6401b"> SST39VF6401B</label></div></fieldset>
+          <fieldset id="custom-flash-options" class="sub-options" hidden><legend>Non-standard Flash options</legend><div class="choice-stack"><span>Flash chip model:</span><label><input type="radio" name="saveChipModel" value="customType1" checked> Type 1 (SST25VF064C, SST49LF080A, 0xFFFF)</label><label><input type="radio" name="saveChipModel" value="customType2"> Type 2 (SST39VF6401B)</label></div></fieldset>
         </section>
 
         <div class="settings-side-column">

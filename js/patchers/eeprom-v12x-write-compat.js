@@ -2,178 +2,53 @@
 
 import {
   hexToBytes,
-  readU16,
   readU32,
   startsWithBytes,
   writeU16,
   writeU32,
 } from "../core/binary.js";
+import { decodeThumbBlTarget, writeThumbBl } from "../core/thumb.js";
+import {
+  GBA_IWRAM_END_ADDRESS,
+  GBA_IWRAM_START_ADDRESS,
+  GBA_ROM_BASE_ADDRESS,
+} from "../domain/gba-constants.js";
+import {
+  EEPROM_V120_RUNTIME_WRAPPER_HEX,
+  EEPROM_V120_RUNTIME_WRAPPER_OFFSETS,
+} from "./eeprom-v120-wrapper-data.js";
+import { DIRECT_EEPROM_V12X_ABI } from "./direct-abi-signatures.js";
 
-const GBA_ROM_BASE = 0x08000000;
-const GBA_IWRAM_START = 0x03000000;
-const GBA_IWRAM_END = 0x03008000;
-const GBA_REG_IF = 0x04000202;
 const WRAPPER_SIZE = 40;
 
 // The generic SRAM conversion used for EEPROM V120-V122 replaces the first
 // 40 bytes of ProgramEepromDword, but leaves the SDK timer setup/cleanup tail
 // in place. Some games rely on the setup routine's persistent IRQ state even
 // though no physical EEPROM transfer remains.
-const GENERIC_EEPROM_WRITE = hexToBytes(
-  "70b500040a1c400be021090541180731002310780870013301320139072bf8d9002070bc02bc0847",
+/* Nintendo SDK V12x ABI layouts. The generated V120/V121 wrapper writes the
+ * eight stable source bytes first, then reproduces the SDK timer tail only
+ * when every runtime pointer/register invariant is valid. */
+const GENERIC_EEPROM_WRITE = DIRECT_EEPROM_V12X_ABI.genericWrite;
+const EEPROM_V12X_TIMER_TAIL = DIRECT_EEPROM_V12X_ABI.timerTail;
+const EEPROM_V12X_SETUP_PREFIX = DIRECT_EEPROM_V12X_ABI.setupPrefix;
+const EEPROM_V12X_CLEANUP_PREFIX = DIRECT_EEPROM_V12X_ABI.cleanupPrefix;
+const EEPROM_V12X_CONFIG_PREFIX = DIRECT_EEPROM_V12X_ABI.configPrefix;
+const EEPROM_V120_LARGE_TAIL_A = DIRECT_EEPROM_V12X_ABI.largeTailA;
+const EEPROM_V120_LARGE_TAIL_B = DIRECT_EEPROM_V12X_ABI.largeTailB;
+const EEPROM_V120_LARGE_SETUP = DIRECT_EEPROM_V12X_ABI.largeSetup;
+const EEPROM_V120_LARGE_CLEANUP = DIRECT_EEPROM_V12X_ABI.largeCleanup;
+const EEPROM_V120_LARGE_TIMER_SELECTOR = DIRECT_EEPROM_V12X_ABI.largeTimerSelector;
+const EEPROM_V120_LARGE_TIMER_IRQ = DIRECT_EEPROM_V12X_ABI.largeTimerIrq;
+const EEPROM_V120_LARGE_ORIGINAL_HEAD = DIRECT_EEPROM_V12X_ABI.largeOriginalHead;
+const EEPROM_V120_LARGE_ORIGINAL_TAIL = DIRECT_EEPROM_V12X_ABI.largeOriginalTail;
+const EEPROM_V120_FLASH_RUNTIME_WRAPPER = hexToBytes(
+  EEPROM_V120_RUNTIME_WRAPPER_HEX,
 );
-const EEPROM_V124_DIRECT_ORIGINAL_WRITE = hexToBytes(
-  "f0b5acb00d1c0004010c1206170e034800688088814205d301489de000340003ff8000000f480068",
-);
-const EEPROM_V124_DIRECT_WRAPPER = hexToBytes(
-  "00b50004000c012200f004f80004000c02bc0847",
-);
-const EEPROM_V124_DIRECT_RETRY_CALLER = hexToBytes(
-  "70b50d1c0004040c002602e0701c0006060e022e0fd8201c291cfff70bff0004020c002af2d1201c291cfff7bdff0004020c002aead1101c70bc02bc0847",
-);
-const EEPROM_V124_DIRECT_GAME_CALLER = hexToBytes(
-  "f0b50f1c051c0126e5f72afd002401e0083501340f2c0adc380100190004000c291c1ff06bf900040028f1d00026e5f745fd301cf0bc02bc0847",
-);
-const EEPROM_V12X_TIMER_TAIL = hexToBytes(
-  "0e48fff7b5fe0024d021090501230c4a08881840002808d110780028f8d0088801210840002800d1064cfff7e5fe201c29b030bc02bc0847",
-);
-const EEPROM_V12X_SETUP_PREFIX = hexToBytes(
-  "f0b54f464646c0b4184a194989460988118000264a461680164b98461d686e80",
-);
-const EEPROM_V12X_CLEANUP_PREFIX = hexToBytes(
-  "0b4b002119800b4a1068018002301060018002381060084a0848007808218140",
-);
-const EEPROM_V12X_CONFIG_PREFIX = hexToBytes("0a00bdffc2000000");
-
-/* A larger V120/V121 ProgramEepromDword layout keeps the SDK timeout timer
- * around the physical EEPROM transfer.  The FLASH replacement completes too
- * quickly for games that use that timer edge to pace IRQ work, so the exact
- * layout below needs one fresh timer event before cleanup.  Cleanup still
- * precedes the slower FLASH payload so that payload cannot receive additional
- * callbacks from the SDK's temporary timeout timer. */
-const EEPROM_V120_LARGE_TAIL_A = hexToBytes(
-  "69464318843300201880023b00212a88023500201a80023b520801300006000e0f28f7d9481c0006010e0329efd900210148021c006808e0",
-);
-const EEPROM_V120_LARGE_TAIL_B = hexToBytes(
-  "1c80023b6408481c0006010e1068007a8142f5d300201880023b01201880d021090513480068007a02048620c0031218120c6846fff716ff0e48fff7bffe0024d021090501230c4a08881840002808d110780028f8d0088801210840002800d1064cfff7ddfe201c29b030bc02bc0847",
-);
-const EEPROM_V120_LARGE_SETUP = hexToBytes(
-  "30b5114a114b1988118000251d80104c1049097808228a40218811432180012119800d490d700d4a0188118002300c4b196802880a8002311960408808800239196030bc01bc0047",
-);
-const EEPROM_V120_LARGE_CLEANUP = hexToBytes(
-  "0b4908680022028002300860028002380860084b1a80084a084800780821814010888843108006480088188070470000",
-);
-const EEPROM_V120_LARGE_TIMER_SELECTOR = hexToBytes(
-  "0a1c0006010e032914d806480170064900788000054bc018086005481060002009e00000",
-);
-const EEPROM_V120_LARGE_TIMER_IRQ = hexToBytes(
-  "06490888002808d00888013808800004002802d10249012008707047",
-);
-const EEPROM_V120_LARGE_ORIGINAL_HEAD = hexToBytes(
-  "30b5a9b00d1c0004040c034800688088844205d3014859e0",
-);
-const EEPROM_V120_LARGE_ORIGINAL_TAIL = hexToBytes("0f480068007a4000");
-const EEPROM_V120_FLASH_TIMING_WRAPPER = hexToBytes(
-  // After setup, skip the synthetic timer-edge wait when the SDK timer
-  // register pointer is still null. Setup and cleanup remain paired so their
-  // IRQ bookkeeping is preserved; initialized callers retain the old wait.
-  "70b504000d00134800780826864012490e80124800f000f80e49886800280dd00d490888304209d10e4908880b490988884203d10c4908780028f1d000f000f820002900064b00f003f870bc02bc08471847c04600000000000000000000000000000000000000000000000000000000",
-);
-
-const EEPROM_V120_FLASH_TIMING_OFFSETS = Object.freeze({
-  setupCall: 0x14,
-  cleanupCall: 0x3c,
-  timerIndexAddress: 0x54,
-  ifAddress: 0x58,
-  configAddress: 0x5c,
-  payloadAddress: 0x60,
-  timerCountAddress: 0x64,
-  timeoutFlagAddress: 0x68,
-});
-
-function decodeThumbBlTarget(bytes, offset) {
-  if (offset < 0 || offset + 4 > bytes.length) return null;
-  const high = readU16(bytes, offset);
-  const low = readU16(bytes, offset + 2);
-  if ((high & 0xf800) !== 0xf000 || (low & 0xf800) !== 0xf800) return null;
-
-  let displacement = ((high & 0x07ff) << 12) | ((low & 0x07ff) << 1);
-  if (displacement & 0x00400000) displacement -= 0x00800000;
-  return offset + 4 + displacement;
-}
-
-function thumbBlCallers(bytes, targetOffset, scanLimit) {
-  const callers = [];
-  for (let offset = 0; offset + 4 <= scanLimit; offset += 2) {
-    if (decodeThumbBlTarget(bytes, offset) === targetOffset) callers.push(offset);
-  }
-  return callers;
-}
-
-/**
- * Recognize the exact EEPROM V124 wrapper/caller graph used by both retail
- * Tomb Raider: Legend ROMs. This deliberately checks game-side code in
- * addition to the common SDK routines: EEPROM V124 alone is not sufficient
- * to opt out of the private workspace path.
- */
-export function detectEepromV124DirectWriteCaller(
-  bytes,
-  writeOffset,
-  originalWritePrefix,
-  sourceSaveType,
-  scanLimit = bytes.length,
-) {
-  if (
-    sourceSaveType !== "EEPROM_V124"
-    || !Number.isSafeInteger(writeOffset)
-    || (writeOffset & 3) !== 0
-    || writeOffset < EEPROM_V124_DIRECT_WRAPPER.length
-    || !(originalWritePrefix instanceof Uint8Array)
-    || originalWritePrefix.length !== GENERIC_EEPROM_WRITE.length
-    || !Number.isSafeInteger(scanLimit)
-    || scanLimit < 0
-    || scanLimit > bytes.length
-    || writeOffset + 0x1f6 > scanLimit
-    || !startsWithBytes(bytes, writeOffset, GENERIC_EEPROM_WRITE)
-    || !startsWithBytes(originalWritePrefix, 0, EEPROM_V124_DIRECT_ORIGINAL_WRITE)
-  ) return null;
-
-  const wrapperOffset = writeOffset - EEPROM_V124_DIRECT_WRAPPER.length;
-  const retryOffset = writeOffset + 0x1b8;
-  if (
-    !startsWithBytes(bytes, wrapperOffset, EEPROM_V124_DIRECT_WRAPPER)
-    || decodeThumbBlTarget(bytes, wrapperOffset + 0x08) !== writeOffset
-    || !startsWithBytes(bytes, retryOffset, EEPROM_V124_DIRECT_RETRY_CALLER)
-    || decodeThumbBlTarget(bytes, retryOffset + 0x1a) !== wrapperOffset
-  ) return null;
-
-  const wrapperCallers = thumbBlCallers(bytes, wrapperOffset, scanLimit);
-  if (wrapperCallers.length !== 1 || wrapperCallers[0] !== retryOffset + 0x1a) return null;
-
-  const retryCallers = thumbBlCallers(bytes, retryOffset, scanLimit);
-  if (retryCallers.length !== 1) return null;
-  const gameCallerOffset = retryCallers[0] - 0x22;
-  if (
-    gameCallerOffset < 0
-    || !startsWithBytes(bytes, gameCallerOffset, EEPROM_V124_DIRECT_GAME_CALLER)
-    || decodeThumbBlTarget(bytes, gameCallerOffset + 0x22) !== retryOffset
-  ) return null;
-
-  return { wrapperOffset, retryOffset, gameCallerOffset };
-}
-
-function writeThumbBl(replacement, replacementOffset, sourceOffset, targetOffset) {
-  const delta = targetOffset - sourceOffset - 4;
-  if ((delta & 1) !== 0 || delta < -0x400000 || delta > 0x3ffffe) return false;
-  writeU16(replacement, replacementOffset, 0xf000 | ((delta >> 12) & 0x07ff));
-  writeU16(replacement, replacementOffset + 2, 0xf800 | ((delta >> 1) & 0x07ff));
-  return true;
-}
 
 function iwramAddress(address, alignment = 1) {
   return Number.isInteger(address)
-    && address >= GBA_IWRAM_START
-    && address < GBA_IWRAM_END
+    && address >= GBA_IWRAM_START_ADDRESS
+    && address < GBA_IWRAM_END_ADDRESS
     && address % alignment === 0;
 }
 
@@ -187,7 +62,7 @@ export function buildEepromV120FlashTimingHook(
   writeOffset,
   payloadTargetAddress,
   originalWritePrefix,
-  gbaRomBase = GBA_ROM_BASE,
+  gbaRomBase = GBA_ROM_BASE_ADDRESS,
 ) {
   if (
     !Number.isSafeInteger(writeOffset)
@@ -272,27 +147,17 @@ export function buildEepromV120FlashTimingHook(
   const payloadTargetOffset = (payloadTargetAddress & ~1) - gbaRomBase;
   if (payloadTargetOffset < 0 || payloadTargetOffset >= bytes.length) return null;
 
-  const replacement = EEPROM_V120_FLASH_TIMING_WRAPPER.slice();
-  const offsets = EEPROM_V120_FLASH_TIMING_OFFSETS;
-  if (!writeThumbBl(
-    replacement,
-    offsets.setupCall,
-    writeOffset + offsets.setupCall,
-    setupOffset,
-  )) return null;
-  if (!writeThumbBl(
-    replacement,
-    offsets.cleanupCall,
-    writeOffset + offsets.cleanupCall,
-    cleanupOffset,
-  )) return null;
-  writeU32(replacement, offsets.timerIndexAddress, timerIndexAddress);
-  writeU32(replacement, offsets.ifAddress, GBA_REG_IF);
-  writeU32(replacement, offsets.configAddress, configAddress);
-  writeU32(replacement, offsets.payloadAddress, payloadTargetAddress);
-  writeU32(replacement, offsets.timerCountAddress, timerCountAddress);
-  writeU32(replacement, offsets.timeoutFlagAddress, timeoutFlagAddress);
-
+  const replacement = EEPROM_V120_FLASH_RUNTIME_WRAPPER.slice();
+  writeU32(replacement, EEPROM_V120_RUNTIME_WRAPPER_OFFSETS.setupAddress,
+    (gbaRomBase + setupOffset + 1) >>> 0);
+  writeU32(replacement, EEPROM_V120_RUNTIME_WRAPPER_OFFSETS.cleanupAddress,
+    (gbaRomBase + cleanupOffset + 1) >>> 0);
+  writeU32(replacement, EEPROM_V120_RUNTIME_WRAPPER_OFFSETS.payloadAddress,
+    payloadTargetAddress);
+  writeU32(replacement, EEPROM_V120_RUNTIME_WRAPPER_OFFSETS.timerStateAddress,
+    timerIndexAddress);
+  writeU32(replacement, EEPROM_V120_RUNTIME_WRAPPER_OFFSETS.configAddress,
+    configAddress);
   return {
     replacement,
     setupOffset,
@@ -313,7 +178,7 @@ export function buildEepromV12xWriteCompatHook(
   bytes,
   writeOffset,
   payloadTargetAddress,
-  gbaRomBase = GBA_ROM_BASE,
+  gbaRomBase = GBA_ROM_BASE_ADDRESS,
 ) {
   if (
     !Number.isSafeInteger(writeOffset)

@@ -330,7 +330,7 @@ irq_call_rtc_menu:
 
 // Callback helper for Batteryless SRAM. Its flush keeps the active-low mask
 // in r8 and tail-calls here before restoring Direct Sound/DMA. Returning via
-// lr resumes the Batteryless restore path. Journal callbacks ignore r1 and
+// lr resumes the Batteryless restore path. Save callbacks ignore r1 and
 // implement the same lifecycle internally.
 irq_wait_save_callback_release:
     cmp     r8, #0

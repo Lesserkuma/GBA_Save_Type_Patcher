@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later AND MIT
 
 import {
+  cachedHexToBytes,
   findBytes,
   hexToBytes,
 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { addPrefixGuardToRanges, findTailBlankRegion } from "../core/ranges.js";
 import { applyWaitstateForPipeline, waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./waitstate.js";
 import {
   applyRtcForPipeline,
-  hasRecognizedRtcHandlerSet,
   rtcPayloadSpanForLayout,
   RTC_PAYLOAD_SIZE,
   RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
@@ -37,28 +38,13 @@ import {
   normalizeBatterylessLastBlock,
   normalizeFlash1mBankSwitchStyle,
   rangeForSpan,
+  routeBatterylessBootVector,
   resolveFlash1mBankSwitchWriteInfo,
 } from "./batteryless-sram.js";
-import {
-  findTailFreeRegion,
-  rangesWithPrefixGuard,
-  writeSramCode,
-  writeSramU32Value,
-} from "./sram-common.js";
+import { writeSramCode, writeSramU32Value } from "./sram-common.js";
 
-export { detectEepromSize, detectRomSaveMetadata, findSaveType } from "./save-type.js";
 const C = SRAM_CONSTANTS;
-const hexPatternCache = new Map();
 const firstBytePatternCache = new Map();
-
-function hexPattern(hex) {
-  let pattern = hexPatternCache.get(hex);
-  if (!pattern) {
-    pattern = hexToBytes(hex);
-    hexPatternCache.set(hex, pattern);
-  }
-  return pattern;
-}
 
 function firstBytePattern(value) {
   let pattern = firstBytePatternCache.get(value);
@@ -77,7 +63,7 @@ function firstCheckedByte(identifier) {
 
 function findMatch(bytes, identifier, start = 1) {
   if (identifier.marker) {
-    const pos = findBytes(bytes, hexPattern(identifier.marker), start);
+    const pos = findBytes(bytes, cachedHexToBytes(identifier.marker), start);
     return pos < 0 ? null : pos;
   }
 
@@ -153,7 +139,7 @@ function applyTailTrampolinePatch(data, out, patchInfo, operations, warnings, ex
 
   const allocatedRanges = [...excludedRanges];
   for (const hookOffset of hookOffsets) {
-    const injectionOffset = findTailFreeRegion(out, patchInfo.injection_size, 16, out.length, allocatedRanges);
+    const injectionOffset = findTailBlankRegion(out, patchInfo.injection_size, 16, out.length, allocatedRanges);
     if (injectionOffset === null) {
       warnings.push(`${patchInfo.name}: no free tail area for trampoline`);
       return;
@@ -403,7 +389,7 @@ function applySaveConversion(context) {
       context.patchInfo,
       context.operations,
       context.warnings,
-      rangesWithPrefixGuard(excluded, C.TAIL_TRAMPOLINE_EXCLUDED_PREFIX_GUARD),
+      addPrefixGuardToRanges(excluded, C.TAIL_TRAMPOLINE_EXCLUDED_PREFIX_GUARD),
     );
   } else if (context.patchInfo.type !== "already_sram") {
     context.warnings.push(`${context.patchInfo.name}: unknown patch type`);
@@ -639,11 +625,12 @@ function applySramIrq(context) {
       indicatorMode: context.batterylessIndicatorMode,
       hotkeyMask: context.batterylessHotkeyMask,
       startupCallbackEntry: context.batterylessResult?.initEntry || 0,
-      // Only the 128 KiB initialization is long enough to starve Direct Sound,
-      // and the affected RTC titles share a uniquely recognized source ABI.
-      // Every other ROM retains the established first-VBlank fallback.
-      allowPreMainStartupCallback: context.batterylessResult?.saveSize === 128 * 1024
-        && hasRecognizedRtcHandlerSet(context.originalData),
+      originalEntrypointOverride: context.batterylessResult?.runtimeEntry || 0,
+      // Games may probe or write save storage before their first VBlank. Let
+      // the shared IRQ planner initialize Batteryless SRAM before main when
+      // its structural CRT, stack, handler and IWRAM safety proofs all pass;
+      // unproven startup layouts retain the first-VBlank fallback.
+      allowPreMainStartupCallback: Boolean(context.batterylessResult?.initEntry),
     },
     {
       excludedRanges: irqExcludedRanges(context),
@@ -718,6 +705,12 @@ export function patchSramBytes(inputBytes, options = {}) {
   applyRtcAndBatteryless(context);
   applySramWaitstate(context);
   applySramIrq(context);
+  routeBatterylessBootVector(
+    context.rom,
+    context.operations,
+    context.batterylessResult,
+    context.waitstateResult,
+  );
   finalizeSramHeader(context);
   return completedSramResult(context);
 }

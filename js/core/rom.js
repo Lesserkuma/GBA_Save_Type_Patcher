@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { readAscii } from "./binary.js";
+import { sha256Hex } from "./hash.js";
 import { computeGbaHeaderChecksum } from "../patchers/patch-state.js";
 
 export const ROM_EXTENSIONS = new Set([".gba", ".bin", ".srl"]);
@@ -19,15 +20,7 @@ const GBA_LOGO_SHA256 = "08a0153cfd6b0ea54b938f7d209933fa849da0d56f5a34c481060c9
 async function logoMatches(bytes) {
   const logoEnd = GBA_LOGO_OFFSET + GBA_LOGO_BYTE_LENGTH;
   if (bytes.length < logoEnd) return false;
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    bytes.subarray(GBA_LOGO_OFFSET, logoEnd),
-  );
-  const actual = Array.from(
-    new Uint8Array(digest),
-    (value) => value.toString(16).padStart(2, "0"),
-  ).join("");
-  return actual === GBA_LOGO_SHA256;
+  return await sha256Hex(bytes.subarray(GBA_LOGO_OFFSET, logoEnd)) === GBA_LOGO_SHA256;
 }
 
 export function splitFileName(name) {

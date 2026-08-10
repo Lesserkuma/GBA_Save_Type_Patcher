@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { findBytes, readU16, readU32 } from "../core/binary.js";
+import { findBytes, readU16, readU32, u32ToBytes } from "../core/binary.js";
+import { overlapsAnyRange } from "../core/ranges.js";
 import { SRAM_CONSTANTS as C } from "./sram-data.js";
-import { rangesOverlap, stageWaitstateWrite, u32ToBytes } from "./waitstate-common.js";
+import { stageWaitstateWrite } from "./waitstate-common.js";
 
 const WAITCNT_VALUE_EXACT = 0x04000204;
 const ARM_LDR_BACKOFF = 1024;
@@ -52,7 +53,7 @@ export function applySuperfwPatchengineWaitcnt(inputBytes, operations, excludedR
     );
     if (
       offset % 4 === 0
-      && !rangesOverlap(offset, offset + 4, excludedRanges)
+      && !overlapsAnyRange(offset, offset + 4, excludedRanges)
       && isReferenced
     ) {
       stageWaitstateWrite(out, operations, "SuperFW WAITCNT literal", offset, u32ToBytes(0), {
@@ -86,9 +87,9 @@ export function patchWaitstateStartupLiterals(
   while (offset >= 0) {
     const valueOffset = offset + 4;
     const canPatch = offset % 4 === 0
-      && !rangesOverlap(offset, offset + 4, excludedRanges)
+      && !overlapsAnyRange(offset, offset + 4, excludedRanges)
       && valueOffset + 4 <= out.length
-      && !rangesOverlap(valueOffset, valueOffset + 4, excludedRanges)
+      && !overlapsAnyRange(valueOffset, valueOffset + 4, excludedRanges)
       && waitstateLiteralIsReferenced(out, offset, offset - 0x1000, offset);
     if (canPatch && oldValues.has(readU32(out, valueOffset) & 0xffff)) {
       stageWaitstateWrite(out, operations, "Waitstate startup WAITCNT value", valueOffset, u32ToBytes(targetValue), {

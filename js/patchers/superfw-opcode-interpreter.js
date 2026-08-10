@@ -1,23 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { PatchError } from "../core/errors.js";
-import { SRAM_CONSTANTS as C } from "./sram-data.js";
-import { makeSuperfwProgramRelocations } from "./superfw-db-parser.js";
+import { decodeArmBranchTarget, encodeArmBranchToTarget } from "../core/arm.js";
 import {
-  MAX_GBA_ROM_SIZE,
-  rangesOverlap,
-  readU32At,
-  recordAndWriteBytes,
+  tryReadU32,
   u16ToBytes,
   u32ToBytes,
-  wordsToBytes,
-  writeU16At,
-  writeU32At,
-} from "./waitstate-common.js";
+  u32WordsToBytes,
+  writeU16,
+  writeU32,
+} from "../core/binary.js";
+import { PatchError } from "../core/errors.js";
+import { overlapsAnyRange } from "../core/ranges.js";
+import {
+  decodeThumbBlTargetFromHalfwords,
+  decodeThumbUnconditionalBranchTarget,
+  encodeThumbBlToTarget,
+  encodeThumbUnconditionalBranchToTarget,
+} from "../core/thumb.js";
+import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
+import { SRAM_CONSTANTS as C } from "./sram-data.js";
+import { makeSuperfwProgramRelocations } from "./superfw-db-parser.js";
+import { stageWaitstateWriteWithinRomLimit } from "./waitstate-common.js";
 
 function mapRelocatedSuperfwTarget(targetAddress, relocations) {
   const targetOffset = targetAddress - C.GBA_ROM_BASE;
-  if (!Number.isFinite(targetOffset) || targetOffset < 0 || targetOffset >= MAX_GBA_ROM_SIZE) {
+  if (!Number.isFinite(targetOffset) || targetOffset < 0 || targetOffset >= GBA_MAX_ROM_SIZE_BYTES) {
     return null;
   }
   for (const relocation of relocations || []) {
@@ -29,55 +36,12 @@ function mapRelocatedSuperfwTarget(targetAddress, relocations) {
   return null;
 }
 
-function decodeArmBranchTarget(word, instructionAddress) {
-  if (((word >>> 25) & 0x7) !== 0x5) return null;
-  let immediate = word & 0x00ffffff;
-  if (immediate & 0x00800000) immediate -= 0x01000000;
-  return (instructionAddress + 8 + (immediate << 2)) >>> 0;
-}
-
-function encodeArmBranchToTarget(originalWord, instructionAddress, targetAddress) {
-  const delta = targetAddress - instructionAddress - 8;
-  if (delta % 4 !== 0) return null;
-  const immediate = delta >> 2;
-  if (immediate < -0x800000 || immediate > 0x7fffff) return null;
-  return ((originalWord & 0xff000000) | (immediate & 0x00ffffff)) >>> 0;
-}
-
-function decodeThumbBranchTarget(halfword, instructionAddress) {
-  if ((halfword & 0xf800) !== 0xe000) return null;
-  let immediate = halfword & 0x07ff;
-  if (immediate & 0x0400) immediate -= 0x0800;
-  return (instructionAddress + 4 + (immediate << 1)) >>> 0;
-}
-
-function encodeThumbBranchToTarget(targetAddress, instructionAddress) {
-  const delta = targetAddress - instructionAddress - 4;
-  if (delta % 2 !== 0) return null;
-  const immediate = delta >> 1;
-  if (immediate < -0x400 || immediate > 0x3ff) return null;
-  return 0xe000 | (immediate & 0x07ff);
-}
-
-function decodeThumbBlTarget(firstHalfword, secondHalfword, instructionAddress) {
-  if ((firstHalfword & 0xf800) !== 0xf000 || (secondHalfword & 0xf800) !== 0xf800) return null;
-  let high = firstHalfword & 0x07ff;
-  if (high & 0x0400) high -= 0x0800;
-  return (instructionAddress + 4 + (high << 12) + ((secondHalfword & 0x07ff) << 1)) >>> 0;
-}
-
-function encodeThumbBlToTarget(targetAddress, instructionAddress) {
-  const delta = targetAddress - instructionAddress - 4;
-  if (delta % 2 !== 0 || delta < -0x400000 || delta > 0x3ffffe) return null;
-  return [0xf000 | ((delta >> 12) & 0x07ff), 0xf800 | ((delta >> 1) & 0x07ff)];
-}
-
 function relocateAbsoluteWords(bytes, writeOffset, relocations) {
   for (let offset = 0; offset + 4 <= bytes.length; offset += 1) {
     if ((writeOffset + offset) % 4 !== 0) continue;
-    const value = readU32At(bytes, offset);
+    const value = tryReadU32(bytes, offset);
     const mapped = mapRelocatedSuperfwTarget(value & ~1, relocations);
-    if (mapped !== null) writeU32At(bytes, offset, (mapped | (value & 1)) >>> 0);
+    if (mapped !== null) writeU32(bytes, offset, (mapped | (value & 1)) >>> 0);
   }
 }
 
@@ -85,7 +49,7 @@ function relocateArmBranches(bytes, writeOffset, relocations, warnings) {
   for (let offset = 0; offset + 4 <= bytes.length; offset += 1) {
     if ((writeOffset + offset) % 4 !== 0) continue;
     const instructionAddress = C.GBA_ROM_BASE + writeOffset + offset;
-    const word = readU32At(bytes, offset);
+    const word = tryReadU32(bytes, offset);
     const target = decodeArmBranchTarget(word, instructionAddress);
     const mapped = target === null ? null : mapRelocatedSuperfwTarget(target, relocations);
     if (mapped === null) continue;
@@ -93,7 +57,7 @@ function relocateArmBranches(bytes, writeOffset, relocations, warnings) {
     if (encoded === null) {
       warnings?.push(`Waitstate: could not relocate ARM branch at 0x${(writeOffset + offset).toString(16)} to relocated SuperFW program`);
     } else {
-      writeU32At(bytes, offset, encoded);
+      writeU32(bytes, offset, encoded);
     }
   }
 }
@@ -108,24 +72,24 @@ function relocateThumbBranches(bytes, writeOffset, relocations, warnings) {
       : null;
     const blTarget = nextHalfword === null
       ? null
-      : decodeThumbBlTarget(halfword, nextHalfword, instructionAddress);
+      : decodeThumbBlTargetFromHalfwords(halfword, nextHalfword, instructionAddress);
     const mappedBl = blTarget === null ? null : mapRelocatedSuperfwTarget(blTarget, relocations);
     if (mappedBl !== null) {
       const encodedBl = encodeThumbBlToTarget(mappedBl, instructionAddress);
       if (encodedBl === null) warnings?.push(`Waitstate: could not relocate Thumb BL at 0x${(writeOffset + offset).toString(16)} to relocated SuperFW program`);
       else {
-        writeU16At(bytes, offset, encodedBl[0]);
-        writeU16At(bytes, offset + 2, encodedBl[1]);
+        writeU16(bytes, offset, encodedBl[0]);
+        writeU16(bytes, offset + 2, encodedBl[1]);
       }
       offset += 3;
       continue;
     }
-    const target = decodeThumbBranchTarget(halfword, instructionAddress);
+    const target = decodeThumbUnconditionalBranchTarget(halfword, instructionAddress);
     const mapped = target === null ? null : mapRelocatedSuperfwTarget(target, relocations);
     if (mapped === null) continue;
-    const encoded = encodeThumbBranchToTarget(mapped, instructionAddress);
+    const encoded = encodeThumbUnconditionalBranchToTarget(mapped, instructionAddress);
     if (encoded === null) warnings?.push(`Waitstate: could not relocate Thumb branch at 0x${(writeOffset + offset).toString(16)} to relocated SuperFW program`);
-    else writeU16At(bytes, offset, encoded);
+    else writeU16(bytes, offset, encoded);
   }
 }
 
@@ -156,7 +120,7 @@ function writeDbBytes(rom, operations, originalOffset, newBytes, codeName, conte
       newBytes.length,
     )
     : originalOffset;
-  if (rangesOverlap(actualOffset, actualOffset + newBytes.length, context.excludedRanges)) {
+  if (overlapsAnyRange(actualOffset, actualOffset + newBytes.length, context.excludedRanges)) {
     throw new PatchError(`SuperFW WAITCNT write overlaps an excluded range at 0x${actualOffset.toString(16)}`);
   }
   const relocated = relocateSuperfwWriteBytes(
@@ -168,7 +132,7 @@ function writeDbBytes(rom, operations, originalOffset, newBytes, codeName, conte
   const relocatedName = meta.isProgram && actualOffset !== originalOffset
     ? `${codeName}_relocated`
     : codeName;
-  return recordAndWriteBytes(rom, operations, actualOffset, relocated, relocatedName);
+  return stageWaitstateWriteWithinRomLimit(rom, operations, actualOffset, relocated, relocatedName);
 }
 
 function applyInlineBytes(entry, operationIndex, argument, offset, context) {
@@ -191,14 +155,14 @@ function applyInlineWords(entry, operationIndex, argument, offset, context) {
     { length: wordCount },
     (_, index) => (entry.ops[operationIndex + 1 + index] || 0) >>> 0,
   );
-  const writeAllowed = words.map((_, index) => offset + index < MAX_GBA_ROM_SIZE);
+  const writeAllowed = words.map((_, index) => offset + index < GBA_MAX_ROM_SIZE_BYTES);
   let appliedCount = 0;
   if (writeAllowed.every(Boolean)) {
     appliedCount = Number(writeDbBytes(
       context.rom,
       context.operations,
       offset,
-      wordsToBytes(words),
+      u32WordsToBytes(words),
       "superfw_db_wr_words",
       context,
     ));

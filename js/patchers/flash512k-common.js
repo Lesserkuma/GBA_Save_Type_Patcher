@@ -2,148 +2,52 @@
 
 import {
   findBytes,
-  hexToBytes,
+  readU16,
   readU32,
+  writeU16,
   writeU32,
 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import {
+  GBA_EWRAM_END_ADDRESS,
+  GBA_EWRAM_START_ADDRESS,
+  GBA_IWRAM_END_ADDRESS,
+  GBA_IWRAM_START_ADDRESS,
+  GBA_ROM_BASE_ADDRESS,
+  GBA_ROM_LAST_MIRROR_BASE_ADDRESS,
+} from "../domain/gba-constants.js";
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
 import { stagePatchOperation } from "../patch-engine/draft.js";
 import {
   buildEepromV120FlashTimingHook,
   buildEepromV12xWriteCompatHook,
-  detectEepromV124DirectWriteCaller,
 } from "./eeprom-v12x-write-compat.js";
+import {
+  analyzeDirectSramAccesses,
+  analyzeSramWriteVerifyWrappers,
+  verifyResultNeedsReadback,
+} from "./thumb-direct-sram-analysis.js";
+import {
+  DIRECT_EEPROM_V11X_ANCHOR,
+  DIRECT_EEPROM_V11X_LAYOUTS,
+  DIRECT_SDK_HOOKS,
+  DIRECT_SRAM_LAYOUTS,
+} from "./direct-abi-signatures.js";
 
 
-export const FLASH512K_THUMB_BRANCH_THUNK = hexToBytes("004b1847");
-export const FLASH512K_ARM_BRANCH_THUNK = hexToBytes("00309fe513ff2fe1");
+const FLASH512K_THUMB_BRANCH_THUNK = Uint8Array.of(0x00, 0x4b, 0x18, 0x47);
+const FLASH512K_ARM_BRANCH_THUNK = Uint8Array.of(
+  0x00, 0x30, 0x9f, 0xe5, 0x13, 0xff, 0x2f, 0xe1,
+);
 
-export const FLASH512K_HOOKS = {
-  sramWrite: [
-    { name: "WriteSram", marker: hexToBytes("30b5051c0c1c131c0b4a10880b490840"), thunk: "thumb" },
-    { name: "WriteSram alternate", marker: hexToBytes("80b583b06f4638607960ba6009480949"), thunk: "thumb" },
-    { name: "WriteSramFast", marker: hexToBytes("04c090e401c0c1e42cc4a0e101c0c1e4"), thunk: "arm" },
-  ],
-  sramRead: { name: "ReadSram", marker: hexToBytes("70b5a0b0041c0d1c161c084a10880849"), thunk: "thumb" },
-  sramVerify: { name: "VerifySram", marker: hexToBytes("70b5b0b0041c0d1c161c084a10880849"), thunk: "thumb" },
-  eepromWrite: { name: "ProgramEepromDword", marker: hexToBytes("70b500040a1c400be02109054118073100231078"), thunk: "thumb" },
-  eepromRead: { name: "ReadEepromDword", marker: hexToBytes("70b500040a1c400be021090541180731"), thunk: "thumb" },
-  eepromVerify: { name: "VerifyEepromDword", marker: hexToBytes("30b582b00c1c0004010c002503480068"), thunk: "thumb" },
-  eepromMeta: { name: "IdentifyEeprom", marker: hexToBytes("0004000c0022042808d1024902480860") },
-};
-
-const EEPROM_V11X_HOOK_LAYOUTS = Object.freeze({
-  EEPROM_V110: Object.freeze({
-    read: Object.freeze({
-      offset: 0x48,
-      marker: hexToBytes("b0b5aab06f467960391c0880381c01883f2903d9004897e0"),
-    }),
-    write: Object.freeze({
-      offset: 0x198,
-      marker: hexToBytes("80b5aab06f467960391c0880381c01883f2903d90048b3e0"),
-    }),
-    verify: Object.freeze({
-      offset: 0x320,
-      marker: hexToBytes("b0b587b06f467960391c0880381c183000210180381c0188"),
-    }),
-  }),
-  EEPROM_V111: Object.freeze({
-    read: Object.freeze({
-      offset: 0x48,
-      marker: hexToBytes("b0b5aab06f467960391c0880381c01883f2903d9004899e0"),
-    }),
-    write: Object.freeze({
-      offset: 0x19c,
-      marker: hexToBytes("80b5aab06f467960391c0880381c01883f2903d90048bfe0"),
-    }),
-    verify: Object.freeze({
-      offset: 0x33c,
-      marker: hexToBytes("b0b587b06f467960391c0880381c183000210180381c0188"),
-    }),
-  }),
-});
-
-const EEPROM_V11X_ANCHOR = hexToBytes("0e48396801600e48796801600d48391c");
-
-// These are original, unpatched Nintendo SDK SRAM library layouts. Direct
-// hooks avoid first rewriting the library to a generic SRAM implementation.
-const DIRECT_SRAM_HOOK_LAYOUTS = Object.freeze({
-  SRAM_F_V100: Object.freeze({
-    read: Object.freeze({
-      offset: 0,
-      marker: hexToBytes("80b583b06f4638607960ba60094809490a88094b111c1940"),
-    }),
-    write: Object.freeze({
-      offset: 0x58,
-      marker: hexToBytes("80b583b06f4638607960ba60094809490a88094b111c1940"),
-    }),
-    verify: Object.freeze({
-      offset: 0xb0,
-      marker: hexToBytes("90b583b06f4638607960ba60094809490a88094b111c1940"),
-    }),
-  }),
-  SRAM_F_V102: Object.freeze({
-    read: Object.freeze({
-      offset: 0,
-      marker: hexToBytes("30b5051c0c1c131c0b4a10880b490840032108431080013b"),
-    }),
-    write: Object.freeze({
-      offset: 0x40,
-      marker: hexToBytes("30b5051c0c1c131c0b4a10880b490840032108431080013b"),
-    }),
-    verify: Object.freeze({
-      offset: 0x80,
-      marker: hexToBytes("30b5051c0c1c131c0a4a10880a490840032108431080013b"),
-    }),
-  }),
-  SRAM_F_V103: Object.freeze({
-    read: Object.freeze({
-      offset: 0,
-      marker: hexToBytes("30b5051c0c1c131c0b4a10880b490840032108431080013b"),
-    }),
-    write: Object.freeze({
-      offset: 0x40,
-      marker: hexToBytes("30b5051c0c1c131c0b4a10880b490840032108431080013b"),
-    }),
-    verify: Object.freeze({
-      offset: 0x80,
-      marker: hexToBytes("30b5051c0c1c131c0a4a10880a490840032108431080013b"),
-    }),
-  }),
-  SRAM_F_V110: Object.freeze({
-    read: Object.freeze({
-      offset: 0,
-      marker: hexToBytes("30b5051c0c1c131c0b4a10880b490840032108431080013b"),
-    }),
-    write: Object.freeze({
-      offset: 0x40,
-      marker: hexToBytes("f0b5041c0e1c151c034a1088034908400321084310800ae0"),
-    }),
-    verify: Object.freeze({
-      offset: 0xb0,
-      marker: hexToBytes("30b5051c0c1c131c0a4a10880a490840032108431080013b"),
-    }),
-  }),
-  SRAM_V110: Object.freeze({
-    read: Object.freeze({
-      offset: 0,
-      marker: hexToBytes("90b5a7b06f4638607960ba60174817490a88174b111c1940"),
-    }),
-    write: Object.freeze({
-      offset: 0xd8,
-      marker: hexToBytes("80b583b06f4638607960ba60094809490a88094b111c1940"),
-    }),
-    verify: Object.freeze({
-      offset: 0x178,
-      marker: hexToBytes("90b5b7b06f4638607960ba60174817490a88174b111c1940"),
-    }),
-  }),
-});
+const FLASH512K_HOOKS = DIRECT_SDK_HOOKS;
+const EEPROM_V11X_HOOK_LAYOUTS = DIRECT_EEPROM_V11X_LAYOUTS;
+const EEPROM_V11X_ANCHOR = DIRECT_EEPROM_V11X_ANCHOR;
+const DIRECT_SRAM_HOOK_LAYOUTS = DIRECT_SRAM_LAYOUTS;
 
 export const DIRECT_SRAM_SAVE_TYPES = new Set(Object.keys(DIRECT_SRAM_HOOK_LAYOUTS));
 
-export function allFlash512kMatches(bytes, marker, alignment = 2) {
+function allFlash512kMatches(bytes, marker, alignment = 2) {
   const matches = [];
   let position = 0;
   while (position <= bytes.length - marker.length) {
@@ -198,6 +102,12 @@ export function detectFlash512kHookSet(bytes, label = "512K FLASH", expectedFami
     sramWrite,
     sramRead,
     sramVerify,
+    sramWriteVerify: analyzeSramWriteVerifyWrappers(
+      bytes,
+      sramWrite.flatMap((hook) => hook.offsets),
+      sramVerify,
+    ),
+    sramReadbackVerify: verifyResultNeedsReadback(bytes, sramVerify),
     eepromWrite,
     eepromRead,
     eepromVerify,
@@ -218,20 +128,146 @@ function patchThumbHook(
   replacement.set(FLASH512K_THUMB_BRANCH_THUNK);
   writeU32(replacement, FLASH512K_THUMB_BRANCH_THUNK.length, target);
   stagePatchOperation(bytes, operations, {
-    id: `flash-journal-${operations.length}`,
+    id: `save-runtime-${operations.length}`,
     kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
-    component: "flashJournal",
+    component: "saveRuntime",
     offset,
     byteLength: replacement.length,
     expectedBefore: bytes.slice(offset, offset + replacement.length),
     replacement,
-    labelKey: "operation.flashJournal",
+    labelKey: "operation.saveRuntime",
     metadata: {
       name: `${label} ${name} hook`,
       value: target,
       codeName,
     },
   });
+}
+
+function patchThumbCall(bytes, operations, label, name, offset, targetOffset) {
+  const delta = targetOffset - offset - 4;
+  if ((delta & 1) !== 0 || delta < -0x400000 || delta > 0x3ffffe) {
+    throw new PatchError(`${label} ${name} target is outside Thumb BL range.`);
+  }
+  const replacement = new Uint8Array(4);
+  writeU16(replacement, 0, 0xf000 | ((delta >> 12) & 0x07ff));
+  writeU16(replacement, 2, 0xf800 | ((delta >> 1) & 0x07ff));
+  stagePatchOperation(bytes, operations, {
+    id: `save-runtime-${operations.length}`,
+    kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
+    component: "saveRuntime",
+    offset,
+    byteLength: replacement.length,
+    expectedBefore: bytes.slice(offset, offset + replacement.length),
+    replacement,
+    labelKey: "operation.saveRuntime",
+    metadata: {
+      name: `${label} ${name}`,
+      value: targetOffset,
+      codeName: "flash512k_thumb_call_redirect",
+    },
+  });
+}
+
+function patchThumbHookWithCache(
+  bytes,
+  operations,
+  label,
+  name,
+  offset,
+  target,
+  cacheAddress,
+  clearCache = false,
+) {
+  if (!Number.isInteger(cacheAddress) || cacheAddress < 0 || cacheAddress > 0xffffffff) {
+    throw new PatchError(`${label} ${name} cache address is invalid.`);
+  }
+  const replacement = new Uint8Array(clearCache ? 64 : 20);
+  const halfwords = [
+    0x4b02, // ldr r3, [pc, #8] (shared EWRAM cache)
+    0xb410, // push {r4}
+    0x4c02, // ldr r4, [pc, #8]
+    0x46a4, // mov r12, r4
+    0xbc10, // pop {r4}
+    0x4760, // bx r12
+  ];
+  for (let index = 0; index < halfwords.length; index += 1) {
+    replacement[index * 2] = halfwords[index] & 0xff;
+    replacement[index * 2 + 1] = halfwords[index] >>> 8;
+  }
+  writeU32(replacement, 12, cacheAddress);
+  writeU32(replacement, 16, target);
+  stagePatchOperation(bytes, operations, {
+    id: `save-runtime-${operations.length}`,
+    kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
+    component: "saveRuntime",
+    offset,
+    byteLength: replacement.length,
+    expectedBefore: bytes.slice(offset, offset + replacement.length),
+    replacement,
+    labelKey: "operation.saveRuntime",
+    metadata: {
+      name: `${label} ${name} cached hook`,
+      value: target,
+      codeName: "flash512k_thumb_cached_hook",
+    },
+  });
+}
+
+function romOffsetFromThumbAddress(address, length) {
+  if (!Number.isInteger(address) || (address & 1) === 0) return null;
+  const base = address & 0x0e000000;
+  if (base < GBA_ROM_BASE_ADDRESS || base > GBA_ROM_LAST_MIRROR_BASE_ADDRESS) return null;
+  const offset = (address & 0x01ffffff) >>> 0;
+  return offset < length ? offset : null;
+}
+
+function writableCacheAddress(address) {
+  if (!Number.isInteger(address) || address % 4) return false;
+  return (address >= GBA_EWRAM_START_ADDRESS && address + 64 <= GBA_EWRAM_END_ADDRESS)
+    || (address >= GBA_IWRAM_START_ADDRESS && address + 64 <= GBA_IWRAM_END_ADDRESS);
+}
+
+function nextReferencedWritableAddress(bytes, address) {
+  const regionEnd = address < GBA_IWRAM_START_ADDRESS ? GBA_EWRAM_END_ADDRESS : GBA_IWRAM_END_ADDRESS;
+  let next = regionEnd;
+  for (let offset = 0; offset + 4 <= bytes.length; offset += 4) {
+    const value = readU32(bytes, offset);
+    if (value > address && value < next && value < regionEnd)
+      next = value;
+  }
+  return next;
+}
+
+// Some SDK SRAM libraries copy ReadSram into WRAM during their own
+// initialization while WriteSram continues to execute from ROM. The literal
+// table immediately following the routines records the source and destination
+// addresses. Recognizing that table gives every hook one stable cache address
+// without relying on a game code or a fixed WRAM location.
+function detectDirectSramCache(bytes, anchor, layout) {
+  const readOffset = anchor + layout.read.offset;
+  const writeOffset = anchor + layout.write.offset;
+  const verifyOffset = anchor + layout.verify.offset;
+  if (writeOffset - readOffset < 64) return null;
+  const scanEnd = Math.min(bytes.length - 12, anchor + layout.verify.offset + 0x400);
+  const readMappings = [];
+  const verifyMappings = [];
+  for (let offset = anchor & ~3; offset <= scanEnd; offset += 4) {
+    const source = romOffsetFromThumbAddress(readU32(bytes, offset), bytes.length);
+    const destination = readU32(bytes, offset + 4);
+    const following = romOffsetFromThumbAddress(readU32(bytes, offset + 8), bytes.length);
+    if (
+      source === readOffset + 1
+      && following === writeOffset + 1
+      && writableCacheAddress(destination)
+    ) readMappings.push({ destination });
+    if (source === verifyOffset + 1 && writableCacheAddress(destination))
+      verifyMappings.push({ destination });
+  }
+  if (readMappings.length !== 1 || verifyMappings.length !== 1) return null;
+  const address = readMappings[0].destination + 64;
+  if (nextReferencedWritableAddress(bytes, address) - address < 8) return null;
+  return { storageOffset: readOffset + 64, address };
 }
 
 function patchEepromWriteHook(
@@ -242,10 +278,8 @@ function patchEepromWriteHook(
   offset,
   target,
   compatTarget,
-  directTarget,
-  sourceSaveType,
-  sourceLength,
   gbaRomBase,
+  requireRuntimeTimer,
 ) {
   const normalizationOperations = operations.filter((operation) => (
     operation.offset === offset
@@ -263,42 +297,26 @@ function patchEepromWriteHook(
     : null;
   if (timing !== null) {
     stagePatchOperation(bytes, operations, {
-      id: `flash-journal-${operations.length}`,
+      id: `save-runtime-${operations.length}`,
       kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
-      component: "flashJournal",
+      component: "saveRuntime",
       offset,
       byteLength: timing.replacement.length,
       expectedBefore: bytes.slice(offset, offset + timing.replacement.length),
       replacement: timing.replacement,
-      labelKey: "operation.flashJournal",
+      labelKey: "operation.saveRuntime",
       metadata: {
-        name: `${label} ${name} V120 timer-edge compatibility hook`,
+        name: `${label} ${name} V120 runtime-state compatibility hook`,
         value: target,
-        codeName: "flash512k_eeprom_v120_timing_hook",
+        codeName: "flash512k_eeprom_v120_runtime_hook",
       },
     });
     return;
   }
-  const direct = normalizationOperations.length === 1
-    ? detectEepromV124DirectWriteCaller(
-      bytes,
-      offset,
-      normalizationOperations[0].expectedBefore,
-      sourceSaveType,
-      sourceLength,
-    )
-    : null;
-  if (direct !== null) {
-    patchThumbHook(
-      bytes,
-      operations,
-      label,
-      `${name} exact V124 direct`,
-      offset,
-      directTarget,
-      "flash512k_eeprom_v124_direct_hook",
+  if (requireRuntimeTimer) {
+    throw new PatchError(
+      `${label} could not prove the complete Nintendo EEPROM V120/V121 timer ABI.`,
     );
-    return;
   }
   const compat = buildEepromV12xWriteCompatHook(
     bytes,
@@ -306,25 +324,25 @@ function patchEepromWriteHook(
     compatTarget,
     gbaRomBase,
   );
-  if (compat === null) {
-    patchThumbHook(bytes, operations, label, name, offset, target);
+  if (compat !== null) {
+    stagePatchOperation(bytes, operations, {
+      id: `save-runtime-${operations.length}`,
+      kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
+      component: "saveRuntime",
+      offset,
+      byteLength: compat.replacement.length,
+      expectedBefore: bytes.slice(offset, offset + compat.replacement.length),
+      replacement: compat.replacement,
+      labelKey: "operation.saveRuntime",
+      metadata: {
+        name: `${label} ${name} V12x SDK setup/cleanup wrapper`,
+        value: compatTarget,
+        codeName: "flash512k_eeprom_v12x_abi_hook",
+      },
+    });
     return;
   }
-  stagePatchOperation(bytes, operations, {
-    id: `flash-journal-${operations.length}`,
-    kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
-    component: "flashJournal",
-    offset,
-    byteLength: compat.replacement.length,
-    expectedBefore: bytes.slice(offset, offset + compat.replacement.length),
-    replacement: compat.replacement,
-    labelKey: "operation.flashJournal",
-    metadata: {
-      name: `${label} ${name} SDK timer compatibility hook`,
-      value: compatTarget,
-      codeName: "flash512k_eeprom_v12x_compat_hook",
-    },
-  });
+  patchThumbHook(bytes, operations, label, name, offset, target);
 }
 
 function patchArmHook(bytes, operations, label, name, offset, target) {
@@ -332,14 +350,14 @@ function patchArmHook(bytes, operations, label, name, offset, target) {
   replacement.set(FLASH512K_ARM_BRANCH_THUNK);
   writeU32(replacement, FLASH512K_ARM_BRANCH_THUNK.length, target);
   stagePatchOperation(bytes, operations, {
-    id: `flash-journal-${operations.length}`,
+    id: `save-runtime-${operations.length}`,
     kind: PATCH_OPERATION_KIND.HOOK_REPLACE,
-    component: "flashJournal",
+    component: "saveRuntime",
     offset,
     byteLength: replacement.length,
     expectedBefore: bytes.slice(offset, offset + replacement.length),
     replacement,
-    labelKey: "operation.flashJournal",
+    labelKey: "operation.saveRuntime",
     metadata: {
       name: `${label} ${name} hook`,
       value: target,
@@ -348,51 +366,131 @@ function patchArmHook(bytes, operations, label, name, offset, target) {
   });
 }
 
-export function flash512kTargetAddress(payloadBase, entry, gbaRomBase = 0x08000000) {
+function flash512kTargetAddress(payloadBase, entry, gbaRomBase = GBA_ROM_BASE_ADDRESS) {
   return (gbaRomBase + payloadBase + entry) >>> 0;
 }
 
-export function applyFlash512kDetectedHooks(bytes, operations, hooks, payloadBase, descriptor, label = "512K FLASH") {
+export function applyFlash512kDetectedHooks(
+  bytes,
+  operations,
+  hooks,
+  payloadBase,
+  descriptor,
+  label = "512K FLASH",
+  options = {},
+) {
   const entries = descriptor.entries;
-  const counts = {
-    sramWrite: 0,
-    sramRead: 0,
-    sramVerify: 0,
-    eepromWrite: 0,
-    eepromRead: 0,
-    eepromVerify: 0,
-    eepromMeta: 0,
-  };
 
   if (hooks.family === "sram") {
-    const writeTarget = flash512kTargetAddress(payloadBase, entries.sramWrite, descriptor.gbaRomBase);
+    const cached = Number.isInteger(hooks.sramCacheAddress);
+    const writeTarget = flash512kTargetAddress(
+      payloadBase,
+      cached ? entries.sramWriteCached : entries.sramWrite,
+      descriptor.gbaRomBase,
+    );
     for (const hook of hooks.sramWrite) {
       for (const offset of hook.offsets) {
         if (hook.thunk === "arm") patchArmHook(bytes, operations, label, hook.name, offset, writeTarget);
-        else patchThumbHook(bytes, operations, label, hook.name, offset, writeTarget);
-        counts.sramWrite += 1;
+        else if (cached) {
+          patchThumbHookWithCache(
+            bytes, operations, label, hook.name, offset, writeTarget,
+            hooks.sramCacheAddress,
+          );
+        } else patchThumbHook(bytes, operations, label, hook.name, offset, writeTarget);
       }
     }
-    const readTarget = flash512kTargetAddress(payloadBase, entries.sramRead, descriptor.gbaRomBase);
-    for (const offset of hooks.sramRead) {
-      patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.sramRead.name, offset, readTarget);
-      counts.sramRead += 1;
-    }
-    const verifyTarget = flash512kTargetAddress(payloadBase, entries.sramVerify, descriptor.gbaRomBase);
-    for (const offset of hooks.sramVerify) {
-      patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.sramVerify.name, offset, verifyTarget);
-      counts.sramVerify += 1;
-    }
-  } else {
-    const writeTarget = flash512kTargetAddress(payloadBase, entries.eepromWrite, descriptor.gbaRomBase);
-    const writeCompatTarget = flash512kTargetAddress(
+    const readTarget = flash512kTargetAddress(
       payloadBase,
-      entries.eepromWriteCompat,
+      cached ? entries.sramReadCached : entries.sramRead,
       descriptor.gbaRomBase,
     );
-    const writeDirectTarget = flash512kTargetAddress(
+    for (const offset of hooks.sramRead) {
+      if (cached) {
+        patchThumbHookWithCache(
+          bytes, operations, label, FLASH512K_HOOKS.sramRead.name,
+          offset, readTarget, hooks.sramCacheAddress,
+        );
+      } else patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.sramRead.name, offset, readTarget);
+    }
+    const verifyTarget = flash512kTargetAddress(
       payloadBase,
-      entries.eepromWriteDirect,
+      cached ? entries.sramVerifyCached : entries.sramVerify,
+      descriptor.gbaRomBase,
+    );
+    for (const offset of hooks.sramVerify) {
+      if (cached) {
+        patchThumbHookWithCache(
+          bytes, operations, label, FLASH512K_HOOKS.sramVerify.name,
+          offset, verifyTarget, hooks.sramCacheAddress,
+        );
+      } else patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.sramVerify.name, offset, verifyTarget);
+    }
+    const writeVerifyTarget = flash512kTargetAddress(
+      payloadBase,
+      entries.sramWriteVerify,
+      descriptor.gbaRomBase,
+    );
+    for (const wrapper of hooks.sramWriteVerify || []) {
+      patchThumbHook(
+        bytes, operations, label, "WriteSram+VerifySram transaction",
+        wrapper.offset, writeVerifyTarget,
+        "flash512k_thumb_write_verify_transaction",
+      );
+    }
+    const tripletTarget = flash512kTargetAddress(
+      payloadBase,
+      cached ? entries.sramReadTripletCached : entries.sramReadTriplet,
+      descriptor.gbaRomBase,
+    );
+    for (const offset of hooks.sramTripletRead || []) {
+      if (cached) {
+        patchThumbHookWithCache(
+          bytes, operations, label, "direct SRAM triplet reader",
+          offset, tripletTarget, hooks.sramCacheAddress,
+        );
+      } else {
+        patchThumbHook(
+          bytes, operations, label, "direct SRAM triplet reader",
+          offset, tripletTarget,
+        );
+      }
+    }
+    const directTransfers = hooks.sramDirectTransfers || [];
+    if (directTransfers.length > 0) {
+      const readOffsets = hooks.sramRead;
+      const writeOffsets = hooks.sramWrite
+        .filter((hook) => hook.thunk === "thumb")
+        .flatMap((hook) => hook.offsets);
+      if (readOffsets.length !== 1 || writeOffsets.length !== 1) {
+        throw new PatchError(
+          `${label} cannot safely redirect direct SRAM transfers to ambiguous SDK hooks.`,
+        );
+      }
+      for (const transfer of directTransfers) {
+        const targetOffset = transfer.kind === "read" ? readOffsets[0] : writeOffsets[0];
+        patchThumbCall(
+          bytes,
+          operations,
+          label,
+          `direct SRAM ${transfer.kind} transfer`,
+          transfer.callOffset,
+          targetOffset,
+        );
+      }
+    }
+  } else {
+    const writeTarget = flash512kTargetAddress(
+      payloadBase,
+      options.eepromSettledCompat === true
+        ? entries.eepromWriteSettled
+        : entries.eepromWrite,
+      descriptor.gbaRomBase,
+    );
+    const compatWriteTarget = flash512kTargetAddress(
+      payloadBase,
+      options.eepromSettledCompat === true
+        ? entries.eepromWriteSettled
+        : entries.eepromWrite,
       descriptor.gbaRomBase,
     );
     for (const offset of hooks.eepromWrite) {
@@ -403,31 +501,33 @@ export function applyFlash512kDetectedHooks(bytes, operations, hooks, payloadBas
         FLASH512K_HOOKS.eepromWrite.name,
         offset,
         writeTarget,
-        writeCompatTarget,
-        writeDirectTarget,
-        hooks.sourceSaveType,
-        hooks.sourceLength,
+        compatWriteTarget,
         descriptor.gbaRomBase,
+        options.capabilityProfile === "eeprom-v120-runtime-timer",
       );
-      counts.eepromWrite += 1;
     }
     const readTarget = flash512kTargetAddress(payloadBase, entries.eepromRead, descriptor.gbaRomBase);
     for (const offset of hooks.eepromRead) {
       patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.eepromRead.name, offset, readTarget);
-      counts.eepromRead += 1;
     }
     const verifyTarget = flash512kTargetAddress(payloadBase, entries.eepromVerify, descriptor.gbaRomBase);
     for (const offset of hooks.eepromVerify) {
       patchThumbHook(bytes, operations, label, FLASH512K_HOOKS.eepromVerify.name, offset, verifyTarget);
-      counts.eepromVerify += 1;
     }
-    counts.eepromMeta = hooks.eepromMeta.length;
   }
-  return counts;
 }
 
 export function validateFlash512kPayloadDescriptor(descriptor, label = "512K FLASH") {
   const { payload, signature, signatureOffset, entries } = descriptor;
+  const sramEntries = [
+    "sramWrite", "sramWriteCached", "sramWriteVerify", "sramRead",
+    "sramReadCached", "sramReadTriplet", "sramReadTripletCached",
+    "sramVerify", "sramVerifyCached", "sramVerifyFast",
+  ];
+  const eepromEntries = ["eepromWrite", "eepromWriteSettled", "eepromRead", "eepromVerify"];
+  if (!["base", "snapshot", "transaction"].includes(descriptor.shape)) {
+    throw new Error(`${label} payload shape is invalid.`);
+  }
   if (!payload?.length || descriptor.payloadSize !== payload.length) throw new Error(`${label} payload data is incomplete.`);
   if (payload.length % 4 !== 0) throw new Error(`${label} payload size must be 4-byte aligned.`);
   if (!signature?.length) throw new Error(`${label} payload marker is empty.`);
@@ -439,6 +539,33 @@ export function validateFlash512kPayloadDescriptor(descriptor, label = "512K FLA
   for (const [name, entry] of Object.entries(entries || {})) {
     if (!Number.isInteger(entry) || entry < 0 || entry >= payload.length) throw new Error(`${label} ${name} entry is invalid.`);
     if ((entry & 1) !== 1) throw new Error(`${label} ${name} Thumb entry is missing its Thumb bit.`);
+  }
+  if (sramEntries.some((name) => !Number.isInteger(entries?.[name]))) {
+    throw new Error(`${label} SRAM entry ABI is incomplete.`);
+  }
+  if (!descriptor.families?.sram) {
+    throw new Error(`${label} SRAM family ABI is incomplete.`);
+  }
+  const hasEepromAbi = eepromEntries.some((name) => Object.hasOwn(entries || {}, name))
+    || Object.hasOwn(descriptor.families || {}, "eeprom");
+  if (descriptor.shape === "base") {
+    if (eepromEntries.some((name) => !Number.isInteger(entries?.[name]))
+        || !descriptor.families?.eeprom) {
+      throw new Error(`${label} Base EEPROM entry ABI is incomplete.`);
+    }
+  } else if (hasEepromAbi) {
+    throw new Error(`${label} SRAM-only shape contains EEPROM ABI fields.`);
+  }
+  const snapshotFields = [
+    "snapshotProviderCount", "snapshotCommitFirst", "snapshotCommitSize",
+    "snapshotTransientCount", "snapshotProviders", "snapshotTransientRanges",
+  ];
+  if (descriptor.shape === "snapshot") {
+    if (snapshotFields.some((name) => !Number.isInteger(descriptor.configFields?.[name]))) {
+      throw new Error(`${label} Snapshot configuration ABI is incomplete.`);
+    }
+  } else if (snapshotFields.some((name) => Object.hasOwn(descriptor.configFields || {}, name))) {
+    throw new Error(`${label} non-Snapshot shape contains Snapshot ABI fields.`);
   }
   for (const range of descriptor.mutableRanges || []) {
     if (!Array.isArray(range) || range.length !== 2 || range[0] < 0 || range[1] < range[0] || range[1] > payload.length) {
@@ -453,12 +580,6 @@ export function validateFlash512kPayloadDescriptor(descriptor, label = "512K FLA
     if (!Number.isInteger(offset) || offset < 0 || offset + 4 > payload.length || offset % 4) {
       throw new Error(`${label} config field is invalid or unaligned.`);
     }
-  }
-  if (Number.isInteger(descriptor.configFields?.saveChipType) && readU32(payload, descriptor.configFields.saveChipType) !== 0) {
-    throw new Error(`${label} chip-type template value must be zero.`);
-  }
-  if (Number.isInteger(descriptor.configFields?.rtcPersistEntry) && readU32(payload, descriptor.configFields.rtcPersistEntry) !== 0) {
-    throw new Error(`${label} RTC persistence entry template value must be zero.`);
   }
 }
 
@@ -505,6 +626,15 @@ export function detectFlash512kDirectSramHookSet(bytes, saveType, label = "512K 
     throw new PatchError(`${label} could not find one complete ${saveType} hook set (found ${candidates.length}).`);
   }
   const anchor = candidates[0];
+  const cache = detectDirectSramCache(bytes, anchor, layout);
+  const verifyOffset = anchor + layout.verify.offset;
+  const directAccesses = analyzeDirectSramAccesses(bytes, {
+    allowedFunctionStarts: [
+      anchor + layout.read.offset,
+      anchor + layout.write.offset,
+      verifyOffset,
+    ],
+  });
   return {
     family: "sram",
     sramWrite: [{
@@ -513,7 +643,23 @@ export function detectFlash512kDirectSramHookSet(bytes, saveType, label = "512K 
       offsets: [anchor + layout.write.offset],
     }],
     sramRead: [anchor + layout.read.offset],
-    sramVerify: [anchor + layout.verify.offset],
+    sramVerify: [verifyOffset],
+    sramWriteVerify: analyzeSramWriteVerifyWrappers(
+      bytes,
+      [anchor + layout.write.offset],
+      [verifyOffset],
+    ),
+    sramReadbackVerify: verifyResultNeedsReadback(
+      bytes,
+      [verifyOffset],
+      layout.readbackVerify === true,
+    ),
+    sramTripletRead: directAccesses.readers,
+    sramDirectTransfers: directAccesses.transfers,
+    ...(cache ? {
+      sramCacheAddress: cache.address,
+      sramCacheStorageOffset: cache.storageOffset,
+    } : {}),
     eepromWrite: [],
     eepromRead: [],
     eepromVerify: [],

@@ -1,49 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { hexToBytes } from "../core/binary.js";
+import { sha256Hex } from "../core/hash.js";
 import { PatchError } from "../core/errors.js";
 import { BATTERYLESS_PAYLOAD_GBATA_HEX, BATTERYLESS_PAYLOAD_HEX } from "../patchers/sram-data.js";
-import { FLASH512K_PAYLOAD_HEX as FLASH_JOURNAL_HEX } from "../patchers/flash512k-data.js";
-import { FLASH512K_PAYLOAD_HEX as CUSTOM_FLASH_JOURNAL_HEX } from "../patchers/custom-journal-data.js";
+import { FLASH_DIRECT_PAYLOAD_HEX } from "../patchers/flash-direct-data.js";
+import { FLASH_DIRECT_PAYLOAD_HEX as FLASH_DIRECT_SNAPSHOT_HEX } from "../patchers/flash-direct-snapshot-data.js";
+import { FLASH_DIRECT_PAYLOAD_HEX as FLASH_DIRECT_TRANSACTION_HEX } from "../patchers/flash-direct-transaction-data.js";
+import { EEPROM_V120_RUNTIME_WRAPPER_HEX } from "../patchers/eeprom-v120-wrapper-data.js";
 import { RTC_PAYLOAD_HEX } from "../patchers/rtc-data.js";
 import { IRQ_HANDLER_PAYLOAD_HEX } from "../patchers/irq-handler-data.js";
 import { PAYLOAD_MANIFESTS } from "./payload-manifests.js";
 
 const ARTIFACTS = Object.freeze({
-  batterylessSram: BATTERYLESS_PAYLOAD_HEX,
-  batterylessSramGbata: BATTERYLESS_PAYLOAD_GBATA_HEX,
-  flashJournal: FLASH_JOURNAL_HEX,
-  customFlashJournal: CUSTOM_FLASH_JOURNAL_HEX,
-  fakeRtc: RTC_PAYLOAD_HEX,
-  sharedIrq: IRQ_HANDLER_PAYLOAD_HEX,
+  batterylessSram: [BATTERYLESS_PAYLOAD_HEX, "GPL-3.0-or-later AND MIT"],
+  batterylessSramGbata: [BATTERYLESS_PAYLOAD_GBATA_HEX, "GPL-3.0-or-later AND MIT"],
+  flashDirect: [FLASH_DIRECT_PAYLOAD_HEX, "GPL-3.0-only AND MIT"],
+  flashDirectSnapshot: [FLASH_DIRECT_SNAPSHOT_HEX, "GPL-3.0-only AND MIT"],
+  flashDirectTransaction: [FLASH_DIRECT_TRANSACTION_HEX, "GPL-3.0-only AND MIT"],
+  eepromV120Wrapper: [EEPROM_V120_RUNTIME_WRAPPER_HEX, "GPL-3.0-or-later AND MIT"],
+  fakeRtc: [RTC_PAYLOAD_HEX, "GPL-3.0-or-later AND MIT"],
+  sharedIrq: [IRQ_HANDLER_PAYLOAD_HEX, "GPL-3.0-or-later"],
 });
 
-function bytesToHex(bytes) {
-  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256(bytes) {
-  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-}
-
-function assertManifest(manifest) {
+function assertManifest(manifest, expectedLicenseExpression) {
   if (
     !manifest
-    || manifest.schemaVersion !== 1
+    || manifest.schemaVersion !== 3
     || !manifest.payloadId
-    || !Number.isInteger(manifest.payloadVersion)
-    || !manifest.licenseExpression
-    || !/^[0-9a-f]{64}$/.test(manifest.sourceSha256)
+    || manifest.licenseExpression !== expectedLicenseExpression
     || !/^[0-9a-f]{64}$/.test(manifest.binarySha256)
-    || !manifest.toolchain?.gcc
-    || !manifest.toolchain?.binutils
     || !Number.isInteger(manifest.size)
-    || !Number.isInteger(manifest.alignment)
-    || manifest.alignment <= 0
-    || (manifest.alignment & (manifest.alignment - 1)) !== 0
-    || !manifest.symbols
-    || !manifest.configOffsets
-    || !Array.isArray(manifest.relocations)
+    || manifest.size <= 0
   ) {
     throw new PatchError("Payload manifest is incomplete.", {
       code: "PAYLOAD_MANIFEST_INVALID",
@@ -56,17 +44,30 @@ function assertManifest(manifest) {
 let validationPromise;
 
 export function validatePayloadArtifacts() {
-  validationPromise ||= Promise.all(Object.entries(ARTIFACTS).map(async ([key, hex]) => {
-    const manifest = PAYLOAD_MANIFESTS[key];
-    assertManifest(manifest);
-    const bytes = hexToBytes(hex);
-    if (bytes.length !== manifest.size || await sha256(bytes) !== manifest.binarySha256) {
-      throw new PatchError(`Payload ${manifest.payloadId} does not match its manifest.`, {
-        code: "PAYLOAD_HASH_MISMATCH",
+  validationPromise ||= (async () => {
+    const artifactKeys = Object.keys(ARTIFACTS);
+    const manifestKeys = Object.keys(PAYLOAD_MANIFESTS);
+    const manifestKeySet = new Set(manifestKeys);
+    if (artifactKeys.length !== manifestKeys.length
+        || artifactKeys.some((key) => !manifestKeySet.has(key))) {
+      throw new PatchError("Payload manifest set does not match the executable artifacts.", {
+        code: "PAYLOAD_MANIFEST_INVALID",
         stage: "initialization",
-        context: { payloadId: manifest.payloadId, expectedSize: manifest.size, actualSize: bytes.length },
       });
     }
-  }));
+    await Promise.all(Object.entries(ARTIFACTS).map(async ([key, artifact]) => {
+      const [hex, licenseExpression] = artifact;
+      const manifest = PAYLOAD_MANIFESTS[key];
+      assertManifest(manifest, licenseExpression);
+      const bytes = hexToBytes(hex);
+      if (bytes.length !== manifest.size || await sha256Hex(bytes) !== manifest.binarySha256) {
+        throw new PatchError(`Payload ${manifest.payloadId} does not match its manifest.`, {
+          code: "PAYLOAD_HASH_MISMATCH",
+          stage: "initialization",
+          context: { payloadId: manifest.payloadId, expectedSize: manifest.size, actualSize: bytes.length },
+        });
+      }
+    }));
+  })();
   return validationPromise;
 }

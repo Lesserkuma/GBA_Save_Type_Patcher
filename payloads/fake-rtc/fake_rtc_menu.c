@@ -31,6 +31,8 @@ extern const uint32_t rtc_tick_mode_config;
 #define MEM_OBJ_PALETTE ((volatile uint16_t*)0x05000200)
 #define MEM_VRAM_OBJ    ((volatile uint16_t*)0x06010000)
 #define MEM_OAM         ((volatile ObjAttr*)0x07000000)
+#define MEM_EWRAM       ((volatile uint32_t*)0x02000000)
+#define EWRAM_WORDS     (0x40000u / 4u)
 
 #define BG_MODE_MASK 0x0007
 #define BG_MODE_BITMAP_FIRST 3u
@@ -58,6 +60,16 @@ extern const uint32_t rtc_tick_mode_config;
 #define OBJ_TILE_BITMAP_MODE_MIN 512u
 #define OBJ_TILE_HALFWORDS 16u
 #define MENU_RUNTIME_OBJ_TILES_COUNT (MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS / OBJ_TILE_HALFWORDS)
+#define MENU_RUNTIME_OAM_SPRITES (MENU_RUNTIME_TEXT_SPRITES_RESERVED + MENU_RUNTIME_BG_SPRITES)
+#define MENU_RUNTIME_BACKUP_PALETTE_HALFWORDS 16u
+#define MENU_RUNTIME_BACKUP_OAM_HALFWORDS (MENU_RUNTIME_OAM_SPRITES * 4u)
+#define MENU_RUNTIME_BACKUP_HALFWORDS \
+    (MENU_RUNTIME_BACKUP_PALETTE_HALFWORDS + MENU_RUNTIME_BACKUP_OAM_HALFWORDS)
+#define MENU_RUNTIME_FIELDS_HALFWORDS \
+    ((sizeof(RtcFields) + sizeof(uint16_t) - 1u) / sizeof(uint16_t))
+#define MENU_RUNTIME_SCRATCH_HALFWORDS \
+    (MENU_RUNTIME_BACKUP_HALFWORDS + MENU_RUNTIME_FIELDS_HALFWORDS)
+#define MENU_RUNTIME_SCRATCH_WORDS ((MENU_RUNTIME_SCRATCH_HALFWORDS + 1u) / 2u)
 #define MENU_RUNTIME_OBJ_TILE_BASE_ALIGNMENT 8u
 #define MENU_RUNTIME_OBJ_TILE_BASE_INVALID 0xFFFFu
 
@@ -102,8 +114,6 @@ typedef struct {
     uint16_t sound_timer_mask;
     uint16_t timer_cnt_h[2];
     uint16_t dma_cnt_h[4];
-    uint16_t obj_palette[16];
-    ObjAttr oam[128];
 } RuntimeBackup;
 
 static const uint8_t kDaysPerMonth[2][12] = {
@@ -209,7 +219,7 @@ static void mem_copy16(volatile uint16_t *dst, const uint16_t *src, uint32_t hal
     for (i = 0; i < halfwords; ++i) dst[i] = src[i];
 }
 
-static void mem_copy16_from_volatile(uint16_t *dst, volatile const uint16_t *src, uint32_t halfwords) {
+static void mem_copy16_volatile(volatile uint16_t *dst, volatile const uint16_t *src, uint32_t halfwords) {
     uint32_t i;
     for (i = 0; i < halfwords; ++i) dst[i] = src[i];
 }
@@ -334,9 +344,9 @@ static void audio_restore(const AudioBackup *backup) {
     REG_SOUNDCNT_L = backup->soundcnt_l;
 }
 
-static void oam_backup(ObjAttr *dst) {
+static void oam_backup(volatile ObjAttr *dst) {
     uint32_t i;
-    for (i = 0; i < 128u; ++i) {
+    for (i = 0; i < MENU_RUNTIME_OAM_SPRITES; ++i) {
         dst[i].attr0 = MEM_OAM[i].attr0;
         dst[i].attr1 = MEM_OAM[i].attr1;
         dst[i].attr2 = MEM_OAM[i].attr2;
@@ -344,9 +354,9 @@ static void oam_backup(ObjAttr *dst) {
     }
 }
 
-static void oam_restore(const ObjAttr *src) {
+static void oam_restore(volatile const ObjAttr *src) {
     uint32_t i;
-    for (i = 0; i < 128u; ++i) {
+    for (i = 0; i < MENU_RUNTIME_OAM_SPRITES; ++i) {
         MEM_OAM[i].attr0 = src[i].attr0;
         MEM_OAM[i].attr1 = src[i].attr1;
         MEM_OAM[i].attr2 = src[i].attr2;
@@ -360,7 +370,7 @@ static uint8_t obj_range_overlaps(uint16_t start_a, uint16_t count_a, uint16_t s
     return (uint8_t)(start_a < end_b && start_b < end_a);
 }
 
-static uint16_t obj_tile_span(const ObjAttr *obj, uint16_t dispcnt) {
+static uint16_t obj_tile_span(volatile const ObjAttr *obj, uint16_t dispcnt) {
     uint16_t attr0 = obj->attr0;
     uint16_t attr1 = obj->attr1;
     uint16_t shape = (uint16_t)(attr0 >> 14);
@@ -380,28 +390,27 @@ static uint16_t obj_tile_span(const ObjAttr *obj, uint16_t dispcnt) {
     return (uint16_t)(((height_tiles - 1u) * 32u) + (width_tiles * depth));
 }
 
-static uint8_t runtime_tile_window_overlaps_oam(const RuntimeBackup *backup, uint16_t tile_base) {
+static uint8_t runtime_tile_window_overlaps_oam(uint16_t dispcnt, uint16_t tile_base, uint16_t tile_count) {
     uint32_t i;
-    uint16_t tile_count = (uint16_t)MENU_RUNTIME_OBJ_TILES_COUNT;
     for (i = 0; i < 128u; ++i) {
-        uint16_t attr0 = backup->oam[i].attr0;
+        uint16_t attr0 = MEM_OAM[i].attr0;
         uint16_t obj_tile;
         uint16_t obj_span;
 
         if ((attr0 & ATTR0_MODE_MASK) == ATTR0_HIDE) continue;
 
-        obj_tile = (uint16_t)(backup->oam[i].attr2 & ATTR2_TILE_MASK);
-        obj_span = obj_tile_span(&backup->oam[i], backup->dispcnt);
+        obj_tile = (uint16_t)(MEM_OAM[i].attr2 & ATTR2_TILE_MASK);
+        obj_span = obj_tile_span(&MEM_OAM[i], dispcnt);
         if (obj_span == 0) continue;
         if (obj_range_overlaps(tile_base, tile_count, obj_tile, obj_span)) return 1;
     }
     return 0;
 }
 
-static uint8_t obj_vram_window_is_zero(uint16_t tile_base) {
+static uint8_t obj_vram_window_is_zero(uint16_t tile_base, uint16_t tile_count) {
     volatile const uint16_t *src = MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS);
     uint32_t i;
-    for (i = 0; i < MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS; ++i) {
+    for (i = 0; i < (uint32_t)tile_count * OBJ_TILE_HALFWORDS; ++i) {
         if (src[i] != 0) return 0;
     }
     return 1;
@@ -428,8 +437,8 @@ static uint16_t select_runtime_obj_tile_base(const RuntimeBackup *backup) {
 
     for (;;) {
         if (
-            !runtime_tile_window_overlaps_oam(backup, tile_base)
-            && obj_vram_window_is_zero(tile_base)
+            !runtime_tile_window_overlaps_oam(backup->dispcnt, tile_base, tile_count)
+            && obj_vram_window_is_zero(tile_base, tile_count)
         ) {
             return tile_base;
         }
@@ -438,6 +447,44 @@ static uint16_t select_runtime_obj_tile_base(const RuntimeBackup *backup) {
     }
 
     return MENU_RUNTIME_OBJ_TILE_BASE_INVALID;
+}
+
+static volatile uint16_t *select_runtime_backup_scratch(void) {
+    uint32_t run = 0;
+    uint32_t i = EWRAM_WORDS;
+
+    /* The game and all DMA channels are paused while the menu runs. A zeroed
+     * EWRAM span is therefore safe transient storage when it is restored to
+     * zero before execution resumes, regardless of who owns that span. */
+    while (i != 0) {
+        --i;
+        if (MEM_EWRAM[i] == 0) {
+            ++run;
+            if (run >= MENU_RUNTIME_SCRATCH_WORDS) {
+                return (volatile uint16_t *)(MEM_EWRAM + i);
+            }
+        } else {
+            run = 0;
+        }
+    }
+    return (volatile uint16_t *)0;
+}
+
+static volatile ObjAttr *runtime_backup_oam(volatile uint16_t *scratch) {
+    return (volatile ObjAttr *)(scratch + MENU_RUNTIME_BACKUP_PALETTE_HALFWORDS);
+}
+
+static RtcFields *runtime_scratch_fields(volatile uint16_t *scratch) {
+    return (RtcFields *)(scratch + MENU_RUNTIME_BACKUP_HALFWORDS);
+}
+
+static void runtime_backup_visual_state(volatile uint16_t *scratch) {
+    mem_copy16_volatile(
+        scratch,
+        MEM_OBJ_PALETTE,
+        MENU_RUNTIME_BACKUP_PALETTE_HALFWORDS
+    );
+    oam_backup(runtime_backup_oam(scratch));
 }
 
 static uint8_t is_direct_sound_dma(uint32_t channel, uint16_t cnt_h) {
@@ -484,17 +531,29 @@ static void runtime_backup_and_pause(RuntimeBackup *backup) {
     REG_DMA3CNT_H = 0;
 
     wait_vblank();
-    mem_copy16_from_volatile(backup->obj_palette, MEM_OBJ_PALETTE, 16);
-    oam_backup(backup->oam);
 }
 
-static void runtime_restore(const RuntimeBackup *backup, uint16_t tile_base) {
+static void runtime_restore(const RuntimeBackup *backup, uint16_t tile_base, volatile uint16_t *scratch) {
     wait_vblank();
-    if (tile_base != MENU_RUNTIME_OBJ_TILE_BASE_INVALID) {
-        mem_fill16(MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS), 0, MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS);
+    if (tile_base != MENU_RUNTIME_OBJ_TILE_BASE_INVALID
+        && scratch != (volatile uint16_t *)0) {
+        mem_copy16_volatile(
+            MEM_OBJ_PALETTE,
+            scratch,
+            MENU_RUNTIME_BACKUP_PALETTE_HALFWORDS
+        );
+        oam_restore(runtime_backup_oam(scratch));
+        mem_fill16(
+            MEM_VRAM_OBJ + ((uint32_t)tile_base * OBJ_TILE_HALFWORDS),
+            0,
+            MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS
+        );
+        mem_fill16(
+            scratch,
+            0,
+            MENU_RUNTIME_SCRATCH_WORDS * 2u
+        );
     }
-    mem_copy16(MEM_OBJ_PALETTE, backup->obj_palette, 16);
-    oam_restore(backup->oam);
 
     REG_DMA3CNT_H = backup->dma_cnt_h[3];
     if (!is_direct_sound_dma(2u, backup->dma_cnt_h[2])) REG_DMA2CNT_H = backup->dma_cnt_h[2];
@@ -574,10 +633,11 @@ static void wait_keys_release(uint16_t key_mask) {
     }
 }
 
-static void render_menu_from_index(const RtcFields *f, uint8_t selected_field, uint16_t sprite_index, uint16_t tile_base, uint16_t sprite_limit) {
+static void render_menu_from_index(const RtcFields *f, uint8_t selected_field, uint16_t tile_base, uint16_t sprite_limit) {
     volatile ObjAttr *oam = MEM_OAM;
     char datetime_chars[18];
     uint32_t i;
+    uint16_t sprite_index = 0;
     datetime_chars[0]  = (char)('0' + ((f->year / 1000u) % 10u));
     datetime_chars[1]  = (char)('0' + ((f->year / 100u) % 10u));
     datetime_chars[2]  = (char)('0' + ((f->year / 10u) % 10u));
@@ -687,7 +747,7 @@ static void load_menu_fields(RtcFields *fields) {
     timestamp_to_fields(menu_timestamp, menu_speed, fields);
 }
 
-static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, uint16_t sprite_limit, uint8_t initial_rendered, RtcFields fields) {
+static void fake_rtc_menu_loop(uint16_t tile_base, uint16_t sprite_limit, uint8_t initial_rendered, RtcFields *fields) {
     uint16_t prev_keys = 0;
     uint16_t hold_up = 0;
     uint16_t hold_down = 0;
@@ -695,7 +755,7 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, u
     uint16_t menu_speed = clamp_speed(FAKE_RTC_DEFAULT_SPEED);
     uint8_t selected = 0;
 
-    if (!initial_rendered) render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
+    if (!initial_rendered) render_menu_from_index(fields, selected, tile_base, sprite_limit);
 
     for (;;) {
         uint16_t keys;
@@ -709,34 +769,34 @@ static void fake_rtc_menu_loop(uint16_t first_menu_sprite, uint16_t tile_base, u
             selected = (uint8_t)((selected + 1u) % FIELD_COUNT);
         }
         if ((keys & KEY_UP) && !(prev_keys & KEY_UP)) {
-            apply_delta(&fields, selected, +1);
+            apply_delta(fields, selected, +1);
             hold_up = 0;
         } else if (keys & KEY_UP) {
             hold_up++;
             if (hold_up > 10u) {
-                apply_delta(&fields, selected, selected == FIELD_SPEED ? speed_repeat_delta(hold_up, +1) : +1);
+                apply_delta(fields, selected, selected == FIELD_SPEED ? speed_repeat_delta(hold_up, +1) : +1);
             }
         } else {
             hold_up = 0;
         }
 
         if ((keys & KEY_DOWN) && !(prev_keys & KEY_DOWN)) {
-            apply_delta(&fields, selected, -1);
+            apply_delta(fields, selected, -1);
             hold_down = 0;
         } else if (keys & KEY_DOWN) {
             hold_down++;
             if (hold_down > 10u) {
-                apply_delta(&fields, selected, selected == FIELD_SPEED ? speed_repeat_delta(hold_down, -1) : -1);
+                apply_delta(fields, selected, selected == FIELD_SPEED ? speed_repeat_delta(hold_down, -1) : -1);
             }
         } else {
             hold_down = 0;
         }
 
-        render_menu_from_index(&fields, selected, first_menu_sprite, tile_base, sprite_limit);
+        render_menu_from_index(fields, selected, tile_base, sprite_limit);
 
         if ((keys & KEY_A) && !(prev_keys & KEY_A)) {
-            menu_speed = fields.speed;
-            menu_timestamp = fields_to_timestamp(&fields);
+            menu_speed = fields->speed;
+            menu_timestamp = fields_to_timestamp(fields);
             wait_keys_release(KEY_A);
             if (rtc_tick_mode_config == FAKE_RTC_TICK_MODE_READ) {
                 menu_timestamp -= legacy_first_tick_seconds(menu_speed);
@@ -756,16 +816,16 @@ void fake_rtc_menu_run(void) {
     load_menu_fields(&fields);
     audio_backup_and_mute(&audio_backup);
     draw_background();
-    fake_rtc_menu_loop(0, 0, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 0, fields);
+    fake_rtc_menu_loop(0, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 0, &fields);
     audio_restore(&audio_backup);
 }
 
 void fake_rtc_menu_run_runtime(uint32_t release_mask) {
     RuntimeBackup backup;
-    RtcFields fields;
+    RtcFields *fields;
     uint16_t tile_base;
+    volatile uint16_t *scratch;
 
-    load_menu_fields(&fields);
     runtime_backup_and_pause(&backup);
     /* Shared IRQ passes the actual configured combo. Consume every key that
      * opened the menu before accepting input or restoring the game, so A and
@@ -773,13 +833,21 @@ void fake_rtc_menu_run_runtime(uint32_t release_mask) {
     wait_keys_release((uint16_t)(release_mask & 0x03FFu));
     tile_base = select_runtime_obj_tile_base(&backup);
     if (tile_base == MENU_RUNTIME_OBJ_TILE_BASE_INVALID) {
-        runtime_restore(&backup, tile_base);
+        runtime_restore(&backup, tile_base, (volatile uint16_t *)0);
         return;
     }
+    scratch = select_runtime_backup_scratch();
+    if (scratch == (volatile uint16_t *)0) {
+        runtime_restore(&backup, MENU_RUNTIME_OBJ_TILE_BASE_INVALID, scratch);
+        return;
+    }
+    runtime_backup_visual_state(scratch);
+    fields = runtime_scratch_fields(scratch);
+    load_menu_fields(fields);
     wait_vblank();
     draw_runtime_background(tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
-    render_menu_from_index(&fields, 0, 0, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
+    render_menu_from_index(fields, 0, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED);
     REG_DISPCNT = runtime_menu_dispcnt(backup.dispcnt);
-    fake_rtc_menu_loop(0, tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 1, fields);
-    runtime_restore(&backup, tile_base);
+    fake_rtc_menu_loop(tile_base, MENU_RUNTIME_TEXT_SPRITES_RESERVED, 1, fields);
+    runtime_restore(&backup, tile_base, scratch);
 }

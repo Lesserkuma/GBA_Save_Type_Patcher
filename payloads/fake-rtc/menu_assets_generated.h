@@ -2,7 +2,7 @@
  * Generator: payloads/fake-rtc/generate_menu_assets.py
  * Generator version: 2
  * Source inputs: assets/arrow.png, assets/bg.png, assets/glyphs.png
- * Source SHA-256: 0d4e07487774ea299be914963129b8f8d04bc0c65fe3035337c7c9c8c5dd86a6
+ * Source SHA-256: 97b35f18536d629f5b8b6c26305b7f65d616c1cd3b8b7831f27368e3925d2778
  * Binary SHA-256: 014011df43fc50037ee6052d7bfc552459093851b9170a63c28275aae0ec86d9
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -50,7 +50,7 @@
 #define MENU_RUNTIME_OBJ_TILES_SIZE_HALFWORDS 1520u
 #define MENU_RUNTIME_OBJ_TILES_SIZE_BYTES 3040u
 #define MENU_RUNTIME_OAM_ENTRIES_MAX 80u
-#define MENU_RUNTIME_BACKUP_ESTIMATE_BYTES 1248u
+#define MENU_RUNTIME_BACKUP_ESTIMATE_BYTES 684u
 
 static const uint16_t menu_obj_palette[] = {
     0x0000, 0x18c5, 0x55ce, 0x6631, 0x498c, 0x41ae, 0x3529, 0x56f5, 0x6f5b, 0x7fff, 0x318c, 0x675a,

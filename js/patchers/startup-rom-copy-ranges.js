@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import { decodeArmBranchTargetAt } from "../core/arm.js";
 import { readU16, readU32 } from "../core/binary.js";
+import { decodeThumbBlTarget } from "../core/thumb.js";
+import {
+  GBA_EWRAM_END_ADDRESS,
+  GBA_EWRAM_START_ADDRESS,
+  GBA_IWRAM_END_ADDRESS,
+  GBA_IWRAM_START_ADDRESS,
+  GBA_MAX_ROM_SIZE_BYTES,
+  GBA_ROM_BASE_ADDRESS,
+} from "../domain/gba-constants.js";
 
-const GBA_ROM_BASE = 0x08000000;
-const GBA_ROM_WINDOW_SIZE = 0x02000000;
 const STARTUP_SCAN_SIZE = 0x1000;
 const MAX_COPY_HELPER_DISTANCE = 0x400;
 
@@ -18,8 +26,8 @@ const THUMB_WORD_COPY_HELPER = Object.freeze([
 ]);
 
 const WRITABLE_COPY_REGIONS = Object.freeze([
-  [0x02000000, 0x02040000], // EWRAM
-  [0x03000000, 0x03008000], // IWRAM
+  [GBA_EWRAM_START_ADDRESS, GBA_EWRAM_END_ADDRESS], // EWRAM
+  [GBA_IWRAM_START_ADDRESS, GBA_IWRAM_END_ADDRESS], // IWRAM
   [0x05000000, 0x05000400], // palette RAM
   [0x06000000, 0x06018000], // VRAM
   [0x07000000, 0x07000400], // OAM
@@ -27,24 +35,11 @@ const WRITABLE_COPY_REGIONS = Object.freeze([
 
 function decodeArmEntrypointOffset(bytes) {
   if (bytes.length < 4) return null;
-  const instruction = readU32(bytes, 0);
-  if (((instruction >>> 24) & 0xff) !== 0xea) return null;
-  let immediate = instruction & 0x00ffffff;
-  if (immediate & 0x00800000) immediate -= 0x01000000;
-  const target = 8 + immediate * 4;
+  if (bytes[3] !== 0xea) return null;
+  const target = decodeArmBranchTargetAt(bytes, 0);
   return target >= 0 && target < bytes.length && target % 2 === 0
     ? target
     : null;
-}
-
-function decodeThumbBlTarget(bytes, offset) {
-  if (offset < 0 || offset + 4 > bytes.length || offset % 2) return null;
-  const high = readU16(bytes, offset);
-  const low = readU16(bytes, offset + 2);
-  if ((high & 0xf800) !== 0xf000 || (low & 0xf800) !== 0xf800) return null;
-  let displacement = ((high & 0x07ff) << 12) | ((low & 0x07ff) << 1);
-  if (displacement & 0x00400000) displacement -= 0x00800000;
-  return offset + 4 + displacement;
 }
 
 function readThumbLiteral(bytes, instructionOffset, register, startupStart, startupEnd) {
@@ -86,9 +81,9 @@ function writableCopyLength(destination, end) {
 
 function romSourceRange(bytes, sourceAddress, byteLength) {
   if (!Number.isSafeInteger(sourceAddress) || sourceAddress % 4 || byteLength <= 0) return null;
-  if (sourceAddress < GBA_ROM_BASE || sourceAddress >= 0x0e000000) return null;
+  if (sourceAddress < GBA_ROM_BASE_ADDRESS || sourceAddress >= 0x0e000000) return null;
   const windowBase = sourceAddress & 0x0e000000;
-  if (sourceAddress + byteLength > windowBase + GBA_ROM_WINDOW_SIZE) return null;
+  if (sourceAddress + byteLength > windowBase + GBA_MAX_ROM_SIZE_BYTES) return null;
   const start = sourceAddress - windowBase;
   const end = start + byteLength;
   if (start < 0 || end > bytes.length) return null;

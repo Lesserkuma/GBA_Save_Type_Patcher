@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { asciiBytes, findBytes, hexToBytes, readU16, readU32, writeU32 } from "../core/binary.js";
+import { decodeArmBranchTarget, decodeArmBranchTargetAt, makeArmBranchInstruction } from "../core/arm.js";
+import { asciiBytes, findAlignedBytes, findBytes, hexToBytes, readU16, readU32, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
+import { alignUp, isBlankRegion, isOffsetWithinAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND, RTC_TICK_MODES } from "../domain/constants.js";
-import { stagePatchOperation } from "../patch-engine/draft.js";
-import { ensureDirectPayloadRegion, isFreeRegion, markedPayloadSpan } from "./payload-placement.js";
+import { GBA_IWRAM_END_ADDRESS, GBA_IWRAM_START_ADDRESS, GBA_ROM_BASE_ADDRESS } from "../domain/gba-constants.js";
+import { stageNamedPatchWrite } from "../patch-engine/draft.js";
+import { ensureDirectPayloadRegion, markedPayloadSpan } from "./payload-placement.js";
 import { IRQ_HANDLER_CONSTANTS, IRQ_HANDLER_PAYLOAD_HEX } from "./irq-handler-data.js";
 
 const C = IRQ_HANDLER_CONSTANTS;
-const GBA_ROM_BASE = 0x08000000;
 const IRQ_HANDLER_PAYLOAD = hexToBytes(IRQ_HANDLER_PAYLOAD_HEX);
 const IRQ_HANDLER_ROM_MARKER_TEXT = "lk_irq_shared";
 const IRQ_HANDLER_ROM_MARKER = asciiBytes(IRQ_HANDLER_ROM_MARKER_TEXT);
@@ -21,60 +23,39 @@ const OLD_IRQ_SLOT = hexToBytes("fc7f0003");
 const ORIGINAL_IRQ_SLOT = hexToBytes("f47f0003");
 const IRQ_INSTALLER_STUB_SIZE = 9 * 4;
 const IRQ_POST_CLEAR_STUB_SIZE = 11 * 4;
-const IWRAM_START = 0x03000000;
-const IWRAM_END = 0x03008000;
-const PRE_MAIN_STACK_MIN = IWRAM_END - 0x1000;
-const PRE_MAIN_STACK_MAX = 0x03007ff0;
+const PRE_MAIN_STACK_MIN = GBA_IWRAM_END_ADDRESS - 0x1000;
+const PRE_MAIN_STACK_MAX = GBA_IWRAM_END_ADDRESS - 0x10;
 const DMA3_SOURCE_REGISTER = 0x040000d4;
 
 export const IRQ_HANDLER_PAYLOAD_SIZE = C.IRQ_HANDLER_SIZE;
 
 function stageIrqWrite(bytes, operations, name, offset, replacement, details = {}) {
-  return stagePatchOperation(bytes, operations, {
-    id: `irq-${operations.length}`,
+  return stageNamedPatchWrite(bytes, operations, {
+    idPrefix: "irq",
     kind: details.kind || PATCH_OPERATION_KIND.HOOK_REPLACE,
     component: "irq",
     labelKey: details.labelKey || "operation.irq",
+    name,
     offset,
-    byteLength: replacement.length,
-    expectedBefore: bytes.slice(offset, offset + replacement.length),
     replacement,
     metadata: {
-      name,
       ...(details.codeName !== undefined ? { codeName: details.codeName } : {}),
       ...(details.value !== undefined ? { value: details.value } : {}),
     },
   });
 }
 
-function findAlignedMarker(bytes, marker, start = 0, end = bytes.length, alignment = 1) {
-  const limit = Math.min(end, bytes.length);
-  let pos = Math.max(0, start);
-  while (pos < limit) {
-    pos = findBytes(bytes, marker, pos, limit);
-    if (pos < 0) return null;
-    if (alignment <= 1 || pos % alignment === 0) return pos;
-    pos += 1;
-  }
-  return null;
-}
-
-function offsetInRanges(offset, ranges) {
-  return ranges.some(([start, end]) => start <= offset && offset < end);
-}
-
 function decodeEntrypointAddress(bytes) {
   if (bytes.length < 4 || bytes[3] !== 0xea) throw new PatchError("Shared IRQ: unexpected entrypoint instruction");
-  const branchWord = readU32(bytes, 0);
-  let branchOffset = branchWord & 0x00ffffff;
-  if (branchOffset & 0x00800000) branchOffset -= 0x01000000;
-  return GBA_ROM_BASE + 8 + (branchOffset << 2);
+  return decodeArmBranchTargetAt(bytes, 0, GBA_ROM_BASE_ADDRESS);
 }
 
 function encodeArmBranch(sourceAddress, targetAddress, link = false) {
-  const branchOffset = (targetAddress - sourceAddress - 8) >> 2;
-  if (branchOffset < -0x800000 || branchOffset > 0x7fffff) throw new PatchError("Shared IRQ: entrypoint target is outside ARM branch range");
-  return ((link ? 0xeb000000 : 0xea000000) | (branchOffset & 0x00ffffff)) >>> 0;
+  const instruction = makeArmBranchInstruction(sourceAddress, targetAddress, link);
+  if (instruction === null) {
+    throw new PatchError("Shared IRQ: entrypoint target is outside ARM branch range");
+  }
+  return instruction;
 }
 
 export function irqHandlerPayloadSpanForLayout() {
@@ -91,7 +72,7 @@ function writeIrqHandlerRomMarker(bytes, operations, payloadBase) {
   if (markerEnd > paddingEnd || markerEnd > bytes.length) {
     throw new PatchError("Shared IRQ: reserved payload span does not include the ROM marker");
   }
-  if (!isFreeRegion(bytes, markerOffset, marker.length)) {
+  if (!isBlankRegion(bytes, markerOffset, marker.length)) {
     throw new PatchError("Shared IRQ: ROM marker region is not free");
   }
   stageIrqWrite(bytes, operations, "Shared IRQ ROM marker", markerOffset, marker, {
@@ -127,9 +108,9 @@ export function patchIrqVectorReferences(out, operations, excludedRanges = []) {
   let count = 0;
   let pos = 0;
   while (true) {
-    const matchOffset = findAlignedMarker(out, OLD_IRQ_SLOT, pos, out.length, 4);
+    const matchOffset = findAlignedBytes(out, OLD_IRQ_SLOT, pos, out.length, 4);
     if (matchOffset === null) return count;
-    if (offsetInRanges(matchOffset, excludedRanges)) {
+    if (isOffsetWithinAnyRange(matchOffset, excludedRanges)) {
       pos = matchOffset + 4;
       continue;
     }
@@ -163,7 +144,7 @@ function hotkeyMaskValue(hotkeyMask) {
 function patchComputedIrqVectorReferences(out, operations, excludedRanges = []) {
   let count = 0;
   for (let offset = 0; offset + 20 <= out.length; offset += 4) {
-    if (offsetInRanges(offset, excludedRanges)) continue;
+    if (isOffsetWithinAnyRange(offset, excludedRanges)) continue;
     const loadBase = readU32(out, offset);
     if (((loadBase & 0xffff0fff) >>> 0) !== 0xe3a00403) continue; // mov base, #03000000
     const baseRegister = (loadBase >>> 12) & 0x0f;
@@ -268,10 +249,10 @@ function findArmIrqInstallerSites(bytes, excludedRanges = []) {
   const seenStores = new Set();
   let pos = 0;
   while (true) {
-    const literalOffset = findAlignedMarker(bytes, OLD_IRQ_SLOT, pos, bytes.length, 4);
+    const literalOffset = findAlignedBytes(bytes, OLD_IRQ_SLOT, pos, bytes.length, 4);
     if (literalOffset === null) return sites;
     pos = literalOffset + 4;
-    if (offsetInRanges(literalOffset, excludedRanges)) continue;
+    if (isOffsetWithinAnyRange(literalOffset, excludedRanges)) continue;
 
     for (const reference of armPcRelativeLiteralReferences(bytes, literalOffset)) {
       const { instructionOffset, instruction } = reference;
@@ -317,12 +298,6 @@ function findArmIrqInstallerSites(bytes, excludedRanges = []) {
   }
 }
 
-function decodeArmBranchTarget(instruction, instructionOffset) {
-  let displacement = instruction & 0x00ffffff;
-  if (displacement & 0x00800000) displacement -= 0x01000000;
-  return instructionOffset + 8 + (displacement << 2);
-}
-
 function decodeArmImmediate(instruction) {
   const value = instruction & 0xff;
   const shift = ((instruction >>> 8) & 0x0f) * 2;
@@ -338,7 +313,7 @@ function armDataProcessingDestination(instruction) {
 }
 
 function resolveArmConstantProducerInfo(bytes, endOffset, register, maxDistance = 0x80) {
-  const start = align4(Math.max(0, endOffset - maxDistance));
+  const start = alignUp(Math.max(0, endOffset - maxDistance), 4);
   for (let offset = endOffset - 4; offset >= start; offset -= 4) {
     const instruction = readU32(bytes, offset);
     if (isArmPcRelativeLoadInto(instruction, register)) {
@@ -356,10 +331,10 @@ function resolveArmConstantProducerInfo(bytes, endOffset, register, maxDistance 
     const immediate = decodeArmImmediate(instruction);
     if (opcode === 13) return { value: immediate, offset }; // mov Rd, #imm
     if (sourceRegister === 15 && opcode === 4) {
-      return { value: (GBA_ROM_BASE + offset + 8 + immediate) >>> 0, offset }; // add Rd, pc, #imm
+      return { value: (GBA_ROM_BASE_ADDRESS + offset + 8 + immediate) >>> 0, offset }; // add Rd, pc, #imm
     }
     if (sourceRegister === 15 && opcode === 2) {
-      return { value: (GBA_ROM_BASE + offset + 8 - immediate) >>> 0, offset }; // sub Rd, pc, #imm
+      return { value: (GBA_ROM_BASE_ADDRESS + offset + 8 - immediate) >>> 0, offset }; // sub Rd, pc, #imm
     }
     return null;
   }
@@ -394,7 +369,7 @@ function hasStableArmStackBetween(bytes, startOffset, endOffset) {
 
 function armZeroFillHelperRegisters(bytes, targetOffset) {
   const end = Math.min(bytes.length, targetOffset + 0x50);
-  for (let storeOffset = align4(targetOffset); storeOffset + 12 <= end; storeOffset += 4) {
+  for (let storeOffset = alignUp(targetOffset, 4); storeOffset + 12 <= end; storeOffset += 4) {
     const store = readU32(bytes, storeOffset);
     let baseRegister;
     let zeroRegister;
@@ -457,7 +432,7 @@ function updateArmConstants(constants, bytes, instructionOffset, instruction) {
   const sourceRegister = (instruction >>> 16) & 0x0f;
   const immediate = decodeArmImmediate(instruction);
   const source = sourceRegister === 15
-    ? (GBA_ROM_BASE + instructionOffset + 8) >>> 0
+    ? (GBA_ROM_BASE_ADDRESS + instructionOffset + 8) >>> 0
     : constants[sourceRegister];
   if (opcode === 13) constants[destination] = immediate;
   else if (source !== null && source !== undefined && opcode === 4) constants[destination] = (source + immediate) >>> 0;
@@ -466,7 +441,7 @@ function updateArmConstants(constants, bytes, instructionOffset, instruction) {
 }
 
 function findArmCalledIwramCpuClear(bytes, start, end) {
-  const scanStart = align4(Math.max(0, start));
+  const scanStart = alignUp(Math.max(0, start), 4);
   const scanEnd = Math.min(bytes.length, end);
   const constants = new Array(16).fill(null);
   for (let offset = scanStart; offset + 4 <= scanEnd; offset += 4) {
@@ -484,7 +459,7 @@ function findArmCalledIwramCpuClear(bytes, start, end) {
           : 0;
         if (clearStart !== null && clearLength !== null) {
           const clearEnd = clearStart + clearLength;
-          if (clearValue === 0 && clearStart < IWRAM_END && clearEnd > 0x03007ff4) {
+          if (clearValue === 0 && clearStart < GBA_IWRAM_END_ADDRESS && clearEnd > 0x03007ff4) {
             return { offset, endOffset: offset + 4, clearStart, clearEnd, targetOffset };
           }
         }
@@ -498,7 +473,7 @@ function findArmCalledIwramCpuClear(bytes, start, end) {
 }
 
 function findArmFullIwramCpuClear(bytes, start, end) {
-  const scanStart = align4(Math.max(0, start));
+  const scanStart = alignUp(Math.max(0, start), 4);
   const scanEnd = Math.min(bytes.length, end);
   for (let offset = scanStart; offset + 24 <= scanEnd; offset += 4) {
     const loadBase = readU32(bytes, offset);
@@ -530,8 +505,8 @@ function findArmFullIwramCpuClear(bytes, start, end) {
     return {
       offset,
       endOffset: offset + 24,
-      clearStart: IWRAM_START,
-      clearEnd: IWRAM_END,
+      clearStart: GBA_IWRAM_START_ADDRESS,
+      clearEnd: GBA_IWRAM_END_ADDRESS,
     };
   }
   return null;
@@ -552,10 +527,10 @@ function findArmPostClearHandoffSites(bytes, excludedRanges = []) {
   const seenBranches = new Set();
   let pos = 0;
   while (true) {
-    const literalOffset = findAlignedMarker(bytes, OLD_IRQ_SLOT, pos, bytes.length, 4);
+    const literalOffset = findAlignedBytes(bytes, OLD_IRQ_SLOT, pos, bytes.length, 4);
     if (literalOffset === null) return sites;
     pos = literalOffset + 4;
-    if (offsetInRanges(literalOffset, excludedRanges)) continue;
+    if (isOffsetWithinAnyRange(literalOffset, excludedRanges)) continue;
 
     for (const reference of armPcRelativeLiteralReferences(bytes, literalOffset)) {
       const slotRegister = (reference.instruction >>> 12) & 0x0f;
@@ -569,7 +544,7 @@ function findArmPostClearHandoffSites(bytes, excludedRanges = []) {
       const handlerRegister = (storeInstruction >>> 12) & 0x0f;
       const originalHandlerAddress = resolveArmConstantProducer(bytes, storeOffset, handlerRegister);
       const handoffEnd = Math.min(bytes.length, storeOffset + 0x200);
-      for (let offset = align4(clear.endOffset); offset + 12 <= handoffEnd; offset += 4) {
+      for (let offset = alignUp(clear.endOffset, 4); offset + 12 <= handoffEnd; offset += 4) {
         const mainLoad = readU32(bytes, offset);
         const mainRegister = (mainLoad >>> 12) & 0x0f;
         if (mainRegister >= 13 || !isArmPcRelativeLoadInto(mainLoad, mainRegister)) continue;
@@ -608,20 +583,20 @@ function findArmEntrypointPostClearHandoffSites(
     !Number.isSafeInteger(entrypointOffset)
     || entrypointOffset < 0
     || entrypointOffset + 4 > bytes.length
-    || offsetInRanges(entrypointOffset, excludedRanges)
+    || isOffsetWithinAnyRange(entrypointOffset, excludedRanges)
   ) return [];
 
   const startupEnd = Math.min(bytes.length, entrypointOffset + 0x400);
   const clear = findArmDestructiveIwramClear(bytes, entrypointOffset, startupEnd);
   if (
     !clear
-    || clear.clearStart !== IWRAM_START
-    || clear.clearEnd < IWRAM_END
+    || clear.clearStart !== GBA_IWRAM_START_ADDRESS
+    || clear.clearEnd < GBA_IWRAM_END_ADDRESS
   ) return [];
 
   const handoffEnd = Math.min(startupEnd, clear.endOffset + 0x200);
-  for (let offset = align4(clear.endOffset); offset + 12 <= handoffEnd; offset += 4) {
-    if (offsetInRanges(offset, excludedRanges) || offsetInRanges(offset + 8, excludedRanges)) continue;
+  for (let offset = alignUp(clear.endOffset, 4); offset + 12 <= handoffEnd; offset += 4) {
+    if (isOffsetWithinAnyRange(offset, excludedRanges) || isOffsetWithinAnyRange(offset + 8, excludedRanges)) continue;
     const mainLoad = readU32(bytes, offset);
     const mainRegister = (mainLoad >>> 12) & 0x0f;
     if (mainRegister >= 13 || !isArmPcRelativeLoadInto(mainLoad, mainRegister)) continue;
@@ -630,7 +605,7 @@ function findArmEntrypointPostClearHandoffSites(
 
     const mainAddress = resolveArmConstantProducer(bytes, offset + 4, mainRegister, 4);
     if (mainAddress === null) continue;
-    const mainOffset = (mainAddress & ~1) - GBA_ROM_BASE;
+    const mainOffset = (mainAddress & ~1) - GBA_ROM_BASE_ADDRESS;
     if (mainOffset < 0 || mainOffset >= bytes.length) continue;
 
     return [{
@@ -648,10 +623,10 @@ function findThumbIrqInstallerSites(bytes, excludedRanges = []) {
   const seenStores = new Set();
   let pos = 0;
   while (true) {
-    const literalOffset = findAlignedMarker(bytes, OLD_IRQ_SLOT, pos, bytes.length, 4);
+    const literalOffset = findAlignedBytes(bytes, OLD_IRQ_SLOT, pos, bytes.length, 4);
     if (literalOffset === null) return sites;
     pos = literalOffset + 4;
-    if (offsetInRanges(literalOffset, excludedRanges)) continue;
+    if (isOffsetWithinAnyRange(literalOffset, excludedRanges)) continue;
 
     for (const reference of thumbPcRelativeLiteralReferences(bytes, literalOffset)) {
       const slotRegister = (reference.instruction >>> 8) & 0x07;
@@ -670,7 +645,7 @@ function findThumbIrqInstallerSites(bytes, excludedRanges = []) {
 }
 
 function hasNearbyThumbLiteralValue(bytes, referenceOffset, value, radius = 0x100) {
-  const start = align4(Math.max(0, referenceOffset - radius));
+  const start = alignUp(Math.max(0, referenceOffset - radius), 4);
   const end = Math.min(bytes.length - 4, referenceOffset + radius);
   for (let literalOffset = start; literalOffset <= end; literalOffset += 4) {
     if (readU32(bytes, literalOffset) !== value) continue;
@@ -689,7 +664,7 @@ function hasNearbyThumbLiteralValue(bytes, referenceOffset, value, radius = 0x10
 function patchUpperIwramDmaFills(bytes, operations, thumbSites, excludedRanges = []) {
   let count = 0;
   for (let literalOffset = 0; literalOffset + 4 <= bytes.length; literalOffset += 4) {
-    if (offsetInRanges(literalOffset, excludedRanges)) continue;
+    if (isOffsetWithinAnyRange(literalOffset, excludedRanges)) continue;
     const control = readU32(bytes, literalOffset);
     if (((control & 0xffff0000) >>> 0) !== 0x85000000) continue;
     const encodedWords = control & 0xffff;
@@ -710,9 +685,9 @@ function patchUpperIwramDmaFills(bytes, operations, thumbSites, excludedRanges =
 
       if (!hasNearbyThumbLiteralValue(bytes, reference.instructionOffset, DMA3_SOURCE_REGISTER)) return false;
 
-      const destination = IWRAM_END - words * 4;
-      return destination >= IWRAM_START
-        && destination < IWRAM_END
+      const destination = GBA_IWRAM_END_ADDRESS - words * 4;
+      return destination >= GBA_IWRAM_START_ADDRESS
+        && destination < GBA_IWRAM_END_ADDRESS
         && hasNearbyThumbLiteralValue(bytes, reference.instructionOffset, destination);
     });
     if (!provenReference) continue;
@@ -727,10 +702,6 @@ function patchUpperIwramDmaFills(bytes, operations, thumbSites, excludedRanges =
     count += 1;
   }
   return count;
-}
-
-function align4(value) {
-  return (value + 3) & ~3;
 }
 
 function makeArmIrqInstallerStub(
@@ -807,13 +778,26 @@ function installArmIrqStartupHooks(
   payloadBase,
   handlerAddress,
   startupCallbackEntry = 0,
+  startupCallbackStoreOffset = null,
 ) {
   const markerEnd = payloadBase + IRQ_HANDLER_PAYLOAD.length + IRQ_HANDLER_ROM_MARKER.length;
-  const stubBase = align4(markerEnd);
+  const stubBase = alignUp(markerEnd, 4);
   if (sites.length === 0) return { count: 0, nextStubOffset: stubBase };
   const groupsByLayout = new Map();
+  const callbackForSite = (site) => (
+    startupCallbackEntry
+    && (startupCallbackStoreOffset === null || site.storeOffset === startupCallbackStoreOffset)
+      ? startupCallbackEntry
+      : 0
+  );
+  // A ROM may contain an inactive embedded startup image with the same
+  // register layout as its real entrypoint. Split those sites so only the
+  // proven active handoff can run the one-shot initialization callback.
+  const groupKey = (site) => (
+    `${site.slotRegister}:${site.handlerRegister}:${callbackForSite(site) ? "callback" : "regular"}`
+  );
   for (const site of sites) {
-    const key = `${site.slotRegister}:${site.handlerRegister}`;
+    const key = groupKey(site);
     if (!groupsByLayout.has(key)) groupsByLayout.set(key, []);
     groupsByLayout.get(key).push(site);
   }
@@ -823,7 +807,7 @@ function installArmIrqStartupHooks(
   if (stubEnd > payloadEnd) {
     throw new PatchError(`Shared IRQ: ${siteGroups.length} startup hook register layouts exceed the reserved payload span`);
   }
-  if (!isFreeRegion(bytes, stubBase, stubEnd - stubBase)) {
+  if (!isBlankRegion(bytes, stubBase, stubEnd - stubBase)) {
     throw new PatchError("Shared IRQ: startup hook region is not free");
   }
 
@@ -831,11 +815,11 @@ function installArmIrqStartupHooks(
   siteGroups.forEach((group, index) => {
     const site = group[0];
     const stubOffset = stubBase + index * IRQ_INSTALLER_STUB_SIZE;
-    const stubAddress = (GBA_ROM_BASE + stubOffset) >>> 0;
+    const stubAddress = (GBA_ROM_BASE_ADDRESS + stubOffset) >>> 0;
     const stub = makeArmIrqInstallerStub(
       site,
       handlerAddress,
-      startupCallbackEntry,
+      callbackForSite(site),
       stubAddress,
     );
     stageIrqWrite(bytes, operations, "Shared IRQ post-CRT startup hook", stubOffset, stub, {
@@ -843,14 +827,14 @@ function installArmIrqStartupHooks(
       codeName: "shared_irq_post_crt_stub",
       value: stubAddress,
     });
-    stubAddresses.set(`${site.slotRegister}:${site.handlerRegister}`, stubAddress);
+    stubAddresses.set(groupKey(site), stubAddress);
   });
 
   sites.forEach((site) => {
-    const stubAddress = stubAddresses.get(`${site.slotRegister}:${site.handlerRegister}`);
+    const stubAddress = stubAddresses.get(groupKey(site));
     const branch = new Uint8Array(4);
     writeU32(branch, 0, encodeArmBranch(
-      (GBA_ROM_BASE + site.storeOffset) >>> 0,
+      (GBA_ROM_BASE_ADDRESS + site.storeOffset) >>> 0,
       stubAddress,
       true,
     ));
@@ -899,7 +883,7 @@ function installArmPostClearHooks(bytes, operations, sites, payloadBase, handler
   if (stubEnd > payloadEnd) {
     throw new PatchError(`Shared IRQ: ${siteGroups.length} post-clear hook layouts exceed the reserved payload span`);
   }
-  if (!isFreeRegion(bytes, stubBase, stubEnd - stubBase)) {
+  if (!isBlankRegion(bytes, stubBase, stubEnd - stubBase)) {
     throw new PatchError("Shared IRQ: post-clear hook region is not free");
   }
 
@@ -907,7 +891,7 @@ function installArmPostClearHooks(bytes, operations, sites, payloadBase, handler
   siteGroups.forEach((group, index) => {
     const site = group[0];
     const stubOffset = stubBase + index * IRQ_POST_CLEAR_STUB_SIZE;
-    const stubAddress = (GBA_ROM_BASE + stubOffset) >>> 0;
+    const stubAddress = (GBA_ROM_BASE_ADDRESS + stubOffset) >>> 0;
     stageIrqWrite(bytes, operations, "Shared IRQ post-clear startup hook", stubOffset, makeArmPostClearInstallerStub(site, handlerAddress), {
       kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
       codeName: "shared_irq_post_clear_stub",
@@ -920,7 +904,7 @@ function installArmPostClearHooks(bytes, operations, sites, payloadBase, handler
     const stubAddress = stubAddresses.get(`${site.mainRegister}:${site.originalHandlerAddress || 0}`);
     const branch = new Uint8Array(4);
     writeU32(branch, 0, encodeArmBranch(
-      (GBA_ROM_BASE + site.branchOffset) >>> 0,
+      (GBA_ROM_BASE_ADDRESS + site.branchOffset) >>> 0,
       stubAddress,
     ));
     stageIrqWrite(bytes, operations, "Shared IRQ post-clear handoff branch", site.branchOffset, branch, {
@@ -956,9 +940,11 @@ function saveFlushEntryValue(options) {
 }
 
 function configuredIrqPayload(bytes, payloadBase, options) {
-  const originalEntrypoint = decodeEntrypointAddress(bytes);
+  const originalEntrypoint = options.originalEntrypointOverride
+    ? options.originalEntrypointOverride >>> 0
+    : decodeEntrypointAddress(bytes);
   const payload = new Uint8Array(IRQ_HANDLER_PAYLOAD);
-  const payloadAddress = (GBA_ROM_BASE + payloadBase) >>> 0;
+  const payloadAddress = (GBA_ROM_BASE_ADDRESS + payloadBase) >>> 0;
   const rtcTickMode = rtcTickModeValue(options);
   const handlerOffset = rtcTickMode === RTC_TICK_MODES.VBLANK
     ? C.IRQ_HANDLER_CONTINUOUS_OFFSET
@@ -1005,6 +991,7 @@ function installedIrqResult(
   entrypointHook,
   iwramClearPatches,
   startupCallbackEntry,
+  preMainStartupCallbackEntry,
 ) {
   return {
     requested: true,
@@ -1015,6 +1002,8 @@ function installedIrqResult(
     payloadSpan: irqHandlerPayloadSpanForLayout(),
     flags: configured.flags,
     saveFlushEntry: configured.saveFlushEntry,
+    saveFlushAuto: Boolean(configured.flags & IRQ_FLAG_SAVE_FLUSH_AUTO),
+    saveFlushHotkey: Boolean(configured.flags & IRQ_FLAG_SAVE_FLUSH_HOTKEY),
     rtcTickMode: configured.rtcTickMode,
     handlerEntry: configured.handlerAddress,
     startupHandlerEntry: configured.startupHandlerAddress,
@@ -1028,6 +1017,9 @@ function installedIrqResult(
     entrypointHook,
     iwramClearPatches,
     startupCallbackEntry,
+    startupCallbackTiming: startupCallbackEntry
+      ? (preMainStartupCallbackEntry ? "preMain" : "firstVBlank")
+      : null,
     installMode: entrypointHook
       ? (startupHooks || postClearHooks ? "multiPhase" : "entrypoint")
       : "postCrt",
@@ -1061,7 +1053,7 @@ function installIrqHandler(rom, operations, warnings, options, context) {
     const startupEntrypoint = context.entrypointSource
       ? decodeEntrypointAddress(context.entrypointSource)
       : decodeEntrypointAddress(workRom.bytes);
-    const entrypointOffset = startupEntrypoint - GBA_ROM_BASE;
+    const entrypointOffset = startupEntrypoint - GBA_ROM_BASE_ADDRESS;
     const startupSites = findArmIrqInstallerSites(workRom.bytes, excludedRanges);
     const postClearSites = findArmPostClearHandoffSites(workRom.bytes, excludedRanges);
     for (const site of findArmEntrypointPostClearHandoffSites(
@@ -1091,10 +1083,10 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       : null;
     const originalLength = context.entrypointSource?.length || 0;
     const originalHandlerOffset = Number.isSafeInteger(uniqueActiveInstaller?.originalHandlerAddress)
-      ? ((uniqueActiveInstaller.originalHandlerAddress & 0xfffffffe) >>> 0) - GBA_ROM_BASE
+      ? ((uniqueActiveInstaller.originalHandlerAddress & 0xfffffffe) >>> 0) - GBA_ROM_BASE_ADDRESS
       : -1;
     const mainOffset = Number.isSafeInteger(uniqueActiveInstaller?.mainAddress)
-      ? ((uniqueActiveInstaller.mainAddress & 0xfffffffe) >>> 0) - GBA_ROM_BASE
+      ? ((uniqueActiveInstaller.mainAddress & 0xfffffffe) >>> 0) - GBA_ROM_BASE_ADDRESS
       : -1;
     const hasProvenAlignedIwramStack = (
       Number.isSafeInteger(uniqueActiveInstaller?.stackAddress)
@@ -1118,17 +1110,18 @@ function installIrqHandler(rom, operations, warnings, options, context) {
     const associatedThumbReinstallers = hasProvenThumbMain
       ? thumbStartupSites.filter((site) => (
         site.storeOffset >= mainOffset
-        && site.storeOffset <= mainOffset + 0x1000
+        // Some SDK startup paths (including AA2P) reach the Thumb IRQ
+        // reinstaller after more than 4 KiB of initialization code.
+        && site.storeOffset <= mainOffset + 0x2000
       ))
       : [];
     const hasUniqueAssociatedThumbReinstaller = associatedThumbReinstallers.length === 1;
     const startupCallbackOffset = Number.isSafeInteger(startupCallbackEntry)
-      ? startupCallbackEntry - GBA_ROM_BASE
+      ? startupCallbackEntry - GBA_ROM_BASE_ADDRESS
       : -1;
     const hasUpperIwramDmaFill = (
       options.allowPreMainStartupCallback === true
       && startupCallbackEntry !== 0
-      && startupSites.length === 1
       && uniqueActiveInstaller !== null
       && hasProvenArmHandler
       && hasProvenAlignedIwramStack
@@ -1138,7 +1131,7 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       ? patchUpperIwramDmaFills(
         new Uint8Array(workRom.bytes),
         [],
-        thumbStartupSites,
+        associatedThumbReinstallers,
         excludedRanges,
       ) > 0
       : false;
@@ -1148,7 +1141,6 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       && startupCallbackOffset + 4 <= workRom.bytes.length
       && (startupCallbackEntry & 3) === 0
       && context.entrypointSource?.length >= 4
-      && startupSites.length === 1
       && uniqueActiveInstaller !== null
       && hasProvenArmHandler
       && hasProvenAlignedIwramStack
@@ -1178,6 +1170,7 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       payloadBase,
       configured.installHandlerAddress,
       preMainStartupCallbackEntry,
+      preMainStartupCallbackEntry ? uniqueActiveInstaller.storeOffset : null,
     );
     const postClearHooks = installArmPostClearHooks(
       workRom.bytes,
@@ -1193,7 +1186,7 @@ function installIrqHandler(rom, operations, warnings, options, context) {
     // the entrypoint's own nearby startup context.
     const entrypointHook = !hasActiveEntrypointInstaller;
     if (entrypointHook) {
-      const entrypointBranch = encodeArmBranch(GBA_ROM_BASE, configured.bootstrapAddress);
+      const entrypointBranch = encodeArmBranch(GBA_ROM_BASE_ADDRESS, configured.bootstrapAddress);
       const entrypointBytes = new Uint8Array(4);
       writeU32(entrypointBytes, 0, entrypointBranch);
       stageIrqWrite(workRom.bytes, localOperations, "Shared IRQ Entrypoint", 0, entrypointBytes, {
@@ -1238,6 +1231,7 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       entrypointHook,
       iwramClearPatches,
       startupCallbackEntry,
+      preMainStartupCallbackEntry,
     );
   } catch (error) {
     localWarnings.push(error.message || String(error));

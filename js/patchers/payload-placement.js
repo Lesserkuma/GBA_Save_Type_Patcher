@@ -1,27 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { PatchError } from "../core/errors.js";
-import { PATCH_OPERATION_KIND } from "../domain/constants.js";
-import { stageRomExpansion } from "../patch-engine/draft.js";
+import {
+  alignDown,
+  alignUp,
+  isBlankByte,
+  isBlankRegion,
+  overlapsAnyRange,
+} from "../core/ranges.js";
+import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
+import { stageErasedRomExpansion } from "../patch-engine/draft.js";
 
 export const PAYLOAD_ALIGNMENT = 0x100;
 export const PATCH_BLOCK_ALIGNMENT = 0x40000;
-export const GBA_MAX_ROM_SIZE = 0x02000000;
-
-export function alignDown(value, alignment) {
-  if (!Number.isSafeInteger(value) || !Number.isSafeInteger(alignment) || value < 0 || alignment <= 0) {
-    throw new PatchError("Alignment values must be non-negative integers and alignment must be positive.", {
-      code: "ALIGNMENT_INVALID",
-      stage: "placement",
-      context: { value, alignment },
-    });
-  }
-  return value - (value % alignment);
-}
-
-export function alignUp(value, alignment) {
-  return alignDown(value + alignment - 1, alignment);
-}
 
 export function alignedPayloadSpan(size) {
   if (!Number.isSafeInteger(size) || size < 0) {
@@ -54,23 +45,7 @@ export function markedPayloadSpan(payloadSize, markerSize) {
   return alignedPayloadSpan(combinedSize);
 }
 
-export function isFreeByte(value) {
-  return value === 0x00 || value === 0xff;
-}
-
-export function isFreeRegion(bytes, start, size) {
-  if (start < 0 || size < 0 || start + size > bytes.length) return false;
-  for (let offset = start; offset < start + size; offset += 1) {
-    if (!isFreeByte(bytes[offset])) return false;
-  }
-  return true;
-}
-
-export function rangesOverlap(start, end, ranges) {
-  return ranges.some(([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart);
-}
-
-export function normalizeExcludedRanges(ranges, limit = GBA_MAX_ROM_SIZE) {
+export function normalizeExcludedRanges(ranges, limit = GBA_MAX_ROM_SIZE_BYTES) {
   const normalized = (ranges || []).map((range) => {
     if (
       !Array.isArray(range)
@@ -89,6 +64,7 @@ export function normalizeExcludedRanges(ranges, limit = GBA_MAX_ROM_SIZE) {
     }
     return [range[0], range[1]];
   }).sort((first, second) => first[0] - second[0] || first[1] - second[1]);
+
   const merged = [];
   for (const range of normalized) {
     const previous = merged.at(-1);
@@ -98,7 +74,12 @@ export function normalizeExcludedRanges(ranges, limit = GBA_MAX_ROM_SIZE) {
   return merged;
 }
 
-export function overlapsPowerOfTwoTailBlock(start, end, blockSize, maxSize = GBA_MAX_ROM_SIZE) {
+export function overlapsPowerOfTwoTailBlock(
+  start,
+  end,
+  blockSize,
+  maxSize = GBA_MAX_ROM_SIZE_BYTES,
+) {
   let boundary = blockSize * 2;
   while (boundary <= maxSize) {
     if (start < boundary && end > boundary - blockSize) return true;
@@ -107,30 +88,23 @@ export function overlapsPowerOfTwoTailBlock(start, end, blockSize, maxSize = GBA
   return false;
 }
 
-function stageExpansion(rom, operations, name, oldSize, newSize) {
-  const byteLength = newSize - oldSize;
-  const erasedBytes = new Uint8Array(byteLength).fill(0xff);
-  return stageRomExpansion(rom, operations, {
+function stageExpansion(rom, operations, name, newLength) {
+  return stageErasedRomExpansion(rom, operations, {
     id: `placement-${operations.length}`,
-    kind: PATCH_OPERATION_KIND.ROM_EXPAND,
     component: "placement",
-    labelKey: "operation.romExpand",
-    offset: oldSize,
-    byteLength,
-    expectedBefore: erasedBytes,
-    replacement: new Uint8Array(erasedBytes),
+    newLength,
     metadata: {
       name,
-      value: newSize,
+      value: newLength,
       strategy: "alignedRomExpansion",
       reason: "No proven-safe trailing padding region was available.",
     },
   });
 }
 
-export function lastNonFreeEnd(bytes) {
+export function lastNonBlankEnd(bytes) {
   for (let offset = bytes.length - 1; offset >= 0; offset -= 1) {
-    if (!isFreeByte(bytes[offset])) return offset + 1;
+    if (!isBlankByte(bytes[offset])) return offset + 1;
   }
   return 0;
 }
@@ -139,14 +113,29 @@ export function findDirectPayloadRegion(bytes, totalSpan, excludedRanges = []) {
   if (!Number.isSafeInteger(totalSpan) || totalSpan < 0) return null;
   const normalizedRanges = normalizeExcludedRanges(excludedRanges);
   if (totalSpan === 0) return alignUp(bytes.length, PAYLOAD_ALIGNMENT);
-  const paddingByte = bytes.at(-1);
-  if (!isFreeByte(paddingByte)) return null;
-  let suffixStart = bytes.length;
-  while (suffixStart > 0 && bytes[suffixStart - 1] === paddingByte) suffixStart -= 1;
-  const start = alignUp(suffixStart, PAYLOAD_ALIGNMENT);
-  const end = start + totalSpan;
-  if (end > bytes.length || rangesOverlap(start, end, normalizedRanges)) return null;
-  return start;
+
+  let runEnd = null;
+  for (let position = bytes.length - 1; position >= -1; position -= 1) {
+    const excluded = position >= 0
+      && normalizedRanges.some(([start, end]) => start <= position && position < end);
+    const blank = position >= 0 && isBlankByte(bytes[position]) && !excluded;
+    if (blank) {
+      if (runEnd === null) runEnd = position;
+      continue;
+    }
+    if (runEnd === null) continue;
+
+    const runStart = position + 1;
+    const latestStart = runEnd - totalSpan + 1;
+    if (latestStart >= 0) {
+      const start = alignDown(latestStart, PAYLOAD_ALIGNMENT);
+      if (start >= runStart && !overlapsAnyRange(start, start + totalSpan, normalizedRanges)) {
+        return start;
+      }
+    }
+    runEnd = null;
+  }
+  return null;
 }
 
 function directPayloadTargetEnd(bytes, totalSpan, excludedRanges) {
@@ -154,16 +143,25 @@ function directPayloadTargetEnd(bytes, totalSpan, excludedRanges) {
   let start = alignUp(bytes.length, PAYLOAD_ALIGNMENT);
   while (true) {
     const end = start + totalSpan;
-    const overlappingRange = normalizedRanges.find(([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart);
+    const overlappingRange = normalizedRanges.find(
+      ([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart,
+    );
     if (!overlappingRange) return end;
     start = alignUp(overlappingRange[1], PAYLOAD_ALIGNMENT);
   }
 }
 
-export function ensureDirectPayloadRegion(rom, operations, warnings, totalSpan, label, excludedRanges = []) {
+export function ensureDirectPayloadRegion(
+  rom,
+  operations,
+  warnings,
+  totalSpan,
+  label,
+  excludedRanges = [],
+) {
   const normalizedRanges = normalizeExcludedRanges(excludedRanges);
   while (true) {
-    if (rom.bytes.length > GBA_MAX_ROM_SIZE) {
+    if (rom.bytes.length > GBA_MAX_ROM_SIZE_BYTES) {
       warnings.push(`${label}: ROM is larger than 32 MiB`);
       return null;
     }
@@ -172,17 +170,27 @@ export function ensureDirectPayloadRegion(rom, operations, warnings, totalSpan, 
     if (payloadBase !== null) return payloadBase;
 
     const targetEnd = directPayloadTargetEnd(rom.bytes, totalSpan, normalizedRanges);
-    if (targetEnd > GBA_MAX_ROM_SIZE || rom.bytes.length >= GBA_MAX_ROM_SIZE) {
+    if (targetEnd > GBA_MAX_ROM_SIZE_BYTES || rom.bytes.length >= GBA_MAX_ROM_SIZE_BYTES) {
       warnings.push(`${label}: no free payload area and ROM is already 32 MiB`);
       return null;
     }
 
-    const oldSize = rom.bytes.length;
-    const newSize = Math.min(alignUp(targetEnd, PATCH_BLOCK_ALIGNMENT), GBA_MAX_ROM_SIZE);
-    if (newSize <= oldSize) {
+    const newLength = Math.min(
+      alignUp(targetEnd, PATCH_BLOCK_ALIGNMENT),
+      GBA_MAX_ROM_SIZE_BYTES,
+    );
+    if (newLength <= rom.bytes.length) {
       warnings.push(`${label}: ROM could not be expanded`);
       return null;
     }
-    stageExpansion(rom, operations, `${label} ROM expansion`, oldSize, newSize);
+    stageExpansion(rom, operations, `${label} ROM expansion`, newLength);
   }
 }
+
+// Compatibility aliases for the pre-audit helper names.
+export const GBA_MAX_ROM_SIZE = GBA_MAX_ROM_SIZE_BYTES;
+export { alignDown, alignUp };
+export const isFreeByte = isBlankByte;
+export const isFreeRegion = isBlankRegion;
+export const rangesOverlap = overlapsAnyRange;
+export const lastNonFreeEnd = lastNonBlankEnd;
