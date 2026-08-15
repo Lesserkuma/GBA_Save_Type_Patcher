@@ -135,20 +135,22 @@ permit redistribution and modification under GNU GPL
 version 3 or, at the recipient's option, any later version. The complete GPLv3
 text is provided in this repository's `LICENSE` file.
 
+The production patcher incorporates the SuperFW-derived components identified
+below. The Waitstate option uses the derived host-side WAITCNT analysis and
+orchestration. The Fake RTC option installs a compiled payload containing the
+derived RTC runtime components.
+
+The project does not distribute or interpret SuperFW's game-code/version-
+indexed patch database and contains no parser or operation interpreter for
+that database. A ROM's Game Code and header version are metadata only and do
+not select a WAITCNT, RTC, or other patch path.
+
 #### Waitstate patching
 
 - `js/patchers/waitstate.js` ports the SuperFW WAITCNT-only orchestration.
 - `js/patchers/waitcnt-scanner.js` ports the `0x04000204` literal scan and the
   validation of literals through nearby PC-relative Thumb/ARM `LDR`
   instructions from `src/patchengine.c`.
-- `js/patchers/superfw-db-parser.js` implements the SuperFW patch database
-  header, game-code/version index lookup, program table, and WAITCNT operation
-  extraction from `src/patcher.c` and `src/patchengine.h`.
-- `js/patchers/superfw-opcode-interpreter.js` ports the WAITCNT-relevant subset
-  of `apply_patch_ops()` from `src/patcher.c`, with local relocation and bounds
-  checks.
-- `js/patchers/superfw-db-data.generated.js` is a Base64 representation of
-  the SuperFW `res/patches.db` patch database.
 
 #### Fake RTC
 
@@ -172,6 +174,12 @@ text is provided in this repository's `LICENSE` file.
 - The local RTC runtime also fixes day-of-month to `1..31`, uses unsigned
   division for timestamps beyond 2038, adds a 2099 wrap guard, and supports
   additional non-standard RTC signatures.
+- Zodiac/Wizard-family detection and the compact seven-byte ABI adapters are
+  informed by the publicly documented GPIO protocol in
+  [shinyquagsire23/Wizard-DN](https://github.com/shinyquagsire23/Wizard-DN/blob/master/rtc.asm).
+  Handler relationships and game-owned RAM addresses are validated and
+  derived from each ROM; no Wizard-DN source code or binary payload is
+  embedded.
 - Generated `js/patchers/rtc-data.js` contains the compiled form of the
   original local menu and the separate SuperFW-derived RTC runtime components.
 

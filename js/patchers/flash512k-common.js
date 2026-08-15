@@ -16,7 +16,7 @@ import {
   GBA_ROM_BASE_ADDRESS,
   GBA_ROM_LAST_MIRROR_BASE_ADDRESS,
 } from "../domain/gba-constants.js";
-import { PATCH_OPERATION_KIND } from "../domain/constants.js";
+import { PATCH_OPERATION_KIND, PATCH_REASON_CODE } from "../domain/constants.js";
 import { stagePatchOperation } from "../patch-engine/draft.js";
 import {
   buildEepromV120FlashTimingHook,
@@ -24,6 +24,7 @@ import {
 } from "./eeprom-v12x-write-compat.js";
 import {
   analyzeDirectSramAccesses,
+  analyzeSramByteWriteCallers,
   analyzeSramWriteVerifyWrappers,
   verifyResultNeedsReadback,
 } from "./thumb-direct-sram-analysis.js";
@@ -81,17 +82,29 @@ export function detectFlash512kHookSet(bytes, label = "512K FLASH", expectedFami
 
   const details = `SRAM write/read ${sramWriteCount}/${sramRead.length}, EEPROM write/read ${eepromWrite.length}/${eepromRead.length}`;
   if (expectedFamily === "sram" && !sramComplete) {
-    throw new PatchError(`${label} could not find the expected SRAM save hook set (${details}).`);
+    throw new PatchError(`${label} could not find the expected SRAM save hook set (${details}).`, {
+      code: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET,
+      isRecoverable: true,
+    });
   }
   if (expectedFamily === "eeprom" && !eepromComplete) {
-    throw new PatchError(`${label} could not find the expected EEPROM save hook set (${details}).`);
+    throw new PatchError(`${label} could not find the expected EEPROM save hook set (${details}).`, {
+      code: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET,
+      isRecoverable: true,
+    });
   }
 
   if (expectedFamily === null && ((sramComplete && eepromAny) || (eepromComplete && sramAny))) {
-    throw new PatchError(`${label} found conflicting or incomplete SRAM and EEPROM hook sets.`);
+    throw new PatchError(`${label} found conflicting or incomplete SRAM and EEPROM hook sets.`, {
+      code: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET,
+      isRecoverable: true,
+    });
   }
   if (expectedFamily === null && !sramComplete && !eepromComplete) {
-    throw new PatchError(`${label} could not find a complete save hook set (${details}).`);
+    throw new PatchError(`${label} could not find a complete save hook set (${details}).`, {
+      code: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET,
+      isRecoverable: true,
+    });
   }
 
   if (expectedFamily === "eeprom" || (expectedFamily === null && eepromComplete)) {
@@ -106,6 +119,10 @@ export function detectFlash512kHookSet(bytes, label = "512K FLASH", expectedFami
       bytes,
       sramWrite.flatMap((hook) => hook.offsets),
       sramVerify,
+    ),
+    sramByteWriteCallers: analyzeSramByteWriteCallers(
+      bytes,
+      sramWrite.flatMap((hook) => hook.offsets),
     ),
     sramReadbackVerify: verifyResultNeedsReadback(bytes, sramVerify),
     eepromWrite,
@@ -557,8 +574,8 @@ export function validateFlash512kPayloadDescriptor(descriptor, label = "512K FLA
     throw new Error(`${label} SRAM-only shape contains EEPROM ABI fields.`);
   }
   const snapshotFields = [
-    "snapshotProviderCount", "snapshotCommitFirst", "snapshotCommitSize",
-    "snapshotTransientCount", "snapshotProviders", "snapshotTransientRanges",
+    "snapshotWorkspaceBase", "snapshotReaderBase",
+    "snapshotCommitFirst", "snapshotCommitSize",
   ];
   if (descriptor.shape === "snapshot") {
     if (snapshotFields.some((name) => !Number.isInteger(descriptor.configFields?.[name]))) {
@@ -598,7 +615,10 @@ export function detectFlash512kEepromV11xHookSet(bytes, saveType, label = "512K 
     && bytesMatchAt(bytes, anchor + layout.verify.offset, layout.verify.marker));
 
   if (candidates.length !== 1) {
-    throw new PatchError(`${label} could not find one complete ${saveType} hook set (found ${candidates.length}).`);
+    throw new PatchError(`${label} could not find one complete ${saveType} hook set (found ${candidates.length}).`, {
+      code: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET,
+      isRecoverable: true,
+    });
   }
   const anchor = candidates[0];
   return {
@@ -623,7 +643,10 @@ export function detectFlash512kDirectSramHookSet(bytes, saveType, label = "512K 
   ));
 
   if (candidates.length !== 1) {
-    throw new PatchError(`${label} could not find one complete ${saveType} hook set (found ${candidates.length}).`);
+    throw new PatchError(`${label} could not find one complete ${saveType} hook set (found ${candidates.length}).`, {
+      code: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET,
+      isRecoverable: true,
+    });
   }
   const anchor = candidates[0];
   const cache = detectDirectSramCache(bytes, anchor, layout);
@@ -648,6 +671,10 @@ export function detectFlash512kDirectSramHookSet(bytes, saveType, label = "512K 
       bytes,
       [anchor + layout.write.offset],
       [verifyOffset],
+    ),
+    sramByteWriteCallers: analyzeSramByteWriteCallers(
+      bytes,
+      [anchor + layout.write.offset],
     ),
     sramReadbackVerify: verifyResultNeedsReadback(
       bytes,

@@ -3,13 +3,16 @@
 import { patchSramBytes } from "./patchers/sram.js";
 import { patchCustomFlashBytes } from "./patchers/custom-flash.js";
 import { patchFlash512kBytes } from "./patchers/flash512k.js";
-import { applyWaitstateForPipeline } from "./patchers/waitstate.js";
-import { waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./patchers/waitstate.js";
+import {
+  applyWaitstateForPipeline,
+  planWaitstateForLayout,
+  waitstateFixedWriteRangesForLayout,
+} from "./patchers/waitstate.js";
 import {
   applyRtcForPipeline,
   rtcPayloadSpanForLayout,
   RTC_PAYLOAD_SIZE,
-  RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG,
+  RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG,
 } from "./patchers/rtc.js";
 import {
   applyIrqHandlerForPipeline,
@@ -28,9 +31,16 @@ import {
 } from "./patchers/patch-state.js";
 import { detectRomSaveMetadata } from "./patchers/save-type.js";
 import { findStartupRomCopySourceRanges } from "./patchers/startup-rom-copy-ranges.js";
-import { PATCH_MODES, PATCH_OPERATION_KIND, RTC_TICK_MODES, WORKER_PROTOCOL_VERSION } from "./domain/constants.js";
-import { GBA_MAX_ROM_SIZE_BYTES } from "./domain/gba-constants.js";
+import {
+  PATCH_MODES,
+  PATCH_OPERATION_KIND,
+  PATCH_REASON_CODE,
+  RTC_TICK_MODES,
+  WORKER_PROTOCOL_VERSION,
+} from "./domain/constants.js";
+import { GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES } from "./domain/gba-constants.js";
 import { sha256Hex } from "./core/hash.js";
+import { PatchError } from "./core/errors.js";
 import {
   assertCancelRequest,
   assertPatchRequest,
@@ -78,6 +88,8 @@ function applyWaitstateStandalonePatch(patched, waitstateOptions = {}, context =
   const rom = { bytes: patched.bytes };
   const waitstate = applyWaitstateForPipeline(rom, patched.result.operations, patched.result.warnings, waitstateOptions, {
     excludedRanges: context.excludedRanges || [],
+    scanExcludedRanges: context.scanExcludedRanges || [],
+    structuralPlan: context.structuralPlan || null,
     waitstatePayloadOffset: context.waitstatePayloadOffset ?? null,
   });
   patched.bytes = rom.bytes;
@@ -108,7 +120,7 @@ function persistenceRangeAt(offset) {
   if (!Number.isInteger(offset)
       || offset < 0
       || offset % RTC_PERSISTENCE_BLOCK_SIZE
-      || offset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_MAX_ROM_SIZE_BYTES) return null;
+      || offset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES) return null;
   return [offset, offset + RTC_PERSISTENCE_BLOCK_SIZE];
 }
 
@@ -145,6 +157,15 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
     ...findStartupRomCopySourceRanges(patched.bytes),
     ...(context.excludedRanges || []),
   ].filter(validRange);
+  const waitstateScanExcludedRanges = [...(context.excludedRanges || [])].filter(validRange);
+  const waitstatePlan = options.waitstate?.enabled
+    ? planWaitstateForLayout(
+      patched.bytes,
+      options.waitstate,
+      excludedRanges,
+      waitstateScanExcludedRanges,
+    )
+    : null;
   let rtcPayloadOffset = context.rtcPayloadOffset ?? null;
   let waitstatePayloadOffset = context.waitstatePayloadOffset ?? null;
   let irqPayloadOffset = context.irqPayloadOffset ?? null;
@@ -165,12 +186,12 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
       patched.result.warnings,
       {
         rtcSpan: rtcPayloadSpanForLayout(),
-        waitstateSpan: waitstatePayloadSpanForLayout(patched.bytes, options.waitstate || {}),
+        waitstateSpan: waitstatePlan?.totalPayloadSpan || 0,
         irqSpan: irqHandlerPayloadSpanForLayout(),
       },
       [
         ...excludedRanges,
-        ...waitstateFixedWriteRangesForLayout(patched.bytes, options.waitstate || {}),
+        ...(waitstatePlan?.fixedWriteRanges || []),
       ],
     );
     patched.bytes = rom.bytes;
@@ -210,6 +231,8 @@ function applyStandaloneAddonPatches(patched, options = {}, context = {}) {
   if (rtcRange) waitstateExcludedRanges.push(rtcRange);
   patched = applyWaitstateStandalonePatch(patched, options.waitstate, {
     excludedRanges: waitstateExcludedRanges,
+    scanExcludedRanges: waitstateScanExcludedRanges,
+    structuralPlan: waitstatePlan,
     waitstatePayloadOffset,
   });
   const waitstateRange = payloadRange(patched.result.waitstate, patched.result.waitstate?.payloadOffset);
@@ -338,15 +361,45 @@ function sharedIrqIsRequired(result) {
 }
 
 function ensureSuccessfulPatch(result, options = {}) {
-  if (result?.batteryless?.status === "failed") throw new Error(failureWarning(result, "Batteryless SRAM:"));
-  if (options.patchMode === PATCH_MODES.SRAM && ["failed", "unsupported"].includes(result?.savePatch?.status)) throw new Error(firstWarning(result));
+  if (options.waitstate?.enabled && result?.waitstate?.status !== "patched") {
+    throw new Error(failureWarning(result, "Waitstate:"));
+  }
+  if (result?.batteryless?.status === "failed") {
+    const reasonCode = result.batteryless.reasonCode;
+    if (Object.values(PATCH_REASON_CODE).includes(reasonCode)) {
+      throw new PatchError(failureWarning(result, "Batteryless SRAM:"), {
+        code: reasonCode,
+        isRecoverable: true,
+      });
+    }
+    throw new Error(failureWarning(result, "Batteryless SRAM:"));
+  }
+  if (options.patchMode === PATCH_MODES.SRAM && ["failed", "unsupported"].includes(result?.savePatch?.status)) {
+    const reasonCode = result.savePatch.reasonCode;
+    if (Object.values(PATCH_REASON_CODE).includes(reasonCode)) {
+      throw new PatchError(firstWarning(result), {
+        code: reasonCode,
+        isRecoverable: true,
+      });
+    }
+    throw new Error(firstWarning(result));
+  }
   if (result?.rtc?.status === "patched"
       && result.rtc.tickMode === RTC_TICK_MODES.VBLANK
       && result?.irqHandler?.status !== "patched") {
     throw new Error(failureWarning(result, "Shared IRQ:") || "Continuous Fake RTC requires the shared IRQ handler.");
   }
   if (result?.irqHandler?.status === "failed" && sharedIrqIsRequired(result)) throw new Error(failureWarning(result, "Shared IRQ:"));
-  if (result?.status === "unsupported") throw new Error(firstWarning(result));
+  if (result?.status === "unsupported") {
+    const reasonCode = result?.savePatch?.reasonCode;
+    if (Object.values(PATCH_REASON_CODE).includes(reasonCode)) {
+      throw new PatchError(firstWarning(result), {
+        code: reasonCode,
+        isRecoverable: true,
+      });
+    }
+    throw new Error(firstWarning(result));
+  }
 }
 
 const activeRequestIds = new Set();
@@ -386,6 +439,7 @@ self.addEventListener("message", async (event) => {
         placementExcludedRanges: waitstateFixedWriteRangesForLayout(
           romBytes,
           message.options.waitstate || {},
+          findStartupRomCopySourceRanges(romBytes),
         ),
         deferHeaderFinalization: true,
       });
@@ -401,6 +455,7 @@ self.addEventListener("message", async (event) => {
         placementExcludedRanges: waitstateFixedWriteRangesForLayout(
           romBytes,
           message.options.waitstate || {},
+          findStartupRomCopySourceRanges(romBytes),
         ),
         deferHeaderFinalization: true,
       });
@@ -409,7 +464,7 @@ self.addEventListener("message", async (event) => {
         waitstateExcludedRanges: directRuntimeExcludedRanges(patched.result),
         indicatorMode: "off",
         persistenceFlags: shouldPersistRtc(message.options)
-          ? RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG
+          ? RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG
           : 0,
       });
     } else if (message.options.patchMode === PATCH_MODES.NONE) {

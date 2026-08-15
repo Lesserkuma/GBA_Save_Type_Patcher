@@ -27,6 +27,8 @@
 
 #define SAVE_BASE GBA_SAVE_BASE_ADDRESS
 #define SAVE_SIZE 0x10000u
+#define EWRAM_START 0x02000000u
+#define EWRAM_END 0x02040000u
 #define SAVE_MAGIC_0 0x5555u
 #define SAVE_MAGIC_1 0x2AAAu
 #define SECTOR_SIZE 0x1000u
@@ -109,10 +111,9 @@
 #define SNAPSHOT_PAGE_SIZE 0x400u
 #define SNAPSHOT_PAGE_COUNT (SRAM_LOGICAL_SIZE / SNAPSHOT_PAGE_SIZE)
 #define SNAPSHOT_INDEX_SIZE (SNAPSHOT_PAGE_COUNT * 2u)
-#define SNAPSHOT_GAP_CHUNK 32u
 #define SNAPSHOT_RLE_ENCODE_MAX (SRAM_LOGICAL_SIZE * 2u)
-#define SNAPSHOT_PROVIDER_MAX 128u
-#define SNAPSHOT_TRANSIENT_MAX 8u
+#define SNAPSHOT_MIRROR_METADATA_SIZE 16u
+#define SNAPSHOT_MIRROR_MAGIC 0x52494D4Cu /* "LMIR" */
 
 typedef uint8_t (*FlashReadByteFn)(const volatile uint8_t *address);
 typedef void (*FlashReadRangeFn)(const volatile uint8_t *source,
@@ -135,19 +136,7 @@ typedef struct {
 
 typedef FlashReaderStorage *FlashReadFn;
 
-typedef struct {
-    uint32_t logical_first;
-    uint32_t size;
-    uintptr_t source;
-} SnapshotProvider;
-
-typedef struct {
-    uint32_t logical_first;
-    uint32_t size;
-    uintptr_t source;
-} SnapshotRange;
-
-#define DIRECT_SIGNATURE_ASM R"(.ascii "lk_flash_direct_v17"
+#define DIRECT_SIGNATURE_ASM R"(.ascii "lk_flash_direct"
 )"
 
 #define SRAM_BLANK_ZERO_ASM R"(
@@ -272,20 +261,14 @@ extern HIDDEN const uint16_t
 #endif
 
 #ifdef DIRECT_SNAPSHOT_BUILD
-HIDDEN volatile const uint32_t direct_snapshot_provider_count_config
+HIDDEN volatile const uint32_t direct_snapshot_workspace_base_config
+    __attribute__((section(".direct_header"), used)) = 0;
+HIDDEN volatile const uint32_t direct_snapshot_reader_base_config
     __attribute__((section(".direct_header"), used)) = 0;
 HIDDEN volatile const uint32_t direct_snapshot_commit_first_config
     __attribute__((section(".direct_header"), used)) = 0;
 HIDDEN volatile const uint32_t direct_snapshot_commit_size_config
     __attribute__((section(".direct_header"), used)) = 0;
-HIDDEN volatile const uint32_t direct_snapshot_transient_count_config
-    __attribute__((section(".direct_header"), used)) = 0;
-HIDDEN volatile const SnapshotProvider
-    direct_snapshot_providers_config[SNAPSHOT_PROVIDER_MAX]
-    __attribute__((section(".direct_header"), used)) = {{0, 0, 0}};
-HIDDEN volatile const SnapshotRange
-    direct_snapshot_transient_ranges_config[SNAPSHOT_TRANSIENT_MAX]
-    __attribute__((section(".direct_header"), used)) = {{0, 0, 0}};
 #endif
 
 static uint32_t direct_save_protocol_valid(void)
@@ -583,30 +566,20 @@ static uint32_t flash_erase_sector(FlashReadFn reader, uint32_t offset)
 }
 
 #ifndef DIRECT_SRAM_ONLY_BUILD
-static uint32_t flash_copy(FlashReadFn reader, uint32_t destination,
-                           uint32_t source, uint32_t size)
+static NOINLINE uint32_t flash_copy(FlashReadFn reader,
+                                    uint32_t destination,
+                                    uint32_t source, uint32_t size)
 {
-    uint8_t expected[FLASH_READ_CHUNK];
-    uint8_t actual[FLASH_READ_CHUNK];
     uint32_t cursor;
-    for (cursor = 0; cursor < size; cursor += sizeof(expected)) {
-        uint32_t part = size - cursor < sizeof(expected)
-            ? size - cursor : sizeof(expected);
-        flash_read_range(reader, source + cursor, expected, part);
-        if (!flash_program_range(
-                reader, destination + cursor, expected, part))
+    for (cursor = 0; cursor < size; ++cursor) {
+        uint8_t expected = flash_read(reader, source + cursor);
+        if (!flash_program_byte(reader, destination + cursor, expected))
             return 0;
     }
-    for (cursor = 0; cursor < size; cursor += sizeof(expected)) {
-        uint32_t part = size - cursor < sizeof(expected)
-            ? size - cursor : sizeof(expected);
-        uint32_t index;
-        flash_read_range(reader, source + cursor, expected, part);
-        flash_read_range(reader, destination + cursor, actual, part);
-        for (index = 0; index < part; ++index) {
-            if (actual[index] != expected[index])
-                return 0;
-        }
+    for (cursor = 0; cursor < size; ++cursor) {
+        if (flash_read(reader, destination + cursor)
+                != flash_read(reader, source + cursor))
+            return 0;
     }
     return 1;
 }
@@ -1193,7 +1166,7 @@ static uint32_t sram16_read_range(FlashReadFn reader, uint32_t first,
 }
 
 
-#ifdef DIRECT_SNAPSHOT_BUILD
+#if 0 /* Replaced by the mirrored batch runtime below. */
 typedef struct {
     uint32_t valid;
     uint32_t blank;
@@ -2143,6 +2116,599 @@ static uint32_t snapshot_range_has_provider(uint32_t first, uint32_t size)
 
 #endif
 
+#ifdef DIRECT_SNAPSHOT_BUILD
+typedef struct {
+    uint32_t valid;
+    uint32_t blank;
+    uint32_t header_base;
+    uint32_t data_base;
+    uint32_t tag;
+    uint32_t stored;
+    uint32_t fingerprint;
+} SnapshotState;
+
+typedef struct {
+    FlashReadFn reader;
+    SnapshotState state;
+    uint32_t input;
+    uint32_t output;
+    uint32_t remaining;
+    uint32_t literal;
+    uint8_t run_value;
+} SnapshotDecoder;
+
+typedef struct {
+    FlashReadFn reader;
+    uint32_t output_base;
+    uint32_t written;
+    uint32_t used;
+    uint32_t erased_until;
+    uint8_t buffer[64u];
+} SnapshotSink;
+
+typedef struct {
+    volatile uint32_t magic;
+    volatile uint32_t inverse;
+    volatile uint32_t dirty;
+    volatile uint32_t generation;
+} SnapshotMirrorMetadata;
+
+static uint32_t snapshot_read_u32(const uint8_t *source)
+{
+    return source[0]
+        | ((uint32_t)source[1] << 8)
+        | ((uint32_t)source[2] << 16)
+        | ((uint32_t)source[3] << 24);
+}
+
+static void snapshot_write_u32(uint8_t *destination, uint32_t value)
+{
+    destination[0] = (uint8_t)value;
+    destination[1] = (uint8_t)(value >> 8);
+    destination[2] = (uint8_t)(value >> 16);
+    destination[3] = (uint8_t)(value >> 24);
+}
+
+static uint8_t *snapshot_mirror(void)
+{
+    return (uint8_t *)(uintptr_t)direct_snapshot_workspace_base_config;
+}
+
+static SnapshotMirrorMetadata *snapshot_metadata(void)
+{
+    return (SnapshotMirrorMetadata *)(uintptr_t)(
+        direct_snapshot_workspace_base_config + SRAM_LOGICAL_SIZE);
+}
+
+static uint32_t snapshot_configs_valid(void)
+{
+    uint32_t workspace = direct_snapshot_workspace_base_config;
+    uint32_t reader = direct_snapshot_reader_base_config;
+    uint32_t mirror_end;
+    uint32_t reader_end;
+    if ((workspace & 15u) != 0u || (reader & 15u) != 0u
+        || workspace < EWRAM_START
+        || reader < EWRAM_START)
+        return 0u;
+    mirror_end = workspace + SRAM_LOGICAL_SIZE
+        + SNAPSHOT_MIRROR_METADATA_SIZE;
+    reader_end = reader + sizeof(FlashReaderStorage);
+    if (mirror_end < workspace || reader_end < reader
+        || mirror_end > EWRAM_END
+        || reader_end > EWRAM_END
+        || !(mirror_end <= reader || reader_end <= workspace)
+        || direct_snapshot_commit_first_config >= SRAM_LOGICAL_SIZE
+        || direct_snapshot_commit_size_config == 0u
+        || direct_snapshot_commit_size_config
+            > SRAM_LOGICAL_SIZE - direct_snapshot_commit_first_config)
+        return 0u;
+    return 1u;
+}
+
+static FlashReadFn snapshot_persistent_reader(void)
+{
+    FlashReaderStorage *storage;
+    if (!snapshot_configs_valid())
+        return (FlashReadFn)0;
+    storage = (FlashReaderStorage *)(uintptr_t)
+        direct_snapshot_reader_base_config;
+    return flash_reader_on_stack(storage);
+}
+
+static uint32_t snapshot_header_at(FlashReadFn reader, uint32_t base,
+                                   SnapshotState *state)
+{
+    uint8_t header[SNAPSHOT_HEADER_SIZE];
+    uint32_t stored;
+    flash_read_range(reader, base, header, sizeof(header));
+    if (snapshot_read_u32(header) != SNAPSHOT_MAGIC
+        || header[4] != SNAPSHOT_VERSION
+        || (header[5] != SNAPSHOT_RAW && header[5] != SNAPSHOT_RLE))
+        return 0u;
+    stored = header[6] | ((uint32_t)header[7] << 8);
+    if ((uint16_t)(stored ^ (header[8] | ((uint32_t)header[9] << 8)))
+            != 0xFFFFu
+        || header[10] != 0x00u || header[11] != 0x80u
+        || stored == 0u
+        || (header[5] == SNAPSHOT_RAW && stored != SRAM_LOGICAL_SIZE)
+        || (header[5] == SNAPSHOT_RLE
+            && (stored <= SNAPSHOT_INDEX_SIZE
+                || stored > SNAPSHOT_SLOT_SIZE - SNAPSHOT_HEADER_SIZE)))
+        return 0u;
+    state->valid = 1u;
+    state->blank = 0u;
+    state->header_base = base;
+    state->data_base = base + (header[5] == SNAPSHOT_RAW
+        ? 0u : SNAPSHOT_DATA_BASE);
+    state->tag = header[5];
+    state->stored = stored;
+    state->fingerprint = snapshot_read_u32(header + 12);
+    return 1u;
+}
+
+static uint32_t snapshot_locate(FlashReadFn reader, SnapshotState *state)
+{
+    if (snapshot_header_at(reader, 0u, state))
+        return 1u;
+    if (snapshot_header_at(reader, SNAPSHOT_SLOT_SIZE, state))
+        return 1u;
+    state->valid = 1u;
+    state->blank = 1u;
+    state->header_base = 0u;
+    state->data_base = 0u;
+    state->tag = SNAPSHOT_RAW;
+    state->stored = 0u;
+    state->fingerprint = 0u;
+    return 1u;
+}
+
+static uint32_t snapshot_decoder_init(SnapshotDecoder *decoder,
+                                      FlashReadFn reader,
+                                      const SnapshotState *state)
+{
+    decoder->reader = reader;
+    decoder->state = *state;
+    decoder->input = state->blank || state->tag == SNAPSHOT_RAW
+        ? 0u : SNAPSHOT_INDEX_SIZE;
+    decoder->output = 0u;
+    decoder->remaining = 0u;
+    decoder->literal = 0u;
+    decoder->run_value = 0u;
+    return state->valid;
+}
+
+static uint32_t snapshot_decoder_next(SnapshotDecoder *decoder,
+                                      uint8_t *value)
+{
+    uint32_t control;
+    if (decoder->output >= SRAM_LOGICAL_SIZE)
+        return 0u;
+    if (decoder->state.blank) {
+        *value = 0u;
+        ++decoder->output;
+        return 1u;
+    }
+    if (decoder->state.tag == SNAPSHOT_RAW) {
+        *value = decoder->output < SNAPSHOT_HEADER_SIZE
+            ? 0u : (uint8_t)~flash_read(
+                decoder->reader,
+                decoder->state.data_base + decoder->output);
+        ++decoder->output;
+        return 1u;
+    }
+    if (decoder->remaining == 0u) {
+        if (decoder->input >= decoder->state.stored)
+            return 0u;
+        control = (uint8_t)~flash_read(
+            decoder->reader, decoder->state.data_base + decoder->input++);
+        decoder->remaining = control < 0x80u
+            ? control + 1u : (control & 0x7Fu) + 3u;
+        decoder->literal = control < 0x80u;
+        if (decoder->remaining > SRAM_LOGICAL_SIZE - decoder->output)
+            return 0u;
+        if (!decoder->literal) {
+            if (decoder->input >= decoder->state.stored)
+                return 0u;
+            decoder->run_value = (uint8_t)~flash_read(
+                decoder->reader,
+                decoder->state.data_base + decoder->input++);
+        }
+    }
+    if (decoder->literal) {
+        if (decoder->input >= decoder->state.stored)
+            return 0u;
+        *value = (uint8_t)~flash_read(
+            decoder->reader, decoder->state.data_base + decoder->input++);
+    } else {
+        *value = decoder->run_value;
+    }
+    --decoder->remaining;
+    ++decoder->output;
+    return 1u;
+}
+
+static void snapshot_fingerprint_byte(uint32_t *fingerprint,
+                                      uint32_t logical, uint8_t value)
+{
+    uint32_t mixed;
+    if (!fingerprint || value == 0u)
+        return;
+    mixed = ((logical + 1u) * 0x9E3779B1u)
+        ^ ((uint32_t)value * 0x85EBCA6Bu);
+    mixed ^= mixed >> 16;
+    *fingerprint ^= mixed;
+    *fingerprint = (*fingerprint << 5) | (*fingerprint >> 27);
+}
+
+static uint32_t snapshot_mirror_fingerprint(const uint8_t *mirror)
+{
+    uint32_t fingerprint = 0x6D2B79F5u;
+    uint32_t index;
+    for (index = 0u; index < SRAM_LOGICAL_SIZE; ++index)
+        snapshot_fingerprint_byte(&fingerprint, index, mirror[index]);
+    return fingerprint;
+}
+
+static void snapshot_mirror_fill_zero(uint8_t *mirror)
+{
+    uint32_t *words = (uint32_t *)mirror;
+    uint32_t index;
+    for (index = 0u; index < SRAM_LOGICAL_SIZE / 4u; ++index)
+        words[index] = 0u;
+}
+
+static uint32_t snapshot_mirror_prepare(FlashReadFn reader)
+{
+    SnapshotMirrorMetadata *metadata = snapshot_metadata();
+    uint8_t *mirror = snapshot_mirror();
+    SnapshotState state;
+    SnapshotDecoder decoder;
+    uint32_t index;
+    uint32_t valid = 1u;
+    if (metadata->magic == SNAPSHOT_MIRROR_MAGIC
+        && metadata->inverse == ~SNAPSHOT_MIRROR_MAGIC)
+        return 1u;
+    if (!snapshot_locate(reader, &state))
+        return 0u;
+    if (state.blank) {
+        snapshot_mirror_fill_zero(mirror);
+    } else {
+        if (!snapshot_decoder_init(&decoder, reader, &state))
+            valid = 0u;
+        for (index = 0u; valid && index < SRAM_LOGICAL_SIZE; ++index) {
+            if (!snapshot_decoder_next(&decoder, &mirror[index]))
+                valid = 0u;
+        }
+        if (valid && (decoder.output != SRAM_LOGICAL_SIZE
+            || (state.tag == SNAPSHOT_RLE
+                && (decoder.remaining != 0u
+                    || decoder.input != state.stored))))
+            valid = 0u;
+        if (valid && snapshot_mirror_fingerprint(mirror)
+                != state.fingerprint)
+            valid = 0u;
+        if (!valid)
+            snapshot_mirror_fill_zero(mirror);
+    }
+    metadata->dirty = 0u;
+    metadata->generation = 0u;
+    metadata->inverse = ~SNAPSHOT_MIRROR_MAGIC;
+    metadata->magic = SNAPSHOT_MIRROR_MAGIC;
+    return 1u;
+}
+
+static uint32_t snapshot_mirror_copy(uint8_t *destination,
+                                     const uint8_t *source,
+                                     uint32_t size)
+{
+    uintptr_t destination_address = (uintptr_t)destination;
+    uintptr_t source_address = (uintptr_t)source;
+    uint32_t changed = 0u;
+    uint32_t backwards = destination_address > source_address
+        && destination_address < source_address + size;
+    uint32_t index;
+    for (index = 0u; index < size; ++index) {
+        uint32_t at = backwards ? size - index - 1u : index;
+        uint8_t value = source[at];
+        if (destination[at] != value) {
+            destination[at] = value;
+            changed = 1u;
+        }
+    }
+    return changed;
+}
+
+static uint32_t snapshot_sink_emit(SnapshotSink *sink, uint8_t value)
+{
+    uint32_t index;
+    uint32_t programmed = 0u;
+    sink->buffer[sink->used++] = (uint8_t)~value;
+    if (sink->used != sizeof(sink->buffer))
+        return 1u;
+    for (index = 0u; index < sink->used; ++index)
+        programmed |= sink->buffer[index] != 0xFFu;
+    while (sink->erased_until
+           < sink->output_base + sink->written + sink->used) {
+        if (!flash_erase_sector(sink->reader, sink->erased_until))
+            return 0u;
+        sink->erased_until += SECTOR_SIZE;
+    }
+    if (programmed && !flash_program_range(
+            sink->reader, sink->output_base + sink->written,
+            sink->buffer, sink->used))
+        return 0u;
+    sink->written += sink->used;
+    sink->used = 0u;
+    return 1u;
+}
+
+static uint32_t snapshot_sink_finish(SnapshotSink *sink)
+{
+    uint32_t index;
+    uint32_t programmed = 0u;
+    for (index = 0u; index < sink->used; ++index)
+        programmed |= sink->buffer[index] != 0xFFu;
+    while (sink->erased_until
+           < sink->output_base + sink->written + sink->used) {
+        if (!flash_erase_sector(sink->reader, sink->erased_until))
+            return 0u;
+        sink->erased_until += SECTOR_SIZE;
+    }
+    if (programmed && !flash_program_range(
+            sink->reader, sink->output_base + sink->written,
+            sink->buffer, sink->used))
+        return 0u;
+    sink->written += sink->used;
+    sink->used = 0u;
+    return 1u;
+}
+
+static uint32_t snapshot_emit(SnapshotSink *sink, uint8_t value)
+{
+    return !sink || snapshot_sink_emit(sink, value);
+}
+
+static NOINLINE uint32_t snapshot_encode_bytes(
+    SnapshotSink *sink, const uint8_t *source, uint32_t size,
+    uint32_t logical_first, uint32_t *produced, uint32_t *fingerprint)
+{
+    uint32_t at = 0u;
+    while (at < size) {
+        uint32_t run = 1u;
+        while (at + run < size && run < 130u
+               && source[at + run] == source[at])
+            ++run;
+        if (run >= 3u) {
+            uint32_t index;
+            if (!snapshot_emit(sink, (uint8_t)(0x80u | (run - 3u)))
+                || !snapshot_emit(sink, source[at]))
+                return 0u;
+            for (index = 0u; fingerprint && index < run; ++index)
+                snapshot_fingerprint_byte(
+                    fingerprint, logical_first + at + index, source[at]);
+            *produced += 2u;
+            at += run;
+        } else {
+            uint32_t first = at;
+            uint32_t index;
+            at += run;
+            while (at < size && at - first < 128u) {
+                run = 1u;
+                while (at + run < size && run < 130u
+                       && source[at + run] == source[at])
+                    ++run;
+                if (run >= 3u || at - first + run > 128u)
+                    break;
+                at += run;
+            }
+            if (!snapshot_emit(sink, (uint8_t)(at - first - 1u)))
+                return 0u;
+            for (index = first; index < at; ++index) {
+                if (!snapshot_emit(sink, source[index]))
+                    return 0u;
+                snapshot_fingerprint_byte(
+                    fingerprint, logical_first + index, source[index]);
+            }
+            *produced += at - first + 1u;
+        }
+    }
+    return 1u;
+}
+
+static NOINLINE uint32_t snapshot_encode_mirror(
+    SnapshotSink *sink, const uint8_t *mirror, uint32_t *stored,
+    uint32_t *fingerprint, uint16_t *page_offsets)
+{
+    uint32_t logical;
+    uint32_t produced = 0u;
+    if (fingerprint)
+        *fingerprint = 0x6D2B79F5u;
+    for (logical = 0u; logical < SRAM_LOGICAL_SIZE;
+         logical += SNAPSHOT_PAGE_SIZE) {
+        if (page_offsets)
+            page_offsets[logical / SNAPSHOT_PAGE_SIZE] = (uint16_t)produced;
+        if (!snapshot_encode_bytes(
+                sink, mirror + logical, SNAPSHOT_PAGE_SIZE, logical,
+                &produced, fingerprint))
+            return 0u;
+    }
+    *stored = produced;
+    return produced <= SNAPSHOT_RLE_ENCODE_MAX
+        && (!sink || snapshot_sink_finish(sink));
+}
+
+static uint32_t snapshot_write_raw_mirror(
+    SnapshotSink *sink, const uint8_t *mirror, uint32_t *fingerprint)
+{
+    uint32_t index;
+    *fingerprint = 0x6D2B79F5u;
+    for (index = 0u; index < SRAM_LOGICAL_SIZE; ++index) {
+        if (!snapshot_sink_emit(sink, mirror[index]))
+            return 0u;
+        snapshot_fingerprint_byte(fingerprint, index, mirror[index]);
+    }
+    return snapshot_sink_finish(sink);
+}
+
+static NOINLINE uint32_t snapshot_commit_core(FlashReadFn reader)
+{
+    SnapshotMirrorMetadata *metadata = snapshot_metadata();
+    const uint8_t *mirror = snapshot_mirror();
+    SnapshotState previous;
+    SnapshotSink sink;
+    uint16_t page_offsets[SNAPSHOT_PAGE_COUNT];
+    uint8_t *header = (uint8_t *)page_offsets;
+    uint32_t rle_size;
+    uint32_t written;
+    uint32_t index;
+    uint32_t fingerprint;
+    uint32_t target_base;
+    uint32_t tag;
+    uint32_t stored;
+    if (metadata->dirty == 0u)
+        return 1u;
+    if (!snapshot_locate(reader, &previous)
+        || !snapshot_encode_mirror(
+            (SnapshotSink *)0, mirror, &rle_size,
+            (uint32_t *)0, page_offsets))
+        return 0u;
+    tag = rle_size + SNAPSHOT_INDEX_SIZE
+            <= SNAPSHOT_SLOT_SIZE - SNAPSHOT_HEADER_SIZE
+        ? SNAPSHOT_RLE : SNAPSHOT_RAW;
+    if (tag == SNAPSHOT_RAW) {
+        for (index = 0u; index < SNAPSHOT_HEADER_SIZE; ++index) {
+            if (mirror[index] != 0u)
+                return 0u;
+        }
+    }
+    target_base = previous.blank
+        ? 0u : previous.header_base ^ SNAPSHOT_SLOT_SIZE;
+    sink.reader = reader;
+    sink.output_base = target_base + (tag == SNAPSHOT_RLE
+        ? SNAPSHOT_DATA_BASE + SNAPSHOT_INDEX_SIZE : 0u);
+    sink.written = 0u;
+    sink.used = 0u;
+    sink.erased_until = target_base;
+    if (tag == SNAPSHOT_RLE) {
+        if (!snapshot_encode_mirror(
+                &sink, mirror, &written, &fingerprint, page_offsets)
+            || written != rle_size)
+            return 0u;
+        stored = written + SNAPSHOT_INDEX_SIZE;
+        for (index = 0u; index < SNAPSHOT_PAGE_COUNT; ++index)
+            page_offsets[index] = (uint16_t)~page_offsets[index];
+        if (!flash_program_range(
+                reader, target_base + SNAPSHOT_DATA_BASE,
+                (const uint8_t *)page_offsets,
+                SNAPSHOT_INDEX_SIZE))
+            return 0u;
+    } else {
+        if (!snapshot_write_raw_mirror(&sink, mirror, &fingerprint)
+            || sink.written != SRAM_LOGICAL_SIZE)
+            return 0u;
+        stored = SRAM_LOGICAL_SIZE;
+    }
+    for (index = 0u; index < SNAPSHOT_HEADER_SIZE; ++index)
+        header[index] = 0xFFu;
+    snapshot_write_u32(header, SNAPSHOT_MAGIC);
+    header[4] = SNAPSHOT_VERSION;
+    header[5] = (uint8_t)tag;
+    header[6] = (uint8_t)stored;
+    header[7] = (uint8_t)(stored >> 8);
+    header[8] = (uint8_t)~stored;
+    header[9] = (uint8_t)~(stored >> 8);
+    header[10] = 0x00u;
+    header[11] = 0x80u;
+    snapshot_write_u32(header + 12, fingerprint);
+    /*
+     * Keep byte zero erased while every other header field is programmed.
+     * The first magic byte is the one-byte commit marker: before that final
+     * write the slot cannot pass snapshot_header_at(), even if power is lost
+     * after all length and fingerprint bytes are present.  The old slot is
+     * invalidated only after the marker has completed.
+     */
+    if (!flash_program_range(
+            reader, target_base + 1u, header + 1u,
+            SNAPSHOT_HEADER_SIZE - 1u)
+        || !flash_program_byte(reader, target_base, header[0]))
+        return 0u;
+    if (!previous.blank
+        && !flash_erase_sector(reader, previous.header_base))
+        return 0u;
+    metadata->dirty = 0u;
+    ++metadata->generation;
+    return 1u;
+}
+
+static NOINLINE uint32_t snapshot_commit(FlashReadFn reader)
+{
+    uint16_t old_ime = REG_IME;
+    uint32_t result;
+    REG_IME = 0u;
+    __asm volatile("" ::: "memory");
+    result = snapshot_commit_core(reader);
+    __asm volatile("" ::: "memory");
+    REG_IME = old_ime;
+    return result;
+}
+
+static uint32_t snapshot_sram_write(FlashReadFn reader,
+                                    const uint8_t *source,
+                                    uint32_t first, uint32_t size)
+{
+    SnapshotMirrorMetadata *metadata;
+    uint8_t *mirror;
+    const uint8_t *effective_source = source;
+    if (!reader || !snapshot_configs_valid()
+        || (source == (const uint8_t *)0 && size != 0u)
+        || first > SRAM_LOGICAL_SIZE
+        || size > SRAM_LOGICAL_SIZE - first
+        || !snapshot_mirror_prepare(reader))
+        return 0u;
+    mirror = snapshot_mirror();
+    metadata = snapshot_metadata();
+    if (source_is_save(source, size)) {
+        uint32_t source_first = (uintptr_t)source
+            & (SRAM_LOGICAL_SIZE - 1u);
+        if (source_first > SRAM_LOGICAL_SIZE - size)
+            return 0u;
+        effective_source = mirror + source_first;
+    } else if (source_starts_in_save(source)) {
+        return 0u;
+    }
+    if (snapshot_mirror_copy(mirror + first, effective_source, size))
+        metadata->dirty = 1u;
+    if (first == direct_snapshot_commit_first_config
+        && size == direct_snapshot_commit_size_config)
+        return snapshot_commit(reader);
+    return 1u;
+}
+
+static uint32_t snapshot_sram_read(FlashReadFn reader, uint32_t first,
+                                   uint8_t *destination, uint32_t size)
+{
+    const uint8_t *mirror;
+    uint32_t index;
+    if (!reader || (destination == (uint8_t *)0 && size != 0u)
+        || first > SRAM_LOGICAL_SIZE
+        || size > SRAM_LOGICAL_SIZE - first
+        || !snapshot_mirror_prepare(reader))
+        return 0u;
+    mirror = snapshot_mirror();
+    for (index = 0u; index < size; ++index)
+        destination[index] = mirror[first + index];
+    return 1u;
+}
+
+static uint32_t snapshot_visible_read(
+    FlashReadFn reader, const uint8_t *source, uint32_t first,
+    uint8_t *destination, uint32_t size)
+{
+    (void)source;
+    return snapshot_sram_read(reader, first, destination, size);
+}
+#endif
+
 static uint32_t sram16_program_entry(FlashReadFn reader,
                                      uint32_t position,
                                      uint32_t logical,
@@ -2366,111 +2932,42 @@ static NOINLINE uint32_t sram16_rebuild_sector(
 
 #ifdef DIRECT_SRAM_TRANSACTION_BUILD
 /* Short SDK transactions are metadata updates, not fragments of the bulk
- * writer.  Decode only their requested bytes and only the occupied prefix of
- * the append-only log.  This keeps late-VBlank writes bounded without changing
- * the physical format or weakening exact readback semantics. */
-static uint32_t sram16_write_partial(
-    FlashReadFn reader, const uint8_t *source, uint32_t first, uint32_t size)
+ * writer.  The observed byte-at-a-time initializer needs a bounded fast path,
+ * but keeping block-sized scratch arrays in the public writer exhausts the
+ * caller stack in otherwise valid games.  Handle exactly one byte with scalar
+ * state; every larger request stays on the established block writer. */
+static NOINLINE uint32_t sram16_write_byte(
+    FlashReadFn reader, const uint8_t *source, uint32_t first)
 {
-    uint8_t visible[SRAM_SECTOR_LOG_BLOCK_SIZE];
-    uint8_t overlay[SRAM_SECTOR_OVERLAY_SIZE];
-    uint8_t log_changes[SRAM_SECTOR_OVERLAY_SIZE];
-    uint8_t record_updates[SRAM_SECTOR_OVERLAY_SIZE];
-    uint16_t latest[SRAM_SECTOR_LOG_BLOCK_SIZE];
-    uint32_t block_first = first
-        & ~(SRAM_SECTOR_LOG_BLOCK_SIZE - 1u);
+    uint8_t visible;
+    uint8_t overlay;
+    uint16_t latest;
     uint32_t log_end;
     uint32_t log_limit;
-    uint32_t log_count = 0u;
-    uint32_t changed = 0u;
-    uint32_t cursor;
-    uint32_t sector = block_first / SECTOR_SIZE;
-    if (!source || size == 0u || size >= SRAM_SECTOR_LOG_BLOCK_SIZE
-        || first >= SRAM_LOGICAL_SIZE
-        || size > SRAM_LOGICAL_SIZE - first
-        || (first + size - 1u) / SRAM_SECTOR_LOG_BLOCK_SIZE
-            != first / SRAM_SECTOR_LOG_BLOCK_SIZE)
+    uint8_t old_physical;
+    uint8_t new_physical;
+    if (!source || first >= SRAM_LOGICAL_SIZE)
         return 0u;
     if (!sram16_load_range(
-            reader, first, visible, size, overlay, latest, &log_end,
+            reader, first, &visible, 1u, &overlay, &latest, &log_end,
             &log_limit))
         return 0u;
-    for (cursor = 0u; cursor < sizeof(log_changes); ++cursor) {
-        log_changes[cursor] = 0u;
-        record_updates[cursor] = 0u;
-    }
-    for (cursor = 0u; cursor < size; ++cursor) {
-        uint8_t mask = (uint8_t)(1u << (cursor & 7u));
-        uint8_t old_physical;
-        uint8_t new_physical;
-        if (visible[cursor] == source[cursor])
-            continue;
-        changed = 1u;
-        old_physical = (uint8_t)~visible[cursor];
-        new_physical = (uint8_t)~source[cursor];
-        if ((overlay[cursor >> 3] & mask) != 0u
-            && latest[cursor] != 0xFFFFu
-            && (old_physical & new_physical) == new_physical) {
-            record_updates[cursor >> 3] |= mask;
-        } else if ((overlay[cursor >> 3] & mask) != 0u
-                   || (old_physical & new_physical) != new_physical) {
-            log_changes[cursor >> 3] |= mask;
-            ++log_count;
-        }
-    }
-    if (!changed)
+    if (visible == *source)
         return 1u;
-    if (sector >= SRAM_SECTOR_LOG_COUNT
-        || (log_count != 0u && !sram16_reserve_log(
-            reader, block_first,
-            log_count * SRAM_SECTOR_LOG_ENTRY_SIZE,
-            &log_end, &log_limit))) {
+    old_physical = (uint8_t)~visible;
+    new_physical = (uint8_t)~*source;
+    if ((overlay & 1u) != 0u && latest != 0xFFFFu
+        && (old_physical & new_physical) == new_physical)
+        return flash_program_byte(reader, latest, new_physical);
+    if ((overlay & 1u) == 0u
+        && (old_physical & new_physical) == new_physical)
+        return flash_program_byte(reader, first, new_physical);
+    if (!sram16_reserve_log(
+            reader, first & ~(SRAM_SECTOR_LOG_BLOCK_SIZE - 1u),
+            SRAM_SECTOR_LOG_ENTRY_SIZE, &log_end, &log_limit))
         return sram16_rebuild_sector(
-            reader, first & ~(SECTOR_SIZE - 1u), first, source, size);
-    }
-    for (cursor = 0u; cursor < size;) {
-        uint32_t run_first;
-        while (cursor < size
-               && (visible[cursor] == source[cursor]
-                   || (log_changes[cursor >> 3]
-                       & (1u << (cursor & 7u))) != 0u
-                   || (record_updates[cursor >> 3]
-                       & (1u << (cursor & 7u))) != 0u))
-            ++cursor;
-        run_first = cursor;
-        while (cursor < size
-               && visible[cursor] != source[cursor]
-               && (log_changes[cursor >> 3]
-                   & (1u << (cursor & 7u))) == 0u
-               && (record_updates[cursor >> 3]
-                   & (1u << (cursor & 7u))) == 0u)
-            ++cursor;
-        if (cursor != run_first
-            && !flash_program_inverted_data(
-                reader, first + run_first, source + run_first,
-                cursor - run_first))
-            return 0u;
-    }
-    for (cursor = 0u; cursor < size; ++cursor) {
-        if ((record_updates[cursor >> 3]
-             & (1u << (cursor & 7u))) == 0u)
-            continue;
-        if (latest[cursor] == 0xFFFFu
-            || !flash_program_byte(
-                reader, latest[cursor],
-                (uint8_t)~source[cursor]))
-            return 0u;
-    }
-    for (cursor = 0u; cursor < size; ++cursor) {
-        if ((log_changes[cursor >> 3]
-             & (1u << (cursor & 7u))) == 0u)
-            continue;
-        if (!sram16_program_entry(
-                reader, log_end, first + cursor, source[cursor]))
-            return 0u;
-        log_end += SRAM_SECTOR_LOG_ENTRY_SIZE;
-    }
-    return 1u;
+            reader, first & ~(SECTOR_SIZE - 1u), first, source, 1u);
+    return sram16_program_entry(reader, log_end, first, *source);
 }
 #endif
 
@@ -2615,8 +3112,8 @@ static uint32_t sram16_write_buffer_fast(
     FlashReadFn reader, const uint8_t *source,
     uint32_t first, uint32_t size, uint32_t fast_blank)
 {
-    if (!fast_blank)
-        return sram16_write_partial(reader, source, first, size);
+    if (size == 1u)
+        return sram16_write_byte(reader, source, first);
     if (fast_blank
         && sram16_blank_slice_matches(reader, source, first, size))
         return 1u;
@@ -2798,8 +3295,8 @@ static uint32_t eeprom_slot_empty(FlashReadFn reader,
     return 1;
 }
 
-static uint32_t eeprom_compact_sector(FlashReadFn reader,
-                                      uint32_t logical_sector)
+static NOINLINE uint32_t eeprom_compact_sector(FlashReadFn reader,
+                                               uint32_t logical_sector)
 {
     uint32_t state = eeprom_layout_state(reader);
     uint32_t scratch = EEPROM_SCRATCH_BASE + logical_sector;
@@ -2847,7 +3344,8 @@ static uint32_t eeprom_compact_sector(FlashReadFn reader,
     return flash_erase_sector(reader, scratch);
 }
 
-static uint32_t eeprom_write_core(FlashReadFn reader, uint32_t logical_first,
+static uint32_t eeprom_write_core(FlashReadFn reader,
+                                  uint32_t logical_first,
                                   const uint8_t *source)
 {
     uint8_t input[8];
@@ -3004,12 +3502,6 @@ static uint32_t write_sram_result(FlashReadFn reader,
         || first > SRAM_LOGICAL_SIZE
         || size > SRAM_LOGICAL_SIZE - first)
         return 0u;
-    /* The commit already validates its source/provider relationship.  Route
-     * it directly so the general non-final-write frame is not retained below
-     * the game's public SRAM wrapper. */
-    if (first == direct_snapshot_commit_first_config
-        && size == direct_snapshot_commit_size_config)
-        return snapshot_commit(reader, source);
     return snapshot_sram_write(reader, source, first, size);
 #else
     return sram16_write_core(reader, source, first, size);
@@ -3028,12 +3520,18 @@ static void sram_apply_sdk_waitstate(void)
 uint32_t write_sram_cached_patched(uint8_t *source, uint8_t *destination,
                                    uint32_t size, uint8_t *cache)
 {
+#ifndef DIRECT_SNAPSHOT_BUILD
     FlashReaderStorage reader_storage;
+#endif
     FlashReadFn reader;
     uint32_t result = size == 0u ? 0xFFFFFFFFu : 0u;
     (void)cache;
     sram_apply_sdk_waitstate();
+#ifdef DIRECT_SNAPSHOT_BUILD
+    reader = snapshot_persistent_reader();
+#else
     reader = flash_reader_on_stack(&reader_storage);
+#endif
     (void)write_sram_result(reader, source, destination, size);
     if (size != 0u)
         result = source[size - 1u];
@@ -3060,10 +3558,16 @@ NAKED uint32_t write_sram_patched(
 uint32_t write_verify_sram_patched(uint8_t *destination, uint8_t *source,
                                    uint32_t size)
 {
+#ifndef DIRECT_SNAPSHOT_BUILD
     FlashReaderStorage reader_storage;
+#endif
     FlashReadFn reader;
     sram_apply_sdk_waitstate();
+#ifdef DIRECT_SNAPSHOT_BUILD
+    reader = snapshot_persistent_reader();
+#else
     reader = flash_reader_on_stack(&reader_storage);
+#endif
     return write_sram_result(reader, source, destination, size)
         ? 0u : 0xFFFFFFFFu;
 }
@@ -3071,14 +3575,16 @@ uint32_t write_verify_sram_patched(uint8_t *destination, uint8_t *source,
 uint32_t read_sram_cached_patched(uint8_t *source, uint8_t *destination,
                                   uint32_t size, uint8_t *cache)
 {
+#ifndef DIRECT_SNAPSHOT_BUILD
     FlashReaderStorage reader_storage;
+#endif
     FlashReadFn reader;
     uint32_t first = (uintptr_t)source & (SRAM_LOGICAL_SIZE - 1u);
     uint32_t result = 0xFFFFFFFFu;
     (void)cache;
     sram_apply_sdk_waitstate();
 #ifdef DIRECT_SNAPSHOT_BUILD
-    reader = flash_reader_on_stack(&reader_storage);
+    reader = snapshot_persistent_reader();
 #else
     reader = flash_byte_reader_on_stack(&reader_storage);
 #endif
@@ -3170,8 +3676,14 @@ uint32_t read_sram_triplet_cached_patched(uint16_t *metadata, uint32_t key,
 uint8_t *verify_sram_cached_patched(uint8_t *source, uint8_t *target,
                                     uint32_t size, uint8_t *cache)
 {
+#ifndef DIRECT_SNAPSHOT_BUILD
     FlashReaderStorage reader_storage;
+#endif
     FlashReadFn reader;
+    uint8_t *expected_source = source;
+    uint8_t *save_target = target;
+    uint32_t source_in_save = source_is_save(source, size);
+    uint32_t target_in_save = source_is_save(target, size);
 #ifdef DIRECT_SNAPSHOT_BUILD
     uint8_t expected[FLASH_READ_CHUNK];
     uint8_t visible[FLASH_READ_CHUNK];
@@ -3179,36 +3691,31 @@ uint8_t *verify_sram_cached_patched(uint8_t *source, uint8_t *target,
     uint8_t visible[SRAM_VERIFY_CHUNK];
     uint32_t state;
 #endif
-    uint32_t first = (uintptr_t)target & (SRAM_LOGICAL_SIZE - 1u);
+    uint32_t first;
     uint32_t cursor;
     (void)cache;
-    sram_apply_sdk_waitstate();
-    reader = flash_reader_on_stack(&reader_storage);
-    if (!direct_config_matches(SAVE_LAYOUT_SRAM) || (!source && size != 0)
-        || first > SRAM_LOGICAL_SIZE || size > SRAM_LOGICAL_SIZE - first)
-        return (uint8_t *)(SAVE_BASE + first);
-#ifdef DIRECT_SNAPSHOT_BUILD
-    /* Only analyzer-proven transaction-local probes may verify without
-     * persistent readback.  Unknown non-provider ranges fail closed. */
-    {
-        SnapshotState transient_state;
-        uint32_t index;
-        if (snapshot_transient_source_matches(source, first, size)
-            && snapshot_locate(reader, &transient_state)) {
-            if (!transient_state.blank)
-                return (uint8_t *)0;
-            for (index = 0u; index < size; ++index) {
-                if (source[index] != 0u)
-                    return target + index;
-            }
-            return (uint8_t *)0;
-        }
+    /* Nintendo's SRAM verifier is symmetric, and released SDK variants use
+     * both (RAM, SAVE) and (SAVE, RAM).  Normalize only the unambiguous case;
+     * both/neither retain the established (source, target) interpretation. */
+    if (source_in_save && !target_in_save) {
+        expected_source = target;
+        save_target = source;
     }
+    first = (uintptr_t)save_target & (SRAM_LOGICAL_SIZE - 1u);
+    sram_apply_sdk_waitstate();
+#ifdef DIRECT_SNAPSHOT_BUILD
+    reader = snapshot_persistent_reader();
+#else
+    reader = flash_reader_on_stack(&reader_storage);
 #endif
+    if (!direct_config_matches(SAVE_LAYOUT_SRAM)
+        || (!expected_source && size != 0)
+        || first > SRAM_LOGICAL_SIZE || size > SRAM_LOGICAL_SIZE - first)
+        return target;
 #ifndef DIRECT_SNAPSHOT_BUILD
     state = sram16_layout_state(reader);
     if (state == 0u)
-        return (uint8_t *)(SAVE_BASE + first);
+        return target;
     for (cursor = 0; cursor < size; cursor += sizeof(visible)) {
         uint32_t part = size - cursor < sizeof(visible)
             ? size - cursor : sizeof(visible);
@@ -3226,7 +3733,7 @@ uint8_t *verify_sram_cached_patched(uint8_t *source, uint8_t *target,
             return target + cursor;
         }
         for (index = 0; index < part; ++index) {
-            if (source[cursor + index] != visible[index])
+            if (expected_source[cursor + index] != visible[index])
                 return target + cursor + index;
         }
     }
@@ -3235,8 +3742,8 @@ uint8_t *verify_sram_cached_patched(uint8_t *source, uint8_t *target,
         uint32_t part = size - cursor < sizeof(visible)
             ? size - cursor : sizeof(visible);
         uint32_t index;
-        copy_from_ram(expected, source + cursor, part);
-        if (!snapshot_visible_read(reader, source + cursor,
+        copy_from_ram(expected, expected_source + cursor, part);
+        if (!snapshot_visible_read(reader, expected_source + cursor,
                                    first + cursor, visible, part))
             return target + cursor;
         for (index = 0; index < part; ++index) {

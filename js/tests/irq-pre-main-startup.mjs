@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import { applyIrqHandlerForPipeline } from "../patchers/irq-handler.js";
+import { IRQ_HANDLER_CONSTANTS } from "../patchers/irq-handler-data.js";
 
 const GBA_ROM_BASE = 0x08000000;
 
@@ -32,112 +33,116 @@ function armBranch(fromOffset, toOffset) {
   return (0xea000000 | (displacement & 0x00ffffff)) >>> 0;
 }
 
-function writeArmStartupInstaller(bytes, base, mainAddress) {
-  // A compact synthetic version of the proven SDK handoff recognized by the
-  // shared IRQ planner. The stack is established before the handler store.
-  writeU32(bytes, base + 0x10, 0xe59fd020); // ldr sp, [pc, #0x20]
-  writeU32(bytes, base + 0x14, 0xe3a02000); // mov r2, #0
-  writeU32(bytes, base + 0x18, 0xe3a03000); // mov r3, #0
-  writeU32(bytes, base + 0x1c, 0xe59f101c); // ldr r1, =03007FFC
-  writeU32(bytes, base + 0x20, 0xe28f0020); // add r0, pc, #0x20 (handler)
-  writeU32(bytes, base + 0x24, 0xe5810000); // str r0, [r1]
-  writeU32(bytes, base + 0x28, 0xe59f1014); // ldr r1, =main
-  writeU32(bytes, base + 0x2c, 0xe1a0e00f); // mov lr, pc
-  writeU32(bytes, base + 0x30, 0xe12fff11); // bx r1
-  writeU32(bytes, base + 0x38, 0x03007f00); // aligned IWRAM stack
-  writeU32(bytes, base + 0x40, 0x03007ffc); // user IRQ slot
+function writeArmStartupInstaller(bytes, base, mainAddress, { clearIwram = false } = {}) {
+  if (clearIwram) {
+    writeU32(bytes, base + 0x04, 0xe3a00403); // mov r0, #03000000
+    writeU32(bytes, base + 0x08, 0xe3a02000); // mov r2, #0
+    writeU32(bytes, base + 0x0c, 0xe3a03902); // mov r3, #0x8000
+    writeU32(bytes, base + 0x10, 0xe8a00004); // stmia r0!, {r2}
+    writeU32(bytes, base + 0x14, 0xe2533004); // subs r3, r3, #4
+    writeU32(bytes, base + 0x18, 0x1afffffc); // bne base+0x10
+    writeU32(bytes, base + 0x1c, 0xe59fd01c); // ldr sp, [pc, #0x1c]
+    writeU32(bytes, base + 0x20, 0xe59f101c); // ldr r1, =03007FFC
+    writeU32(bytes, base + 0x24, 0xe28f0020); // add r0, pc, #0x20
+    writeU32(bytes, base + 0x28, 0xe5810000); // str r0, [r1]
+    writeU32(bytes, base + 0x2c, 0xe59f1014); // ldr r1, =main
+    writeU32(bytes, base + 0x30, 0xe1a0e00f); // mov lr, pc
+    writeU32(bytes, base + 0x34, 0xe12fff11); // bx r1
+    writeU32(bytes, base + 0x40, 0x03007f00);
+    writeU32(bytes, base + 0x44, 0x03007ffc);
+    writeU32(bytes, base + 0x48, mainAddress);
+    return;
+  }
+  writeU32(bytes, base + 0x10, 0xe59fd020);
+  writeU32(bytes, base + 0x14, 0xe3a02000);
+  writeU32(bytes, base + 0x18, 0xe3a03000);
+  writeU32(bytes, base + 0x1c, 0xe59f101c);
+  writeU32(bytes, base + 0x20, 0xe28f0020);
+  writeU32(bytes, base + 0x24, 0xe5810000);
+  writeU32(bytes, base + 0x28, 0xe59f1014);
+  writeU32(bytes, base + 0x2c, 0xe1a0e00f);
+  writeU32(bytes, base + 0x30, 0xe12fff11);
+  writeU32(bytes, base + 0x38, 0x03007f00);
+  writeU32(bytes, base + 0x40, 0x03007ffc);
   writeU32(bytes, base + 0x44, mainAddress);
 }
 
-const input = new Uint8Array(0x6000).fill(0xff);
-const activeStartupBase = 0x200;
-const inactiveStartupBase = 0x2000;
-const mainOffset = 0x680;
-const callbackOffset = 0x3000;
+function writeThumbReinstaller(bytes, offset, literalOffset) {
+  const immediate = (literalOffset - ((offset + 4) & ~3)) >> 2;
+  writeU16(bytes, offset, 0x4800 | immediate); // ldr r0, =03007FFC
+  writeU16(bytes, offset + 2, 0x6004); // str r4, [r0]
+  writeU32(bytes, literalOffset, 0x03007ffc);
+}
 
-writeU32(input, 0, armBranch(0, activeStartupBase + 4));
-writeArmStartupInstaller(input, activeStartupBase, GBA_ROM_BASE + mainOffset + 1);
-writeArmStartupInstaller(input, inactiveStartupBase, 0x02000001);
+function install(input, callbackOffset, payloadOffset = input.length - 0x1000) {
+  const operations = [];
+  const warnings = [];
+  const result = applyIrqHandlerForPipeline(
+    { bytes: new Uint8Array(input) },
+    operations,
+    warnings,
+    {
+      enabled: true,
+      startupCallbackEntry: GBA_ROM_BASE + callbackOffset,
+    },
+    { payloadOffset, excludedRanges: [], entrypointSource: input },
+  );
+  return { result, operations, warnings };
+}
 
-// The active main routine reinstalls the IRQ vector from Thumb code. This is
-// the final structural proof required for a safe pre-main callback.
-writeU16(input, 0x6e8, 0x4901); // ldr r1, [pc, #4]
-writeU16(input, 0x6ea, 0x6008); // str r0, [r1]
-writeU32(input, 0x6f0, 0x03007ffc);
+assert.equal("IRQ_HANDLER_VBLANK_OFFSET" in IRQ_HANDLER_CONSTANTS, false);
+assert.equal("IRQ_HANDLER_CONTINUOUS_VBLANK_OFFSET" in IRQ_HANDLER_CONSTANTS, false);
 
-const rom = { bytes: new Uint8Array(input) };
-const operations = [];
-const warnings = [];
-const result = applyIrqHandlerForPipeline(
-  rom,
-  operations,
-  warnings,
-  {
-    enabled: true,
-    startupCallbackEntry: GBA_ROM_BASE + callbackOffset,
-    allowPreMainStartupCallback: true,
-  },
-  {
-    payloadOffset: 0x4000,
-    excludedRanges: [],
-    entrypointSource: input,
-  },
+// A structurally plausible installer without a proven preceding IWRAM clear
+// is not a pre-main ABI profile and must defer to first VBlank.
+const deferred = new Uint8Array(0x7000).fill(0xff);
+writeU32(deferred, 0, armBranch(0, 0x204));
+writeArmStartupInstaller(deferred, 0x200, GBA_ROM_BASE + 0x680 + 1);
+writeThumbReinstaller(deferred, 0x6e8, 0x6f0);
+const deferredInstall = install(deferred, 0x3000, 0x5000);
+assert.deepEqual(deferredInstall.warnings, []);
+assert.equal(deferredInstall.result.status, "patched");
+assert.equal(deferredInstall.result.startupCallbackTiming, "firstVBlank");
+assert.equal("shortIrqHandler" in deferredInstall.result, false);
+assert.equal(
+  deferredInstall.result.handlerEntry,
+  deferredInstall.result.runtimeBase + IRQ_HANDLER_CONSTANTS.IRQ_HANDLER_OFFSET,
+);
+assert.equal(
+  deferredInstall.result.installHandlerEntry,
+  deferredInstall.result.startupHandlerEntry,
 );
 
-assert.deepEqual(warnings, []);
-assert.equal(result.status, "patched");
-assert.equal(result.startupHooks, 2);
-assert.equal(result.startupCallbackTiming, "preMain");
-assert.equal(result.installHandlerEntry, result.handlerEntry);
+// Pre-main requires the complete structural profile: reset-context installer,
+// established aligned stack, a destructive full-IWRAM clear before install,
+// and exactly one associated Thumb reinstaller.
+const proven = new Uint8Array(0x7000).fill(0xff);
+writeU32(proven, 0, armBranch(0, 0x204));
+writeArmStartupInstaller(proven, 0x200, GBA_ROM_BASE + 0x680 + 1, { clearIwram: true });
+writeThumbReinstaller(proven, 0x6e8, 0x6f0);
+const provenInstall = install(proven, 0x3000, 0x5000);
+assert.deepEqual(provenInstall.warnings, []);
+assert.equal(provenInstall.result.status, "patched");
+assert.equal(provenInstall.result.startupCallbackTiming, "preMain");
+assert.equal(provenInstall.result.installHandlerEntry, provenInstall.result.handlerEntry);
+assert.equal("shortIrqHandler" in provenInstall.result, false);
 
-const stubs = operations.filter((operation) => (
+const startupStubs = provenInstall.operations.filter((operation) => (
   operation.metadata?.name === "Shared IRQ post-CRT startup hook"
 ));
-assert.equal(stubs.length, 2);
-assert.equal(readU32(stubs[0].replacement, 12) >>> 24, 0xeb); // BL callback
-assert.notEqual(readU32(stubs[1].replacement, 12) >>> 24, 0xeb); // regular installer
+assert.ok(startupStubs.length >= 1);
+for (const stub of startupStubs) {
+  const handlerLiteralOffset = readU32(stub.replacement, 12) >>> 24 === 0xeb ? 32 : 24;
+  assert.equal(readU32(stub.replacement, handlerLiteralOffset), provenInstall.result.handlerEntry);
+}
 
-const installerBranches = operations.filter((operation) => (
-  operation.metadata?.name === "Shared IRQ startup installer branch"
-));
-const activeBranch = installerBranches.find((operation) => (
-  operation.offset === activeStartupBase + 0x24
-));
-const inactiveBranch = installerBranches.find((operation) => (
-  operation.offset === inactiveStartupBase + 0x24
-));
-assert.equal(activeBranch.metadata.value, GBA_ROM_BASE + stubs[0].offset);
-assert.equal(inactiveBranch.metadata.value, GBA_ROM_BASE + stubs[1].offset);
+// An additional plausible reset-context reinstaller makes the profile
+// ambiguous and therefore returns to the conservative first-VBlank path.
+const ambiguous = new Uint8Array(proven);
+writeThumbReinstaller(ambiguous, 0x900, 0x908);
+const ambiguousInstall = install(ambiguous, 0x3000, 0x5000);
+assert.equal(ambiguousInstall.result.status, "patched");
+assert.equal(ambiguousInstall.result.startupCallbackTiming, "firstVBlank");
+assert.equal(ambiguousInstall.result.installHandlerEntry, ambiguousInstall.result.startupHandlerEntry);
 
-// AA2P reaches the active Thumb IRQ reinstaller only after roughly 4.5 KiB of
-// main-side initialization. It is still part of the same SDK startup path and
-// must retain the pre-main Batteryless callback instead of falling back to the
-// first VBlank, where it would overwrite an early save probe.
-const delayedThumbInput = new Uint8Array(input);
-delayedThumbInput.fill(0xff, 0x6e8, 0x6f4);
-const delayedThumbLoad = mainOffset + 0x1200;
-writeU16(delayedThumbInput, delayedThumbLoad, 0x4901); // ldr r1, [pc, #4]
-writeU16(delayedThumbInput, delayedThumbLoad + 2, 0x6008); // str r0, [r1]
-writeU32(delayedThumbInput, delayedThumbLoad + 8, 0x03007ffc);
-
-const delayedRom = { bytes: new Uint8Array(delayedThumbInput) };
-const delayedResult = applyIrqHandlerForPipeline(
-  delayedRom,
-  [],
-  [],
-  {
-    enabled: true,
-    startupCallbackEntry: GBA_ROM_BASE + callbackOffset,
-    allowPreMainStartupCallback: true,
-  },
-  {
-    payloadOffset: 0x4000,
-    excludedRanges: [],
-    entrypointSource: delayedThumbInput,
-  },
-);
-
-assert.equal(delayedResult.status, "patched");
-assert.equal(delayedResult.startupCallbackTiming, "preMain");
-
-console.log("shared IRQ pre-main startup tests: PASS");
+console.log("shared IRQ full-handler and startup-profile tests: PASS");

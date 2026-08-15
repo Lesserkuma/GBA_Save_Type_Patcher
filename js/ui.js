@@ -390,7 +390,6 @@ export function readValidatedOptions(state) {
     tickMode: rtcTickMode,
     saveOnGlobalHotkey: rtcSaveOnGlobalHotkey,
   };
-
   if (options.patchMode === PATCH_MODES.NONE && !options.waitstate.enabled && !options.rtc.enabled) {
     throw optionError(UI_TEXT.PATCH_SELECTION_REQUIRED, "patchMode");
   }

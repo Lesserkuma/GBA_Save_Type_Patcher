@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 ENTRY(payload_probe)
-EXTERN(payload_probe payload_reset payload_getstatus payload_gettimedate fake_rtc_menu_run_runtime)
+EXTERN(payload_probe payload_reset payload_getstatus payload_gettimedate
+       payload_zodiac_probe payload_zodiac_gettimedate
+       payload_zodiac_available_address_config payload_zodiac_status_address_config
+       fake_rtc_menu_run_runtime)
 
 SECTIONS
 {

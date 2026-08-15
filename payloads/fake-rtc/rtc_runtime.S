@@ -428,3 +428,70 @@ months:
     .byte   31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 
     .size payload_gettimedate, . - payload_gettimedate
+
+// --------------------------------------------------------------------------
+// Zodiac/Wizard-derived compact seven-byte RTC adapters.
+//
+// This RTC family does not expose the four SiiRTC entry points. Its main-loop
+// hook polls a cached availability word and asks a separate routine for seven
+// raw BCD bytes. The patcher derives the availability and status addresses
+// from each ROM's handler cluster and writes them into the config words below.
+//
+// The availability adapter invokes the regular probe/menu only once per cold
+// boot. Subsequent main-loop calls take the inexpensive cached path. SoftReset
+// preserves both this game-owned RAM flag and the banked-register RTC state.
+// --------------------------------------------------------------------------
+    .section .text.payload_zodiac_probe, "ax", %progbits
+    .thumb
+    .thumb_func
+    .global payload_zodiac_probe
+    .type payload_zodiac_probe, %function
+payload_zodiac_probe:
+    push    {r4, lr}
+    ldr     r4, =payload_zodiac_available_address_config
+    ldr     r4, [r4]
+    ldrb    r0, [r4]
+    cmp     r0, #0
+    bne     1f
+
+    bl      payload_probe
+    movs    r0, #1
+    strb    r0, [r4]
+    ldr     r4, =payload_zodiac_status_address_config
+    ldr     r4, [r4]
+    movs    r1, #0x40
+    strb    r1, [r4]
+
+1:
+    movs    r0, #1
+    pop     {r4, pc}
+    .size payload_zodiac_probe, . - payload_zodiac_probe
+
+// Input: r0 = destination for year/month/day/weekday/hour/minute/second BCD.
+// The shared GetTimeDate implementation already writes exactly those seven
+// bytes. Its SiiRTC success return is translated to the Zodiac routine's zero.
+    .section .text.payload_zodiac_gettimedate, "ax", %progbits
+    .thumb
+    .thumb_func
+    .global payload_zodiac_gettimedate
+    .type payload_zodiac_gettimedate, %function
+payload_zodiac_gettimedate:
+    push    {r4, lr}
+    bl      payload_gettimedate
+    movs    r0, #0
+    pop     {r4, pc}
+    .size payload_zodiac_gettimedate, . - payload_zodiac_gettimedate
+
+    .section .text.payload_zodiac_config, "ax", %progbits
+    .align 2
+    .global payload_zodiac_available_address_config
+    .type payload_zodiac_available_address_config, %object
+payload_zodiac_available_address_config:
+    .word   0
+    .size payload_zodiac_available_address_config, . - payload_zodiac_available_address_config
+
+    .global payload_zodiac_status_address_config
+    .type payload_zodiac_status_address_config, %object
+payload_zodiac_status_address_config:
+    .word   0
+    .size payload_zodiac_status_address_config, . - payload_zodiac_status_address_config

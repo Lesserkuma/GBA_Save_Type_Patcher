@@ -2,8 +2,21 @@
 
 import assert from "node:assert/strict";
 
-import { WORKER_PROTOCOL_VERSION } from "../domain/constants.js";
+import { cloneDefaultOptions, WORKER_PROTOCOL_VERSION } from "../domain/constants.js";
+import { isPatchOptions } from "../domain/contracts.js";
 import { isPatchResponse, WORKER_MESSAGE_TYPE } from "../worker/protocol.js";
+
+const defaultOptions = cloneDefaultOptions();
+assert.equal(isPatchOptions(defaultOptions), true);
+assert.equal(isPatchOptions({ ...defaultOptions, shortIrqHandler: true }), false);
+assert.equal(isPatchOptions({
+  ...defaultOptions,
+  batteryless: { ...defaultOptions.batteryless, shortIrqHandler: true },
+}), false);
+assert.equal(isPatchOptions({
+  ...defaultOptions,
+  batteryless: { ...defaultOptions.batteryless, irqHandlerMode: "short" },
+}), false);
 
 const result = {
   statusCode: "changed",

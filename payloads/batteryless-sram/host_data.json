@@ -1145,9 +1145,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH V120-V121 read id",
+          "name": "FLASH V120 select BFD4",
           "identifier": {
-            "name": "FLASH V120-V121 read id routine",
+            "name": "FLASH V120 read id routine",
             "checks": [
               [
                 0,
@@ -1193,16 +1193,16 @@
           },
           "writes": [
             {
-              "name": "flash_v120_read_id",
+              "name": "flash_v120_select_bfd4",
               "code_name": "flash_v120_read_id",
-              "hex": "00b53d2000021f21084302bc0847"
+              "hex": "00b5d4200002bf21084302bc0847"
             }
           ]
         },
         {
-          "name": "FLASH V120-V121 sector erase 1F3D",
+          "name": "FLASH V120 sector erase BFD4",
           "identifier": {
-            "name": "FLASH V120-V121 1F3D sector erase routine",
+            "name": "FLASH V120 BFD4 sector erase routine",
             "checks": [
               [
                 0,
@@ -1214,7 +1214,7 @@
               ],
               [
                 2,
-                146
+                148
               ],
               [
                 3,
@@ -1280,20 +1280,20 @@
           },
           "writes": [
             {
-              "name": "flash_v120_sector_erase_1f3d",
+              "name": "flash_v120_sector_erase_bfd4",
               "code_name": "flash_v120_sector_erase",
               "hex": "7cb50007000ce0210905091801231b03ff200870013b0131002bfad100207cbc02bc0847"
             }
           ]
         },
         {
-          "name": "FLASH V120-V121 program 1F3D",
+          "name": "FLASH V120 program BFD4",
           "identifier": {
-            "name": "FLASH V120-V121 1F3D program routine",
+            "name": "FLASH V120 BFD4 program routine",
             "checks": [
               [
                 0,
-                128
+                144
               ],
               [
                 1,
@@ -1301,7 +1301,7 @@
               ],
               [
                 2,
-                147
+                160
               ],
               [
                 3,
@@ -1375,7 +1375,7 @@
           },
           "writes": [
             {
-              "name": "flash_v120_program_1f3d",
+              "name": "flash_v120_program_bfd4",
               "code_name": "flash_v120_program",
               "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc08bc0847"
             }
@@ -1388,7 +1388,7 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH V121 read id",
+          "name": "FLASH V121 select BFD4",
           "identifier": {
             "name": "FLASH V121 read id routine",
             "checks": [
@@ -1436,16 +1436,16 @@
           },
           "writes": [
             {
-              "name": "flash_v121_read_id",
+              "name": "flash_v121_select_bfd4",
               "code_name": "flash_v120_read_id",
-              "hex": "00b53d2000021f21084302bc0847"
+              "hex": "00b5d4200002bf21084302bc0847"
             }
           ]
         },
         {
-          "name": "FLASH V121 sector erase 1F3D",
+          "name": "FLASH V121 sector erase BFD4",
           "identifier": {
-            "name": "FLASH V121 1F3D sector erase routine",
+            "name": "FLASH V121 BFD4 sector erase routine",
             "checks": [
               [
                 0,
@@ -1457,7 +1457,7 @@
               ],
               [
                 2,
-                147
+                148
               ],
               [
                 3,
@@ -1481,15 +1481,15 @@
               ],
               [
                 8,
-                12
+                8
               ],
               [
                 9,
-                49
+                128
               ],
               [
                 10,
-                8
+                56
               ],
               [
                 11,
@@ -1497,38 +1497,46 @@
               ],
               [
                 12,
-                255
+                1
               ],
               [
                 13,
-                247
+                136
               ],
               [
                 14,
-                84
+                15
               ],
               [
                 15,
-                251
+                41
+              ],
+              [
+                16,
+                4
+              ],
+              [
+                17,
+                217
               ]
             ]
           },
           "writes": [
             {
-              "name": "flash_v121_sector_erase_1f3d",
+              "name": "flash_v121_sector_erase_bfd4",
               "code_name": "flash_v120_sector_erase",
               "hex": "7cb50007000ce0210905091801231b03ff200870013b0131002bfad100207cbc02bc0847"
             }
           ]
         },
         {
-          "name": "FLASH V121 program 1F3D",
+          "name": "FLASH V121 program BFD4",
           "identifier": {
-            "name": "FLASH V121 1F3D program routine",
+            "name": "FLASH V121 BFD4 program routine",
             "checks": [
               [
                 0,
-                128
+                144
               ],
               [
                 1,
@@ -1536,7 +1544,7 @@
               ],
               [
                 2,
-                148
+                160
               ],
               [
                 3,
@@ -1605,28 +1613,12 @@
               [
                 19,
                 217
-              ],
-              [
-                104,
-                116
-              ],
-              [
-                105,
-                62
-              ],
-              [
-                106,
-                47
-              ],
-              [
-                107,
-                8
               ]
             ]
           },
           "writes": [
             {
-              "name": "flash_v121_program_1f3d",
+              "name": "flash_v121_program_bfd4",
               "code_name": "flash_v120_program",
               "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc08bc0847"
             }
@@ -1639,9 +1631,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH V123-V126 identify",
+          "name": "FLASH V123-V126 select BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 identify routine",
+            "name": "FLASH V123-V126 BFD4 selection routine",
             "checks": [
               [
                 0,
@@ -1679,17 +1671,17 @@
           },
           "writes": [
             {
-              "name": "flash_v123_identify",
+              "name": "flash_v123_select_bfd4",
               "code_name": "flash_v123_identify",
               "source_offset": 288,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             }
           ]
         },
         {
-          "name": "FLASH V123-V126 wait",
+          "name": "FLASH V123-V126 erase BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 small wait routine",
+            "name": "FLASH V123-V126 BFD4 erase routines",
             "checks": [
               [
                 0,
@@ -1719,13 +1711,13 @@
           },
           "writes": [
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "code_name": "flash_v123_wait",
               "source_offset": 300,
               "hex": "00207047"
             },
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "target_add": 116,
               "code_name": "flash_v123_wait",
               "source_offset": 300,
@@ -1734,9 +1726,9 @@
           ]
         },
         {
-          "name": "FLASH V123-V126 program",
+          "name": "FLASH V123-V126 program BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 program routine",
+            "name": "FLASH V123-V126 BFD4 program routine",
             "checks": [
               [
                 0,
@@ -1748,41 +1740,89 @@
               ],
               [
                 2,
-                144
+                79
               ],
               [
                 3,
-                176
+                70
               ],
               [
                 4,
-                15
+                70
               ],
               [
                 5,
-                28
+                70
               ],
               [
                 6,
-                0
+                192
               ],
               [
                 7,
-                4
+                180
               ],
               [
                 8,
-                4
+                152
               ],
               [
                 9,
+                176
+              ],
+              [
+                10,
+                137
+              ],
+              [
+                11,
+                70
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                4
+              ],
+              [
+                14,
+                0
+              ],
+              [
+                15,
                 12
+              ],
+              [
+                16,
+                128
+              ],
+              [
+                17,
+                70
+              ],
+              [
+                18,
+                15
+              ],
+              [
+                19,
+                40
+              ],
+              [
+                20,
+                4
+              ],
+              [
+                21,
+                217
               ]
             ]
           },
           "writes": [
             {
-              "name": "flash_v123_program",
+              "name": "flash_v123_program_bfd4",
               "code_name": "flash_v123_program",
               "source_offset": 304,
               "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
@@ -1796,9 +1836,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH V123-V126 identify",
+          "name": "FLASH V123-V126 select BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 identify routine",
+            "name": "FLASH V123-V126 BFD4 selection routine",
             "checks": [
               [
                 0,
@@ -1836,17 +1876,17 @@
           },
           "writes": [
             {
-              "name": "flash_v123_identify",
+              "name": "flash_v123_select_bfd4",
               "code_name": "flash_v123_identify",
               "source_offset": 288,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             }
           ]
         },
         {
-          "name": "FLASH V123-V126 wait",
+          "name": "FLASH V123-V126 erase BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 small wait routine",
+            "name": "FLASH V123-V126 BFD4 erase routines",
             "checks": [
               [
                 0,
@@ -1876,13 +1916,13 @@
           },
           "writes": [
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "code_name": "flash_v123_wait",
               "source_offset": 300,
               "hex": "00207047"
             },
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "target_add": 116,
               "code_name": "flash_v123_wait",
               "source_offset": 300,
@@ -1891,9 +1931,9 @@
           ]
         },
         {
-          "name": "FLASH V123-V126 program",
+          "name": "FLASH V123-V126 program BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 program routine",
+            "name": "FLASH V123-V126 BFD4 program routine",
             "checks": [
               [
                 0,
@@ -1905,41 +1945,89 @@
               ],
               [
                 2,
-                144
+                79
               ],
               [
                 3,
-                176
+                70
               ],
               [
                 4,
-                15
+                70
               ],
               [
                 5,
-                28
+                70
               ],
               [
                 6,
-                0
+                192
               ],
               [
                 7,
-                4
+                180
               ],
               [
                 8,
-                4
+                152
               ],
               [
                 9,
+                176
+              ],
+              [
+                10,
+                137
+              ],
+              [
+                11,
+                70
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                4
+              ],
+              [
+                14,
+                0
+              ],
+              [
+                15,
                 12
+              ],
+              [
+                16,
+                128
+              ],
+              [
+                17,
+                70
+              ],
+              [
+                18,
+                15
+              ],
+              [
+                19,
+                40
+              ],
+              [
+                20,
+                4
+              ],
+              [
+                21,
+                217
               ]
             ]
           },
           "writes": [
             {
-              "name": "flash_v123_program",
+              "name": "flash_v123_program_bfd4",
               "code_name": "flash_v123_program",
               "source_offset": 304,
               "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
@@ -1953,9 +2041,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH V123-V126 identify",
+          "name": "FLASH V123-V126 select BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 identify routine",
+            "name": "FLASH V123-V126 BFD4 selection routine",
             "checks": [
               [
                 0,
@@ -1993,17 +2081,17 @@
           },
           "writes": [
             {
-              "name": "flash_v123_identify",
+              "name": "flash_v123_select_bfd4",
               "code_name": "flash_v123_identify",
               "source_offset": 288,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             }
           ]
         },
         {
-          "name": "FLASH V123-V126 wait",
+          "name": "FLASH V123-V126 erase BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 small wait routine",
+            "name": "FLASH V123-V126 BFD4 erase routines",
             "checks": [
               [
                 0,
@@ -2033,13 +2121,13 @@
           },
           "writes": [
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "code_name": "flash_v123_wait",
               "source_offset": 300,
               "hex": "00207047"
             },
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "target_add": 116,
               "code_name": "flash_v123_wait",
               "source_offset": 300,
@@ -2048,9 +2136,9 @@
           ]
         },
         {
-          "name": "FLASH V123-V126 program",
+          "name": "FLASH V123-V126 program BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 program routine",
+            "name": "FLASH V123-V126 BFD4 program routine",
             "checks": [
               [
                 0,
@@ -2062,41 +2150,89 @@
               ],
               [
                 2,
-                144
+                79
               ],
               [
                 3,
-                176
+                70
               ],
               [
                 4,
-                15
+                70
               ],
               [
                 5,
-                28
+                70
               ],
               [
                 6,
-                0
+                192
               ],
               [
                 7,
-                4
+                180
               ],
               [
                 8,
-                4
+                152
               ],
               [
                 9,
+                176
+              ],
+              [
+                10,
+                137
+              ],
+              [
+                11,
+                70
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                4
+              ],
+              [
+                14,
+                0
+              ],
+              [
+                15,
                 12
+              ],
+              [
+                16,
+                128
+              ],
+              [
+                17,
+                70
+              ],
+              [
+                18,
+                15
+              ],
+              [
+                19,
+                40
+              ],
+              [
+                20,
+                4
+              ],
+              [
+                21,
+                217
               ]
             ]
           },
           "writes": [
             {
-              "name": "flash_v123_program",
+              "name": "flash_v123_program_bfd4",
               "code_name": "flash_v123_program",
               "source_offset": 304,
               "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
@@ -2110,9 +2246,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH V123-V126 identify",
+          "name": "FLASH V123-V126 select BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 identify routine",
+            "name": "FLASH V123-V126 BFD4 selection routine",
             "checks": [
               [
                 0,
@@ -2150,17 +2286,17 @@
           },
           "writes": [
             {
-              "name": "flash_v123_identify",
+              "name": "flash_v123_select_bfd4",
               "code_name": "flash_v123_identify",
               "source_offset": 288,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             }
           ]
         },
         {
-          "name": "FLASH V123-V126 wait",
+          "name": "FLASH V123-V126 erase BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 small wait routine",
+            "name": "FLASH V123-V126 BFD4 erase routines",
             "checks": [
               [
                 0,
@@ -2190,13 +2326,13 @@
           },
           "writes": [
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "code_name": "flash_v123_wait",
               "source_offset": 300,
               "hex": "00207047"
             },
             {
-              "name": "flash_v123_wait",
+              "name": "flash_v123_erase_bfd4",
               "target_add": 116,
               "code_name": "flash_v123_wait",
               "source_offset": 300,
@@ -2205,9 +2341,9 @@
           ]
         },
         {
-          "name": "FLASH V123-V126 program",
+          "name": "FLASH V123-V126 program BFD4",
           "identifier": {
-            "name": "FLASH V123-V126 program routine",
+            "name": "FLASH V123-V126 BFD4 program routine",
             "checks": [
               [
                 0,
@@ -2219,41 +2355,89 @@
               ],
               [
                 2,
-                144
+                79
               ],
               [
                 3,
-                176
+                70
               ],
               [
                 4,
-                15
+                70
               ],
               [
                 5,
-                28
+                70
               ],
               [
                 6,
-                0
+                192
               ],
               [
                 7,
-                4
+                180
               ],
               [
                 8,
-                4
+                152
               ],
               [
                 9,
+                176
+              ],
+              [
+                10,
+                137
+              ],
+              [
+                11,
+                70
+              ],
+              [
+                12,
+                0
+              ],
+              [
+                13,
+                4
+              ],
+              [
+                14,
+                0
+              ],
+              [
+                15,
                 12
+              ],
+              [
+                16,
+                128
+              ],
+              [
+                17,
+                70
+              ],
+              [
+                18,
+                15
+              ],
+              [
+                19,
+                40
+              ],
+              [
+                20,
+                4
+              ],
+              [
+                21,
+                217
               ]
             ]
           },
           "writes": [
             {
-              "name": "flash_v123_program",
+              "name": "flash_v123_program_bfd4",
               "code_name": "flash_v123_program",
               "source_offset": 304,
               "hex": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847"
@@ -2267,9 +2451,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH512 program",
+          "name": "FLASH512 BFD4 program wrapper",
           "identifier": {
-            "name": "FLASH512 program routine",
+            "name": "FLASH512 BFD4 program wrapper routine",
             "checks": [
               [
                 0,
@@ -2307,7 +2491,7 @@
           },
           "writes": [
             {
-              "name": "flash512_program",
+              "name": "flash512_program_wrapper_bfd4",
               "code_name": "flash512_program",
               "source_offset": 368,
               "hex": "70b5a0b000034018e0210905091808781070013b01320131002bf8d1002020b070bc02bc0847"
@@ -2315,9 +2499,9 @@
           ]
         },
         {
-          "name": "FLASH512 helpers",
+          "name": "FLASH512 BFD4 helpers",
           "identifier": {
-            "name": "FLASH512 helper routines",
+            "name": "FLASH512 BFD4 helper routines",
             "checks": [
               [
                 0,
@@ -2355,28 +2539,28 @@
           },
           "writes": [
             {
-              "name": "flash512_identify",
+              "name": "flash512_select_bfd4",
               "code_name": "flash512_identify",
               "source_offset": 416,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             },
             {
-              "name": "flash512_helper_return",
+              "name": "flash512_erase_bfd4",
               "target_add": 268,
               "code_name": "flash512_helper_return",
               "source_offset": 432,
               "hex": "00b5002002bc0847"
             },
             {
-              "name": "flash512_helper_return",
+              "name": "flash512_erase_bfd4",
               "target_add": 384,
               "code_name": "flash512_helper_return",
               "source_offset": 432,
               "hex": "00b5002002bc0847"
             },
             {
-              "name": "flash512_helper_program",
-              "target_add": 948,
+              "name": "flash512_program_bfd4",
+              "target_add": 596,
               "code_name": "flash512_helper_program",
               "source_offset": 448,
               "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847"
@@ -2390,9 +2574,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH512 program",
+          "name": "FLASH512 BFD4 program wrapper",
           "identifier": {
-            "name": "FLASH512 program routine",
+            "name": "FLASH512 BFD4 program wrapper routine",
             "checks": [
               [
                 0,
@@ -2430,7 +2614,7 @@
           },
           "writes": [
             {
-              "name": "flash512_program",
+              "name": "flash512_program_wrapper_bfd4",
               "code_name": "flash512_program",
               "source_offset": 368,
               "hex": "70b5a0b000034018e0210905091808781070013b01320131002bf8d1002020b070bc02bc0847"
@@ -2438,9 +2622,9 @@
           ]
         },
         {
-          "name": "FLASH512 helpers",
+          "name": "FLASH512 BFD4 helpers",
           "identifier": {
-            "name": "FLASH512 helper routines",
+            "name": "FLASH512 BFD4 helper routines",
             "checks": [
               [
                 0,
@@ -2478,28 +2662,28 @@
           },
           "writes": [
             {
-              "name": "flash512_identify",
+              "name": "flash512_select_bfd4",
               "code_name": "flash512_identify",
               "source_offset": 416,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             },
             {
-              "name": "flash512_helper_return",
+              "name": "flash512_erase_bfd4",
               "target_add": 268,
               "code_name": "flash512_helper_return",
               "source_offset": 432,
               "hex": "00b5002002bc0847"
             },
             {
-              "name": "flash512_helper_return",
+              "name": "flash512_erase_bfd4",
               "target_add": 384,
               "code_name": "flash512_helper_return",
               "source_offset": 432,
               "hex": "00b5002002bc0847"
             },
             {
-              "name": "flash512_helper_program",
-              "target_add": 948,
+              "name": "flash512_program_bfd4",
+              "target_add": 596,
               "code_name": "flash512_helper_program",
               "source_offset": 448,
               "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847"
@@ -2513,9 +2697,9 @@
       "type": "simple",
       "steps": [
         {
-          "name": "FLASH512 V133 program",
+          "name": "FLASH512 V133 BFD4 program wrapper",
           "identifier": {
-            "name": "FLASH512 V133 program routine",
+            "name": "FLASH512 V133 BFD4 program wrapper routine",
             "checks": [
               [
                 0,
@@ -2553,7 +2737,7 @@
           },
           "writes": [
             {
-              "name": "flash512_v133_program",
+              "name": "flash512_v133_program_wrapper_bfd4",
               "code_name": "flash512_v133_program",
               "source_offset": 368,
               "hex": "70b5a0b000034018e0210905091808781070013b01320131002bf8d1002020b070bc02bc0847"
@@ -2561,9 +2745,9 @@
           ]
         },
         {
-          "name": "FLASH512 V133 helpers",
+          "name": "FLASH512 V133 BFD4 helpers",
           "identifier": {
-            "name": "FLASH512 V133 helper routines",
+            "name": "FLASH512 V133 BFD4 helper routines",
             "checks": [
               [
                 0,
@@ -2601,28 +2785,28 @@
           },
           "writes": [
             {
-              "name": "flash512_v133_identify",
+              "name": "flash512_v133_select_bfd4",
               "code_name": "flash512_v133_identify",
               "source_offset": 416,
-              "hex": "1b231b0232200343"
+              "hex": "d4231b02bf200343"
             },
             {
-              "name": "flash512_v133_helper_return",
+              "name": "flash512_v133_erase_bfd4",
               "target_add": 280,
               "code_name": "flash512_v133_helper_return",
               "source_offset": 432,
               "hex": "00b5002002bc0847"
             },
             {
-              "name": "flash512_v133_helper_return",
+              "name": "flash512_v133_erase_bfd4",
               "target_add": 396,
               "code_name": "flash512_v133_helper_return",
               "source_offset": 432,
               "hex": "00b5002002bc0847"
             },
             {
-              "name": "flash512_v133_helper_program",
-              "target_add": 1116,
+              "name": "flash512_v133_program_bfd4",
+              "target_add": 764,
               "code_name": "flash512_v133_helper_program",
               "source_offset": 448,
               "hex": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847"
@@ -2896,32 +3080,51 @@
       "storage_mode": 1
     },
     {
-      "name": "FLASH V120-V121 program",
+      "name": "FLASH V120-V121 BFD4 program",
       "marker": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc08bc0847",
       "target": "flash",
       "thunk": "thumb",
-      "save_size": 65536
+      "save_size": 65536,
+      "save_types": [
+        "FLASH_V120",
+        "FLASH_V121"
+      ]
     },
     {
-      "name": "FLASH512 helper program",
+      "name": "FLASH512 BFD4 helper program",
       "marker": "7cb590b000030a1ce0210905091801231b0310780870013b01320131002bf8d1002010b07cbc02bc0847",
       "target": "flash",
       "thunk": "thumb",
-      "save_size": 65536
+      "save_size": 65536,
+      "save_types": [
+        "FLASH512_V130",
+        "FLASH512_V131",
+        "FLASH512_V133"
+      ]
     },
     {
-      "name": "FLASH V123-V126 program",
+      "name": "FLASH V123-V126 BFD4 program",
       "marker": "70b500030a1ce0210905411801231b0310780870013b01320131002bf8d1002070bc02bc0847",
       "target": "flash",
       "thunk": "thumb",
-      "save_size": 65536
+      "save_size": 65536,
+      "save_types": [
+        "FLASH_V123",
+        "FLASH_V124",
+        "FLASH_V125",
+        "FLASH_V126"
+      ]
     },
     {
       "name": "FLASH1M program",
       "marker": "f0b590b00f1c0004040c034800684089",
       "target": "flash",
       "thunk": "thumb",
-      "save_size": 131072
+      "save_size": 131072,
+      "save_types": [
+        "FLASH1M_V102",
+        "FLASH1M_V103"
+      ]
     }
   ]
 }

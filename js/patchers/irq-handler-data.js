@@ -1,6 +1,6 @@
 // Generated file. Do not edit.
 // Generator: payloads/irq-handler/compile_payload.py
-// Generator version: 2; source SHA-256: bc2bd276a32f5c46a790727d467d4e52beb02327ac869b269be55b8640ee63c7
+// Generator version: 2; source SHA-256: 8ff9a06593ec4dfe9fda960eaba6d777406899a38846b2f22c914059e0136573
 // Toolchain: devkitARM 16.1.0; GNU Binutils 2.46.0.20260210; Binary SHA-256: 16f2b7ae2ac445dd2b9ef6c4b522460eb3653e0efe379fd077cdaad73451cfbb
 // SPDX-License-Identifier: GPL-3.0-or-later
 export const IRQ_HANDLER_PAYLOAD_HEX = 

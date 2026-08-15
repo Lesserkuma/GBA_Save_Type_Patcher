@@ -11,7 +11,10 @@ import { asciiBytes, findBytes, hexToBytes, readU32, writeU32 } from "../core/bi
 import { PatchError } from "../core/errors.js";
 import { alignDown, alignUp, isBlankRegion, overlapsAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND, RTC_TICK_MODES } from "../domain/constants.js";
-import { GBA_MAX_ROM_SIZE_BYTES, GBA_ROM_BASE_ADDRESS } from "../domain/gba-constants.js";
+import {
+  GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+  GBA_ROM_BASE_ADDRESS,
+} from "../domain/gba-constants.js";
 import { stageErasedRomExpansion, stageNamedPatchWrite } from "../patch-engine/draft.js";
 import {
   PAYLOAD_ALIGNMENT as TARGET_PAYLOAD_ALIGNMENT,
@@ -22,12 +25,22 @@ import { RTC_PAYLOAD_CONSTANTS, RTC_PAYLOAD_HEX } from "./rtc-data.js";
 
 const RTC_PAYLOAD_ALIGNMENT = TARGET_PAYLOAD_ALIGNMENT;
 const ORIGINAL_PAYLOAD_LINK_ADDR = RTC_PAYLOAD_CONSTANTS.RTC_ORIGINAL_PAYLOAD_LINK_ADDR;
+const REQUIRED_RTC_PAYLOAD_SYMBOLS = Object.freeze([
+  "payload_probe",
+  "payload_reset",
+  "payload_getstatus",
+  "payload_gettimedate",
+  "payload_zodiac_probe",
+  "payload_zodiac_gettimedate",
+  "payload_zodiac_available_address_config",
+  "payload_zodiac_status_address_config",
+]);
 
 export const RTC_PAYLOAD_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PAYLOAD_SIZE;
 export const RTC_PERSISTENCE_BLOCK_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_BLOCK_SIZE;
 export const RTC_PERSISTENCE_HALF_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_HALF_SIZE;
 export const RTC_PERSISTENCE_RECORD_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_RECORD_SIZE;
-export const RTC_PERSISTENCE_CUSTOM_BACKEND_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_CUSTOM_BACKEND;
+export const RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_MAPPER_CLEANUP;
 export const RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_SHARED_SAVE_AREA;
 
 function validateGeneratedRtcData() {
@@ -40,6 +53,9 @@ function validateGeneratedRtcData() {
     || !Array.isArray(constants.RTC_RELOCATION_OFFSETS)
     || !Array.isArray(constants.RTC_RELATIVE_ASSET_RELOCATION_OFFSETS)
     || !constants.RTC_ORIGINAL_PAYLOAD_SYMBOLS
+    || REQUIRED_RTC_PAYLOAD_SYMBOLS.some(
+      (name) => !Number.isInteger(constants.RTC_ORIGINAL_PAYLOAD_SYMBOLS[name]),
+    )
     || !Number.isInteger(constants.RTC_TICK_MODE_CONFIG_OFFSET)
     || !Number.isInteger(constants.RTC_TICK_MODE_VBLANK)
     || !Number.isInteger(constants.RTC_TICK_MODE_READ)
@@ -49,7 +65,7 @@ function validateGeneratedRtcData() {
     || constants.RTC_PERSIST_HALF_SIZE !== 0x20000
     || !Number.isInteger(constants.RTC_PERSIST_RECORD_SIZE)
     || constants.RTC_PERSIST_RECORD_SIZE <= 0
-    || !Number.isInteger(constants.RTC_PERSIST_FLAG_CUSTOM_BACKEND)
+    || !Number.isInteger(constants.RTC_PERSIST_FLAG_MAPPER_CLEANUP)
     || !Number.isInteger(constants.RTC_PERSIST_FLAG_SHARED_SAVE_AREA)
   ) {
     throw new PatchError("RTC generated payload data is missing or invalid.", {
@@ -106,7 +122,7 @@ function configureRtcPersistence(payloadBuild, context = {}) {
   if (!Number.isInteger(blockOffset)
       || blockOffset < 0
       || blockOffset % RTC_PERSISTENCE_BLOCK_SIZE
-      || blockOffset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_MAX_ROM_SIZE_BYTES
+      || blockOffset + RTC_PERSISTENCE_BLOCK_SIZE > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES
       || (blockOffset <= 0x01000000
         && 0x01000000 < blockOffset + RTC_PERSISTENCE_BLOCK_SIZE)) {
     throw new PatchError("RTC: persistence block is invalid");
@@ -248,13 +264,30 @@ const ADDITIONAL_SIGS = {
   ],
 };
 
-const PATCH_ORDER = ["probe", "reset", "getstatus", "gettimedate"];
-const PAYLOAD_SYMBOLS = {
+const SII_RTC_PATCH_ORDER = ["probe", "reset", "getstatus", "gettimedate"];
+const SII_RTC_PAYLOAD_SYMBOLS = {
   "probe": "payload_probe",
   "reset": "payload_reset",
   "getstatus": "payload_getstatus",
   "gettimedate": "payload_gettimedate"
 };
+
+const RTC_HANDLER_FAMILY_SII = "sii-rtc";
+const RTC_HANDLER_FAMILY_ZODIAC = "zodiac-wizard";
+
+// ZodiacDaGreat/Wizard-DN-derived compact seven-byte RTC interface.
+// Detection is based on the RTC protocol, resolved GPIO/RAM literals, compact
+// seven-byte raw-reader ABI, and internal call graph. No game code, ROM hash,
+// absolute ROM offset, or fixed spacing between functions is consulted.
+const ZODIAC_FULL_TIME_COMMAND_BYTES = new Uint8Array([0x65, 0x20]);
+const ZODIAC_GPIO_DATA_ADDRESS = 0x080000C4;
+const ZODIAC_GPIO_DIRECTION_ADDRESS = 0x080000C6;
+const ZODIAC_GPIO_CONTROL_ADDRESS = 0x080000C8;
+const ZODIAC_PROBE_SIZE = 0x0C;
+const ZODIAC_RAW_TIME_HOOK_SIZE = 0x0C;
+const ZODIAC_ENTRY_SCAN_BYTES = 0x40;
+const ZODIAC_FUNCTION_SCAN_BYTES = 0x100;
+const THUMB_BL_REACH = 0x400000;
 
 const EMBEDDED_PAYLOAD = validateGeneratedRtcData();
 const RTC_ROM_MARKER_TEXT = "lk_rtc_runtime";
@@ -376,11 +409,11 @@ function signatureVariants(name) {
   return [RTC_HANDLER_SIGNATURES[name], ...(ADDITIONAL_SIGS[name] || [])];
 }
 
-function findRtcHandlers(bytes, excludedRanges = []) {
+function inspectSiiRtcProfile(bytes, excludedRanges = []) {
   const matches = [];
   const problems = [];
 
-  for (const name of PATCH_ORDER) {
+  for (const name of SII_RTC_PATCH_ORDER) {
     const candidatesByOffset = new Map();
     for (const sig of signatureVariants(name)) {
       for (const offset of findAllSig(bytes, sig)) {
@@ -398,17 +431,351 @@ function findRtcHandlers(bytes, excludedRanges = []) {
       problems.push(`${name}: expected 1 match, found ${candidates.length} (${formatted})`);
     } else {
       const [offset, size] = candidates[0];
-      matches.push({ name, offset, size });
+      matches.push({
+        name,
+        offset,
+        size,
+        payloadSymbol: SII_RTC_PAYLOAD_SYMBOLS[name],
+      });
     }
   }
 
-  if (problems.length) throw new PatchError(`RTC handler detection failed:\n  ${problems.join("\n  ")}`);
-  return matches;
+  return {
+    label: "SiiRTC",
+    problems,
+    profile: problems.length ? null : {
+      id: RTC_HANDLER_FAMILY_SII,
+      matches,
+    },
+  };
+}
+
+function configureRtcHandlerProfile(payloadBuild, handlerProfile, runtimeBase) {
+  if (handlerProfile.id !== RTC_HANDLER_FAMILY_ZODIAC) return;
+  const configuration = handlerProfile.configuration || {};
+  const entries = [
+    ["payload_zodiac_available_address_config", configuration.availableAddress],
+    ["payload_zodiac_status_address_config", configuration.statusAddress],
+  ];
+  for (const [symbolName, address] of entries) {
+    if (!isWritableGbaRamAddress(address)) {
+      throw new PatchError(`RTC: invalid Zodiac/Wizard RAM address for ${symbolName}`);
+    }
+    const symbolAddress = payloadBuild.symbols[symbolName];
+    if (!Number.isInteger(symbolAddress)) {
+      throw new PatchError(`RTC: missing Zodiac/Wizard payload config ${symbolName}`);
+    }
+    const offset = symbolAddress - runtimeBase;
+    if (offset < 0 || offset + 4 > payloadBuild.payloadBytes.length) {
+      throw new PatchError(`RTC: Zodiac/Wizard payload config is outside the payload: ${symbolName}`);
+    }
+    writeU32(payloadBuild.payloadBytes, offset, address);
+  }
+}
+
+function thumbLiteralReference(bytes, instructionOffset) {
+  if (instructionOffset < 0 || instructionOffset + 2 > bytes.length) return null;
+  const instruction = halfwordAt(bytes, instructionOffset);
+  if ((instruction & 0xF800) !== 0x4800) return null;
+  const literalOffset = alignDown(instructionOffset + 4, 4) + ((instruction & 0xFF) << 2);
+  if (literalOffset < 0 || literalOffset + 4 > bytes.length) return null;
+  return {
+    register: (instruction >>> 8) & 0x7,
+    literalOffset,
+    value: readU32(bytes, literalOffset),
+  };
+}
+
+function thumbBlTarget(bytes, instructionOffset) {
+  if (instructionOffset < 0 || instructionOffset + 4 > bytes.length) return null;
+  const high = halfwordAt(bytes, instructionOffset);
+  const low = halfwordAt(bytes, instructionOffset + 2);
+  if ((high & 0xF800) !== 0xF000 || (low & 0xF800) !== 0xF800) return null;
+  let displacement = ((high & 0x7FF) << 12) | ((low & 0x7FF) << 1);
+  if (displacement & 0x400000) displacement -= 0x800000;
+  return instructionOffset + 4 + displacement;
+}
+
+function isWritableGbaRamAddress(address) {
+  return (address >= 0x02000000 && address < 0x02040000)
+    || (address >= 0x03000000 && address < 0x03008000);
+}
+
+function isThumbPushWithLr(instruction) {
+  return (instruction & 0xFF00) === 0xB500;
+}
+
+function isThumbBx(instruction) {
+  return (instruction & 0xFF87) === 0x4700;
+}
+
+function nearestThumbFunctionStart(bytes, referenceOffset, maxDistance = ZODIAC_ENTRY_SCAN_BYTES) {
+  const minimum = Math.max(0, referenceOffset - maxDistance);
+  for (let offset = alignDown(referenceOffset, 2); offset >= minimum; offset -= 2) {
+    if (isThumbPushWithLr(halfwordAt(bytes, offset))) return offset;
+  }
+  return null;
+}
+
+function thumbFunctionEnd(bytes, functionOffset, searchFrom) {
+  const limit = Math.min(bytes.length, functionOffset + ZODIAC_FUNCTION_SCAN_BYTES);
+  for (let offset = alignUp(Math.max(functionOffset + 2, searchFrom), 2); offset + 2 <= limit; offset += 2) {
+    const instruction = halfwordAt(bytes, offset);
+    if (instruction === 0x4770 || (instruction & 0xFF00) === 0xBD00) return offset + 2;
+    if (isThumbBx(instruction) && offset >= functionOffset + 2) {
+      const previous = halfwordAt(bytes, offset - 2);
+      if ((previous & 0xFE00) === 0xBC00) return offset + 2;
+    }
+  }
+  return null;
+}
+
+function thumbBlCalls(bytes, start, end) {
+  const calls = [];
+  for (let offset = alignUp(Math.max(0, start), 2); offset + 4 <= Math.min(bytes.length, end); offset += 2) {
+    const target = thumbBlTarget(bytes, offset);
+    if (target !== null) calls.push({ offset, target });
+  }
+  return calls;
+}
+
+function thumbBlCallsTo(bytes, target, start, end) {
+  return thumbBlCalls(bytes, start, end).filter((call) => call.target === target);
+}
+
+function containsHalfword(bytes, start, end, expected) {
+  for (let offset = alignUp(start, 2); offset + 2 <= end; offset += 2) {
+    if (halfwordAt(bytes, offset) === expected) return true;
+  }
+  return false;
+}
+
+function literalValuesInRange(bytes, start, end) {
+  const values = new Set();
+  for (let offset = alignUp(start, 2); offset + 2 <= end; offset += 2) {
+    const reference = thumbLiteralReference(bytes, offset);
+    if (reference) values.add(reference.value);
+  }
+  return values;
+}
+
+function copiesR0ToSavedRegister(bytes, start, end) {
+  for (let offset = alignUp(start, 2); offset + 2 <= end; offset += 2) {
+    const instruction = halfwordAt(bytes, offset);
+    const copiesLowR0 = (instruction & 0xFFF8) === 0x1C00
+      || (instruction & 0xFFF8) === 0x4600;
+    if (copiesLowR0 && (instruction & 0x7) >= 4) return true;
+  }
+  return false;
+}
+
+function inspectZodiacRawTimeReader(bytes, rawTimeOffset, commandOffset) {
+  if (rawTimeOffset < 0 || (rawTimeOffset & 1) || !isThumbPushWithLr(halfwordAt(bytes, rawTimeOffset))) return null;
+  const functionEnd = thumbFunctionEnd(bytes, rawTimeOffset, commandOffset + 2);
+  if (functionEnd === null || functionEnd - rawTimeOffset < ZODIAC_RAW_TIME_HOOK_SIZE) return null;
+  const literals = literalValuesInRange(bytes, rawTimeOffset, commandOffset + 2);
+  if (!literals.has(ZODIAC_GPIO_DATA_ADDRESS) || !literals.has(ZODIAC_GPIO_DIRECTION_ADDRESS)) return null;
+  if (!copiesR0ToSavedRegister(bytes, rawTimeOffset + 2, Math.min(commandOffset, rawTimeOffset + 0x20))) return null;
+
+  const calls = thumbBlCalls(bytes, commandOffset + 2, functionEnd);
+  const callsByTarget = new Map();
+  for (const call of calls) callsByTarget.set(call.target, (callsByTarget.get(call.target) || 0) + 1);
+  if (![...callsByTarget.values()].some((count) => count >= 2)) return null;
+
+  let outputStores = 0;
+  for (let offset = commandOffset + 2; offset + 2 <= functionEnd; offset += 2) {
+    if ((halfwordAt(bytes, offset) & 0xF807) === 0x7000) outputStores += 1;
+  }
+  if (outputStores < 2 || !containsHalfword(bytes, Math.max(rawTimeOffset, functionEnd - 0x10), functionEnd, 0x2000)) return null;
+  return { rawTimeOffset, functionEnd };
+}
+
+function findZodiacRawTimeReaders(bytes) {
+  const readersByOffset = new Map();
+  let commandAnchors = 0;
+  let position = 0;
+  while (true) {
+    position = findBytes(bytes, ZODIAC_FULL_TIME_COMMAND_BYTES, position);
+    if (position < 0) break;
+    if ((position & 1) === 0) {
+      commandAnchors += 1;
+      const rawTimeOffset = nearestThumbFunctionStart(bytes, position);
+      if (rawTimeOffset !== null) {
+        const reader = inspectZodiacRawTimeReader(bytes, rawTimeOffset, position);
+        if (reader) readersByOffset.set(rawTimeOffset, reader);
+      }
+    }
+    position += 1;
+  }
+  return { commandAnchors, readers: [...readersByOffset.values()] };
+}
+
+function inspectZodiacProbe(bytes, probeOffset) {
+  if (probeOffset < 0 || (probeOffset & 1) || probeOffset + ZODIAC_PROBE_SIZE > bytes.length) return null;
+  const statusReference = thumbLiteralReference(bytes, probeOffset);
+  if (!statusReference || !isWritableGbaRamAddress(statusReference.value)) return null;
+  const baseRegister = statusReference.register;
+  const expectedLoad = 0x6800 | (baseRegister << 3);
+  if (halfwordAt(bytes, probeOffset + 2) !== expectedLoad
+      || halfwordAt(bytes, probeOffset + 4) !== 0x2800
+      || halfwordAt(bytes, probeOffset + 6) !== 0xD000
+      || halfwordAt(bytes, probeOffset + 8) !== 0x2001
+      || halfwordAt(bytes, probeOffset + 10) !== 0x4770) return null;
+  return { probeOffset, statusAddress: statusReference.value };
+}
+
+function isStoreR0AtRegisterZero(instruction, baseRegister) {
+  const opcode = instruction & 0xF800;
+  if (opcode !== 0x6000 && opcode !== 0x7000) return false;
+  return (instruction & 0x7FF) === (baseRegister << 3);
+}
+
+function storedR0AddressNear(bytes, start, end) {
+  for (let offset = alignUp(start, 2); offset + 4 <= end; offset += 2) {
+    const reference = thumbLiteralReference(bytes, offset);
+    if (reference && isStoreR0AtRegisterZero(halfwordAt(bytes, offset + 2), reference.register)) {
+      return reference.value;
+    }
+  }
+  return null;
+}
+
+function functionStoresR0ToAddress(bytes, functionOffset, functionEnd, address) {
+  for (let offset = functionOffset; offset + 4 <= functionEnd; offset += 2) {
+    const reference = thumbLiteralReference(bytes, offset);
+    if (reference?.value === address
+        && isStoreR0AtRegisterZero(halfwordAt(bytes, offset + 2), reference.register)) return true;
+  }
+  return false;
+}
+
+function rawBufferAddressBeforeCall(bytes, functionOffset, callOffset) {
+  for (let offset = callOffset - 2; offset >= Math.max(functionOffset, callOffset - 0x10); offset -= 2) {
+    const reference = thumbLiteralReference(bytes, offset);
+    if (reference?.register === 0 && isWritableGbaRamAddress(reference.value)) return reference.value;
+  }
+  return null;
+}
+
+function inspectZodiacSetup(bytes, setupOffset, rawCallOffset, rawTimeOffset) {
+  if (setupOffset < 0 || (setupOffset & 1) || !isThumbPushWithLr(halfwordAt(bytes, setupOffset))) return null;
+  const functionEnd = thumbFunctionEnd(bytes, setupOffset, rawCallOffset + 4);
+  if (functionEnd === null || !containsHalfword(bytes, setupOffset, functionEnd, 0x2063)) return null;
+  const literals = literalValuesInRange(bytes, setupOffset, functionEnd);
+  if (!literals.has(ZODIAC_GPIO_CONTROL_ADDRESS) || !literals.has(ZODIAC_GPIO_DIRECTION_ADDRESS)) return null;
+  const rawBufferAddress = rawBufferAddressBeforeCall(bytes, setupOffset, rawCallOffset);
+  if (rawBufferAddress === null) return null;
+
+  for (const call of thumbBlCalls(bytes, setupOffset, functionEnd)) {
+    if (call.offset === rawCallOffset || call.target === rawTimeOffset) continue;
+    const probe = inspectZodiacProbe(bytes, call.target);
+    if (!probe) continue;
+    const availableAddress = storedR0AddressNear(bytes, call.offset + 4, Math.min(functionEnd, call.offset + 0x14));
+    if (!isWritableGbaRamAddress(availableAddress)
+        || rawBufferAddress !== availableAddress + 1
+        || !functionStoresR0ToAddress(bytes, setupOffset, functionEnd, probe.statusAddress)) continue;
+    return {
+      setupOffset,
+      probeOffset: probe.probeOffset,
+      statusAddress: probe.statusAddress,
+      availableAddress,
+      rawBufferAddress,
+    };
+  }
+  return null;
+}
+
+function hasZodiacOrchestrator(bytes, probeOffset, setupOffset) {
+  const start = Math.max(0, probeOffset - THUMB_BL_REACH);
+  const end = Math.min(bytes.length, probeOffset + THUMB_BL_REACH);
+  for (const call of thumbBlCallsTo(bytes, probeOffset, start, end)) {
+    let sawZeroCompare = false;
+    let sawConditionalBranch = false;
+    const sequenceEnd = Math.min(end, call.offset + 0x30);
+    for (let offset = call.offset + 4; offset + 2 <= sequenceEnd; offset += 2) {
+      const instruction = halfwordAt(bytes, offset);
+      if (instruction === 0x2800) sawZeroCompare = true;
+      else if (sawZeroCompare && (instruction & 0xFE00) === 0xD000) sawConditionalBranch = true;
+      if (sawZeroCompare && sawConditionalBranch && thumbBlTarget(bytes, offset) === setupOffset) return true;
+    }
+  }
+  return false;
+}
+
+function inspectZodiacRtcProfile(bytes, excludedRanges = []) {
+  const { commandAnchors, readers } = findZodiacRawTimeReaders(bytes);
+  const verifiedByKey = new Map();
+  for (const reader of readers) {
+    // A direct Thumb-1 BL can reach four MiB in either direction. Searching
+    // exactly that architectural range permits arbitrary linker placement.
+    const start = Math.max(0, reader.rawTimeOffset - THUMB_BL_REACH);
+    const end = Math.min(bytes.length, reader.rawTimeOffset + THUMB_BL_REACH);
+    for (const rawCall of thumbBlCallsTo(bytes, reader.rawTimeOffset, start, end)) {
+      const setupOffset = nearestThumbFunctionStart(bytes, rawCall.offset, ZODIAC_FUNCTION_SCAN_BYTES);
+      if (setupOffset === null) continue;
+      const setup = inspectZodiacSetup(bytes, setupOffset, rawCall.offset, reader.rawTimeOffset);
+      if (!setup || !hasZodiacOrchestrator(bytes, setup.probeOffset, setup.setupOffset)) continue;
+      if (overlapsAnyRange(setup.probeOffset, setup.probeOffset + ZODIAC_PROBE_SIZE, excludedRanges)
+          || overlapsAnyRange(reader.rawTimeOffset, reader.rawTimeOffset + ZODIAC_RAW_TIME_HOOK_SIZE, excludedRanges)) continue;
+      const key = `${setup.probeOffset}:${reader.rawTimeOffset}:${setup.availableAddress}:${setup.statusAddress}`;
+      verifiedByKey.set(key, {
+        id: RTC_HANDLER_FAMILY_ZODIAC,
+        configuration: {
+          availableAddress: setup.availableAddress,
+          statusAddress: setup.statusAddress,
+        },
+        matches: [
+          {
+            name: "probe",
+            offset: setup.probeOffset,
+            size: ZODIAC_PROBE_SIZE,
+            payloadSymbol: "payload_zodiac_probe",
+          },
+          {
+            name: "gettimedate",
+            offset: reader.rawTimeOffset,
+            size: ZODIAC_RAW_TIME_HOOK_SIZE,
+            payloadSymbol: "payload_zodiac_gettimedate",
+          },
+        ],
+      });
+    }
+  }
+
+  const verified = [...verifiedByKey.values()];
+  const offsets = verified
+    .map((profile) => profile.matches[1].offset)
+    .map((offset) => `0x${offset.toString(16).padStart(6, "0")}`)
+    .join(", ") || "none";
+  const problems = verified.length === 1 ? [] : [
+    `cluster: expected 1 verified match, found ${verified.length} (${offsets}; command anchors: ${commandAnchors}; compact readers: ${readers.length})`,
+  ];
+  return {
+    label: "Zodiac/Wizard",
+    problems,
+    profile: problems.length ? null : verified[0],
+  };
+}
+
+function findRtcProfile(bytes, excludedRanges = []) {
+  const inspections = [
+    inspectSiiRtcProfile(bytes, excludedRanges),
+    inspectZodiacRtcProfile(bytes, excludedRanges),
+  ];
+  const profiles = inspections.flatMap((inspection) => inspection.profile ? [inspection.profile] : []);
+  if (profiles.length === 1) return profiles[0];
+  if (profiles.length > 1) {
+    throw new PatchError(`RTC handler detection is ambiguous: ${profiles.map((profile) => profile.id).join(", ")}`);
+  }
+  const problems = inspections.flatMap((inspection) => (
+    inspection.problems.map((problem) => `${inspection.label} ${problem}`)
+  ));
+  throw new PatchError(`RTC handler detection failed:\n  ${problems.join("\n  ")}`);
 }
 
 export function hasRecognizedRtcHandlerSet(bytes, excludedRanges = []) {
   try {
-    return findRtcHandlers(bytes, excludedRanges).length === PATCH_ORDER.length;
+    return Boolean(findRtcProfile(bytes, excludedRanges));
   } catch {
     // Partial or ambiguous RTC implementations are not enough to justify a
     // startup-timing change. Callers can retain their established fallback.
@@ -416,18 +783,23 @@ export function hasRecognizedRtcHandlerSet(bytes, excludedRanges = []) {
   }
 }
 
-function makeThumbJumpStub(targetAddr, totalSize) {
-  if (totalSize < 8) throw new PatchError(`RTC: need at least 8 bytes for Thumb jump stub, got ${totalSize}`);
+function makeThumbJumpStub(targetAddr, totalSize, patchOffset) {
+  if ((patchOffset & 1) || (totalSize & 1)) throw new PatchError("RTC: Thumb hook is not halfword-aligned");
+  // Thumb literal loads word-align PC. A function at address 2 mod 4 therefore
+  // needs one NOP before its aligned target literal.
+  const literalOffset = (patchOffset & 3) === 0 ? 4 : 6;
+  const minimumSize = literalOffset + 4;
+  if (totalSize < minimumSize) throw new PatchError(`RTC: need at least ${minimumSize} bytes for Thumb jump stub, got ${totalSize}`);
   const stub = new Uint8Array(totalSize);
-  stub[0] = 0x00;
+  for (let offset = 0; offset < totalSize; offset += 2) {
+    stub[offset] = 0xC0;
+    stub[offset + 1] = 0x46;
+  }
+  stub[0] = literalOffset === 4 ? 0x00 : 0x01;
   stub[1] = 0x4b;
   stub[2] = 0x18;
   stub[3] = 0x47;
-  writeU32(stub, 4, (targetAddr | 1) >>> 0);
-  for (let offset = 8; offset < totalSize; offset += 2) {
-    stub[offset] = 0xc0;
-    if (offset + 1 < totalSize) stub[offset + 1] = 0x46;
-  }
+  writeU32(stub, literalOffset, (targetAddr | 1) >>> 0);
   return stub;
 }
 
@@ -435,8 +807,8 @@ function validatePayloadOffset(bytes, payloadOffset) {
   const payloadSpan = rtcPayloadSpanForLayout();
   if (!Number.isInteger(payloadOffset)) throw new PatchError("RTC: payload offset is invalid");
   if (payloadOffset % RTC_PAYLOAD_ALIGNMENT) throw new PatchError("RTC: payload offset must be 0x100-byte aligned");
-  if (payloadOffset < 0 || payloadOffset + payloadSpan > GBA_MAX_ROM_SIZE_BYTES) {
-    throw new PatchError("RTC: payload would be outside the 32 MiB GBA ROM address space");
+  if (payloadOffset < 0 || payloadOffset + payloadSpan > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES) {
+    throw new PatchError("RTC: payload would overlap the reserved 256-byte ROM tail");
   }
   if (payloadOffset < bytes.length && !isBlankRegion(bytes, payloadOffset, Math.min(payloadSpan, bytes.length - payloadOffset))) {
     throw new PatchError("RTC: chosen payload region is not free");
@@ -444,7 +816,8 @@ function validatePayloadOffset(bytes, payloadOffset) {
 }
 
 function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcOptions = {}, context = {}) {
-  const matches = findRtcHandlers(originalBytes, context.excludedRanges || []);
+  const handlerProfile = findRtcProfile(originalBytes, context.excludedRanges || []);
+  const matches = handlerProfile.matches;
   const tickMode = normalizeRtcTickMode(rtcOptions.tickMode);
   let payloadOffset = context.payloadOffset ?? null;
   let placement = context.placement || (payloadOffset === null ? null : "manual");
@@ -480,6 +853,7 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
   const linkAddr = (GBA_ROM_BASE_ADDRESS + payloadOffset) >>> 0;
   const payloadBuild = relocatePayload(embeddedPayloadBytes(), linkAddr);
   configureRtcTickMode(payloadBuild, tickMode);
+  configureRtcHandlerProfile(payloadBuild, handlerProfile, linkAddr);
   const persistenceContext = rtcOptions.saveOnGlobalHotkey === false
     ? { ...context, persistenceBlockOffset: null, persistenceFlags: 0 }
     : context;
@@ -501,10 +875,9 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
 
   const handlerResults = [];
   for (const match of matches) {
-    const symbolName = PAYLOAD_SYMBOLS[match.name];
-    const target = payloadBuild.symbols[symbolName];
+    const target = payloadBuild.symbols[match.payloadSymbol];
     if (target === undefined) throw new PatchError(`RTC: missing payload symbol for ${match.name}`);
-    const stub = makeThumbJumpStub(target, match.size);
+    const stub = makeThumbJumpStub(target, match.size, match.offset);
     stageRtcWrite(workRom.bytes, operations, `RTC ${match.name} hook`, match.offset, stub, {
       codeName: `rtc_${match.name}_hook`,
       value: target >>> 0,
@@ -515,6 +888,7 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
   return {
     requested: true,
     status: "patched",
+    handlerFamily: handlerProfile.id,
     payloadOffset,
     runtimeBase: linkAddr,
     runtimeMenuEntry: payloadBuild.symbols.fake_rtc_menu_run_runtime === undefined ? null : (payloadBuild.symbols.fake_rtc_menu_run_runtime | 1) >>> 0,

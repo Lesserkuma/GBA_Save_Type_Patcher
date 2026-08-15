@@ -8,7 +8,10 @@ import {
   isBlankRegion,
   overlapsAnyRange,
 } from "../core/ranges.js";
-import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
+import {
+  GBA_MAX_ROM_SIZE_BYTES,
+  GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+} from "../domain/gba-constants.js";
 import { stageErasedRomExpansion } from "../patch-engine/draft.js";
 
 export const PAYLOAD_ALIGNMENT = 0x100;
@@ -112,10 +115,11 @@ export function lastNonBlankEnd(bytes) {
 export function findDirectPayloadRegion(bytes, totalSpan, excludedRanges = []) {
   if (!Number.isSafeInteger(totalSpan) || totalSpan < 0) return null;
   const normalizedRanges = normalizeExcludedRanges(excludedRanges);
-  if (totalSpan === 0) return alignUp(bytes.length, PAYLOAD_ALIGNMENT);
+  const searchEnd = Math.min(bytes.length, GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES);
+  if (totalSpan === 0) return alignUp(searchEnd, PAYLOAD_ALIGNMENT);
 
   let runEnd = null;
-  for (let position = bytes.length - 1; position >= -1; position -= 1) {
+  for (let position = searchEnd - 1; position >= -1; position -= 1) {
     const excluded = position >= 0
       && normalizedRanges.some(([start, end]) => start <= position && position < end);
     const blank = position >= 0 && isBlankByte(bytes[position]) && !excluded;
@@ -170,7 +174,10 @@ export function ensureDirectPayloadRegion(
     if (payloadBase !== null) return payloadBase;
 
     const targetEnd = directPayloadTargetEnd(rom.bytes, totalSpan, normalizedRanges);
-    if (targetEnd > GBA_MAX_ROM_SIZE_BYTES || rom.bytes.length >= GBA_MAX_ROM_SIZE_BYTES) {
+    if (
+      targetEnd > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES
+      || rom.bytes.length >= GBA_MAX_ROM_SIZE_BYTES
+    ) {
       warnings.push(`${label}: no free payload area and ROM is already 32 MiB`);
       return null;
     }
@@ -189,6 +196,7 @@ export function ensureDirectPayloadRegion(
 
 // Compatibility aliases for the pre-audit helper names.
 export const GBA_MAX_ROM_SIZE = GBA_MAX_ROM_SIZE_BYTES;
+export const GBA_PAYLOAD_PLACEMENT_LIMIT = GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES;
 export { alignDown, alignUp };
 export const isFreeByte = isBlankByte;
 export const isFreeRegion = isBlankRegion;

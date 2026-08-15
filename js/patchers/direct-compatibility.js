@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later AND MIT
 
 import { PatchError } from "../core/errors.js";
-import { analyzeBatchedSramSnapshot } from "./sram-batched-snapshot-analysis.js";
+import { analyzeMirroredBatchSnapshot } from "./sram-batched-snapshot-analysis.js";
 
 /**
  * Build the complete Direct-backend strategy from save-library ABI evidence,
@@ -23,26 +23,33 @@ export function analyzeDirectCompatibility(bytes, hooks, descriptor) {
       ? "eeprom-v120-runtime-timer"
       : "eeprom-v5";
   } else {
-    const batchedSnapshot = analyzeBatchedSramSnapshot(bytes, hooks);
-    if (batchedSnapshot) {
-      runtime = descriptor.familyRuntimes?.sramBatched;
+    const mirroredBatchSnapshot = analyzeMirroredBatchSnapshot(bytes, hooks);
+    if (mirroredBatchSnapshot) {
+      runtime = descriptor.familyRuntimes?.sramMirroredBatch;
       if (!runtime) {
-        throw new PatchError(`${descriptor.label}: batched SRAM capability has no runtime.`);
+        throw new PatchError(`${descriptor.label}: mirrored SRAM batch capability has no runtime.`);
       }
-      profile = "sram-batched-snapshot";
+      profile = "sram-mirrored-batch-snapshot";
       return Object.freeze({
         profile,
         runtime,
-        batchedSnapshot,
+        mirroredBatchSnapshot,
       });
     }
-    if ((hooks.sramWriteVerify?.length ?? 0) > 0) {
+    if ((hooks.sramWriteVerify?.length ?? 0) > 0
+        || (hooks.sramByteWriteCallers?.length ?? 0) > 0) {
       runtime = descriptor.familyRuntimes?.sramTransaction;
       if (!runtime) {
         throw new PatchError(`${descriptor.label}: SRAM transaction capability has no runtime.`);
       }
-      profile = "sram-transaction-v16";
+      profile = (hooks.sramWriteVerify?.length ?? 0) > 0
+        ? "sram-write-verify-transaction"
+        : "sram-byte-write-transaction";
     } else {
+      /* The transaction runtime changes the stack and timing shape of every
+       * write. Select it only for a combined Write/Verify ABI or a proved
+       * immediate byte-write call; an ordinary complete SDK hook set remains
+       * on the established base runtime. */
       profile = "sram-v16";
     }
   }
@@ -50,10 +57,9 @@ export function analyzeDirectCompatibility(bytes, hooks, descriptor) {
   return Object.freeze({
     profile,
     runtime,
-    eepromWriteMode: hooks.family === "eeprom"
-      && (hooks.eepromRuntimeTimer === true
-        || hooks.sourceSaveType === "EEPROM_V122")
-      ? "settled-wrapper"
-      : "direct",
+    /* EEPROM writes are observably asynchronous on the original medium.
+     * Keep a small, deterministic return delay for every EEPROM ABI instead
+     * of inferring timing safety from a library label. */
+    eepromWriteMode: hooks.family === "eeprom" ? "settled-wrapper" : "direct",
   });
 }

@@ -7,11 +7,14 @@ import {
 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
 import { addPrefixGuardToRanges, findTailBlankRegion } from "../core/ranges.js";
-import { applyWaitstateForPipeline, waitstateFixedWriteRangesForLayout, waitstatePayloadSpanForLayout } from "./waitstate.js";
+import { GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES } from "../domain/gba-constants.js";
+import { PATCH_REASON_CODE } from "../domain/constants.js";
+import { applyWaitstateForPipeline, planWaitstateForLayout } from "./waitstate.js";
 import {
   applyRtcForPipeline,
   rtcPayloadSpanForLayout,
   RTC_PAYLOAD_SIZE,
+  RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG,
   RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
 } from "./rtc.js";
 import { applyIrqHandlerForPipeline, IRQ_HANDLER_PAYLOAD_SIZE, irqHandlerPayloadSpanForLayout } from "./irq-handler.js";
@@ -83,23 +86,34 @@ function findMatch(bytes, identifier, start = 1) {
   return null;
 }
 
-function applySimplePatch(data, out, patchInfo, operations, warnings, flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN) {
-  for (const step of patchInfo.steps) {
-    const matchOffsets = [];
-    let searchStart = 1;
-    while (true) {
-      const matchOffset = findMatch(data, step.identifier, searchStart);
-      if (matchOffset === null) break;
-      matchOffsets.push(matchOffset);
-      if (patchInfo.match_all === false) break;
-      searchStart = matchOffset + 1;
-    }
+function findIdentifierMatches(data, identifier, matchAll) {
+  const matchOffsets = [];
+  let searchStart = 1;
+  while (true) {
+    const matchOffset = findMatch(data, identifier, searchStart);
+    if (matchOffset === null) break;
+    matchOffsets.push(matchOffset);
+    if (matchAll === false) break;
+    searchStart = matchOffset + 1;
+  }
+  return matchOffsets;
+}
 
+function planSimplePatch(data, patchInfo, warnings) {
+  const steps = [];
+  for (const step of patchInfo.steps) {
+    const matchOffsets = findIdentifierMatches(data, step.identifier, patchInfo.match_all);
     if (!matchOffsets.length) {
       warnings.push(`${step.name}: identifier not found`);
-      continue;
+      return { ok: false, reasonCode: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET };
     }
+    steps.push({ step, matchOffsets });
+  }
+  return { ok: true, steps };
+}
 
+function applySimplePatch(out, plan, operations, flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN) {
+  for (const { step, matchOffsets } of plan.steps) {
     for (const matchOffset of matchOffsets) {
       for (const writeInfo of step.writes) {
         const resolvedWriteInfo = resolveFlash1mBankSwitchWriteInfo(writeInfo, flash1mBankSwitchStyle);
@@ -107,6 +121,7 @@ function applySimplePatch(data, out, patchInfo, operations, warnings, flash1mBan
       }
     }
   }
+  return { ok: true };
 }
 
 function targetBase(writeInfo, hookOffset, injectionOffset) {
@@ -121,37 +136,42 @@ function dynamicU32Value(valueName, hookOffset, injectionOffset) {
   throw new PatchError(`Unknown dynamic u32 value: ${valueName}`);
 }
 
-function applyTailTrampolinePatch(data, out, patchInfo, operations, warnings, excludedRanges = []) {
-  const hookOffsets = [];
-  let searchStart = 1;
-  while (true) {
-    const hookOffset = findMatch(data, patchInfo.identifier, searchStart);
-    if (hookOffset === null) break;
-    hookOffsets.push(hookOffset);
-    if (patchInfo.match_all === false) break;
-    searchStart = hookOffset + 1;
-  }
-
+function planTailHookMatches(data, patchInfo, warnings) {
+  const hookOffsets = findIdentifierMatches(data, patchInfo.identifier, patchInfo.match_all);
   if (!hookOffsets.length) {
     warnings.push(`${patchInfo.name}: hook identifier not found`);
-    return;
+    return { ok: false, reasonCode: PATCH_REASON_CODE.INCOMPLETE_HOOK_SET };
   }
+  return { ok: true, hookOffsets };
+}
 
+function applyTailTrampolinePatch(out, patchInfo, hookPlan, operations, warnings, excludedRanges = []) {
   const allocatedRanges = [...excludedRanges];
-  for (const hookOffset of hookOffsets) {
-    const injectionOffset = findTailBlankRegion(out, patchInfo.injection_size, 16, out.length, allocatedRanges);
+  const placements = [];
+  for (const hookOffset of hookPlan.hookOffsets) {
+    const injectionOffset = findTailBlankRegion(
+      out,
+      patchInfo.injection_size,
+      16,
+      GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+      allocatedRanges,
+    );
     if (injectionOffset === null) {
       warnings.push(`${patchInfo.name}: no free tail area for trampoline`);
-      return;
+      return { ok: false, reasonCode: PATCH_REASON_CODE.ROM_CAPACITY };
     }
     allocatedRanges.push([injectionOffset, injectionOffset + patchInfo.injection_size]);
+    placements.push({ hookOffset, injectionOffset });
+  }
 
+  for (const { hookOffset, injectionOffset } of placements) {
     for (const writeInfo of patchInfo.writes) {
       const targetOffset = targetBase(writeInfo, hookOffset, injectionOffset) + (writeInfo.target_add || 0);
       if (writeInfo.hex) writeSramCode(out, targetOffset, writeInfo, operations);
       else writeSramU32Value(out, targetOffset, dynamicU32Value(writeInfo.u32_value, hookOffset, injectionOffset), operations, writeInfo.name);
     }
   }
+  return { ok: true };
 }
 
 function makeResult(
@@ -185,7 +205,11 @@ function createSramPatchContext(inputBytes, options) {
   const rtc = options.rtc?.enabled === true;
   const rtcPersistenceEnabled = rtc && options.rtc?.saveOnGlobalHotkey !== false;
   const rtcPayloadSpan = rtc ? rtcPayloadSpanForLayout() : 0;
-  const waitstatePayloadSpan = waitstatePayloadSpanForLayout(originalData, options.waitstate);
+  const startupRomCopySourceRanges = findStartupRomCopySourceRanges(originalData);
+  const waitstatePlan = waitstate
+    ? planWaitstateForLayout(originalData, options.waitstate, startupRomCopySourceRanges)
+    : null;
+  const waitstatePayloadSpan = waitstatePlan?.totalPayloadSpan || 0;
   const flash1mBankSwitchStyle = normalizeFlash1mBankSwitchStyle(options.flash1mBankSwitchStyle);
   const selectedBatterylessPayload = batterylessPayloadForStyle(flash1mBankSwitchStyle);
   return {
@@ -216,15 +240,18 @@ function createSramPatchContext(inputBytes, options) {
     rtcPersistenceRange: null,
     skipSavePatch: false,
     sramPatchApplied: false,
+    savePatchReasonCode: null,
+    savePatchPlan: null,
     saveEmbedded: false,
     batteryless,
     waitstate,
     rtc,
     rtcPersistenceEnabled,
     rtcPayloadSpan,
+    waitstatePlan,
     waitstatePayloadSpan,
-    waitstateFixedWriteRanges: waitstateFixedWriteRangesForLayout(originalData, options.waitstate),
-    startupRomCopySourceRanges: findStartupRomCopySourceRanges(originalData),
+    waitstateFixedWriteRanges: waitstatePlan?.fixedWriteRanges || [],
+    startupRomCopySourceRanges,
     batterylessMode: options.batterylessMode || "auto",
     batterylessCountdown: options.batterylessCountdown ?? C.BATTERYLESS_DEFAULT_COUNTDOWN,
     batterylessIndicatorMode: options.batterylessIndicatorMode || "off",
@@ -250,22 +277,24 @@ function payloadPlacementExcludedRanges(context) {
 }
 
 function unsupportedSramResult(context, saveType) {
-  if (!context.options.deferHeaderFinalization) {
-    updateGbaHeaderChecksum(context.rom.bytes, context.operations);
-  }
+  const reasonCode = context.savePatchReasonCode || PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE;
   return {
-    bytes: context.rom.bytes,
+    bytes: new Uint8Array(context.originalData),
     result: makeResult(
       saveType,
       "unsupported",
-      context.operations,
+      [],
       context.warnings,
       context.batterylessResult,
       null,
       false,
       null,
       null,
-      { requested: true, status: "unsupported" },
+      {
+        requested: true,
+        status: "unsupported",
+        reasonCode,
+      },
     ),
   };
 }
@@ -274,15 +303,19 @@ function resolveSramPatchInfo(context) {
   if (context.saveType === null) {
     if (context.batteryless && context.batterylessResult === null) {
       context.warnings.push("No known GBA save type found");
+      context.savePatchReasonCode = PATCH_REASON_CODE.AMBIGUOUS_SAVE_TYPE;
       context.batterylessResult = {
         requested: true,
         mode: context.batterylessMode,
         status: "failed",
         countdown: context.batterylessCountdown,
         indicatorMode: context.batterylessIndicatorMode,
+        reasonCode: PATCH_REASON_CODE.AMBIGUOUS_SAVE_TYPE,
       };
+      return atomicSaveConversionFailure(context);
     } else if (!context.waitstate && !context.rtc && !context.skipSavePatch) {
       context.warnings.push("No known GBA save type found");
+      context.savePatchReasonCode = PATCH_REASON_CODE.AMBIGUOUS_SAVE_TYPE;
       return unsupportedSramResult(context, null);
     }
     return null;
@@ -291,15 +324,19 @@ function resolveSramPatchInfo(context) {
   if (context.patchInfo !== null) return null;
   if (context.batteryless && context.batterylessResult === null) {
     context.warnings.push(`${context.saveType} is not supported by the SRAM patcher`);
+    context.savePatchReasonCode = PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE;
     context.batterylessResult = {
       requested: true,
       mode: context.batterylessMode,
       status: "failed",
       countdown: context.batterylessCountdown,
       indicatorMode: context.batterylessIndicatorMode,
+      reasonCode: PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE,
     };
+    return atomicSaveConversionFailure(context);
   } else if (!context.waitstate && !context.rtc && !context.skipSavePatch) {
     context.warnings.push(`${context.saveType} is not supported by the SRAM patcher`);
+    context.savePatchReasonCode = PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE;
     return unsupportedSramResult(context, context.saveType);
   }
   return null;
@@ -336,7 +373,10 @@ function assignPlannedBatterylessLayout(context, layout, rtcSpan) {
 }
 
 function planBatterylessLayout(context) {
-  if (!context.batteryless || context.batterylessResult !== null) return;
+  if (!context.batteryless) return true;
+  if (context.batterylessResult !== null) {
+    return context.batterylessResult.status !== "failed";
+  }
   const rtcSpan = context.rtc && context.rtcResult === null
     ? context.rtcPayloadSpan
     : 0;
@@ -352,28 +392,90 @@ function planBatterylessLayout(context) {
     payloadPlacementExcludedRanges(context),
   );
   if (layout === null) {
+    context.savePatchReasonCode = PATCH_REASON_CODE.ROM_CAPACITY;
     context.batterylessResult = {
       requested: true,
       mode: context.batterylessMode,
       status: "failed",
       countdown: context.batterylessCountdown,
       indicatorMode: context.batterylessIndicatorMode,
+      reasonCode: PATCH_REASON_CODE.ROM_CAPACITY,
     };
-    return;
+    return false;
   }
   assignPlannedBatterylessLayout(context, layout, rtcSpan);
+  return true;
+}
+
+function planSaveConversion(context) {
+  if (context.patchInfo === null || context.skipSavePatch) return true;
+  if (context.patchInfo.type === "simple") {
+    context.savePatchPlan = planSimplePatch(
+      context.originalData,
+      context.patchInfo,
+      context.warnings,
+    );
+  } else if (context.patchInfo.type === "tail_trampoline") {
+    context.savePatchPlan = planTailHookMatches(
+      context.originalData,
+      context.patchInfo,
+      context.warnings,
+    );
+  } else if (context.patchInfo.type === "already_sram") {
+    context.savePatchPlan = { ok: true };
+  } else {
+    context.warnings.push(`${context.patchInfo.name}: unknown patch type`);
+    context.savePatchPlan = {
+      ok: false,
+      reasonCode: PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE,
+    };
+  }
+  if (context.savePatchPlan.ok) return true;
+  context.savePatchReasonCode = context.savePatchPlan.reasonCode;
+  return false;
+}
+
+function atomicSaveConversionFailure(context) {
+  const reasonCode = context.savePatchReasonCode
+    || context.batterylessResult?.reasonCode
+    || null;
+  const savePatch = { requested: true, status: "failed" };
+  if (reasonCode) savePatch.reasonCode = reasonCode;
+  const batteryless = context.batteryless ? {
+    ...(context.batterylessResult || {}),
+    requested: true,
+    mode: context.batterylessMode,
+    status: "failed",
+    countdown: context.batterylessCountdown,
+    indicatorMode: context.batterylessIndicatorMode,
+  } : null;
+  if (batteryless && reasonCode) batteryless.reasonCode = reasonCode;
+  return {
+    bytes: new Uint8Array(context.originalData),
+    result: makeResult(
+      context.saveType,
+      "unsupported",
+      [],
+      context.warnings,
+      batteryless,
+      null,
+      false,
+      null,
+      null,
+      savePatch,
+    ),
+  };
 }
 
 function applySaveConversion(context) {
-  if (context.patchInfo === null || context.skipSavePatch) return;
+  if (context.patchInfo === null || context.skipSavePatch) return true;
   const operationCount = context.operations.length;
+  let applied = { ok: true };
   if (context.patchInfo.type === "simple") {
-    applySimplePatch(
-      context.originalData,
+    applied = applySimplePatch(
       context.rom.bytes,
-      context.patchInfo,
+      context.savePatchPlan,
       context.operations,
-      context.warnings,
       context.flash1mBankSwitchStyle,
     );
   } else if (context.patchInfo.type === "tail_trampoline") {
@@ -383,10 +485,10 @@ function applySaveConversion(context) {
       ...context.waitstateExcludedRanges,
       ...context.irqHandlerExcludedRanges,
     ];
-    applyTailTrampolinePatch(
-      context.originalData,
+    applied = applyTailTrampolinePatch(
       context.rom.bytes,
       context.patchInfo,
+      context.savePatchPlan,
       context.operations,
       context.warnings,
       addPrefixGuardToRanges(excluded, C.TAIL_TRAMPOLINE_EXCLUDED_PREFIX_GUARD),
@@ -394,7 +496,12 @@ function applySaveConversion(context) {
   } else if (context.patchInfo.type !== "already_sram") {
     context.warnings.push(`${context.patchInfo.name}: unknown patch type`);
   }
+  if (!applied.ok) {
+    context.savePatchReasonCode = applied.reasonCode;
+    return false;
+  }
   context.sramPatchApplied = context.operations.length > operationCount;
+  return true;
 }
 
 function planNonBatterylessAddons(context) {
@@ -490,8 +597,12 @@ function applyRtcAndBatteryless(context) {
             : batterylessSaveOffset(context.batterylessPayloadOffset, context.selectedBatterylessPayload))
           : null,
         persistenceFlags: context.rtcPersistenceEnabled
-          && context.batterylessPayloadOffset !== null
-          ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG
+          ? (context.flash1mBankSwitchStyle === FLASH1M_BANK_SWITCH_STYLE_MODERN
+            ? RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG
+            : 0)
+            | (context.batterylessPayloadOffset !== null
+              ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG
+              : 0)
           : 0,
       },
     );
@@ -559,6 +670,7 @@ function applySramWaitstate(context) {
       waitstatePayloadOffset: context.waitstatePayloadOffset,
       batterylessPayloadOffset: context.batterylessPayloadOffset,
       batterylessJustPatched: context.batterylessResult?.status === "patched",
+      structuralPlan: context.waitstatePlan,
     },
   );
 }
@@ -624,13 +736,13 @@ function applySramIrq(context) {
       countdownFrames: context.batterylessCountdown,
       indicatorMode: context.batterylessIndicatorMode,
       hotkeyMask: context.batterylessHotkeyMask,
-      startupCallbackEntry: context.batterylessResult?.initEntry || 0,
-      originalEntrypointOverride: context.batterylessResult?.runtimeEntry || 0,
-      // Games may probe or write save storage before their first VBlank. Let
-      // the shared IRQ planner initialize Batteryless SRAM before main when
-      // its structural CRT, stack, handler and IWRAM safety proofs all pass;
-      // unproven startup layouts retain the first-VBlank fallback.
-      allowPreMainStartupCallback: Boolean(context.batterylessResult?.initEntry),
+      // Batteryless storage is hydrated universally by its reset boot stub,
+      // before the game can access EEPROM, FLASH, or SRAM. Shared IRQ only
+      // owns flushing and must not initialize the save a second time.
+      startupCallbackEntry: 0,
+      // If the IRQ scanner needs a reset bootstrap, it runs after Batteryless
+      // hydration and must continue to the real pre-patch entrypoint.
+      originalEntrypointOverride: context.batterylessResult?.originalEntrypoint || 0,
     },
     {
       excludedRanges: irqExcludedRanges(context),
@@ -676,6 +788,8 @@ function savePatchStatus(context) {
 
 function completedSramResult(context) {
   const savePatchResult = { requested: true, status: savePatchStatus(context) };
+  if (context.patchInfo?.type === "already_sram") savePatchResult.alreadySram = true;
+  if (context.savePatchReasonCode) savePatchResult.reasonCode = context.savePatchReasonCode;
   const result = makeResult(
     context.saveType,
     sramResultStatus(context),
@@ -699,10 +813,15 @@ export function patchSramBytes(inputBytes, options = {}) {
   const context = createSramPatchContext(inputBytes, options);
   const unsupported = resolveSramPatchInfo(context);
   if (unsupported) return unsupported;
-  planBatterylessLayout(context);
-  applySaveConversion(context);
+  if (!planSaveConversion(context)) return atomicSaveConversionFailure(context);
+  if (!planBatterylessLayout(context)) return atomicSaveConversionFailure(context);
+  if (!applySaveConversion(context)) return atomicSaveConversionFailure(context);
   planNonBatterylessAddons(context);
   applyRtcAndBatteryless(context);
+  if (context.batterylessResult?.status === "failed") {
+    context.savePatchReasonCode = context.batterylessResult.reasonCode || null;
+    return atomicSaveConversionFailure(context);
+  }
   applySramWaitstate(context);
   applySramIrq(context);
   routeBatterylessBootVector(

@@ -20,6 +20,20 @@ function directCallers(bytes, targets) {
   return callers;
 }
 
+/**
+ * Identify callers which pass an immediate one-byte length to WriteSram.
+ * This is the runtime capability needed by the scalar transaction writer:
+ * the ordinary block writer is correct for such calls, but repeatedly
+ * decoding a complete block inside a byte-at-a-time initialization loop can
+ * exceed the caller's frame budget.  Requiring MOVS r2,#1 immediately before
+ * the direct BL keeps the proof local and fail-closed.
+ */
+export function analyzeSramByteWriteCallers(bytes, writeTargets) {
+  return directCallers(bytes, writeTargets)
+    .filter(({ offset }) => offset >= 2 && readU16(bytes, offset - 2) === 0x2201)
+    .map(({ offset, target }) => Object.freeze({ offset, target }));
+}
+
 function thumbFunctionStart(bytes, instructionOffset) {
   for (let offset = instructionOffset; offset >= Math.max(0, instructionOffset - 0x100);
     offset -= 2) {

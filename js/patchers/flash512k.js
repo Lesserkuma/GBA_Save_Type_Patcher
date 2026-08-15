@@ -2,7 +2,12 @@
 
 import { asciiBytes, findBytes, hexToBytes, writeU32 } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
-import { customFlashSaveChipModelFromType, PATCH_MODES, PATCH_OPERATION_KIND } from "../domain/constants.js";
+import {
+  customFlashSaveChipModelFromType,
+  PATCH_MODES,
+  PATCH_OPERATION_KIND,
+  PATCH_REASON_CODE,
+} from "../domain/constants.js";
 import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
 import { stagePatchOperation } from "../patch-engine/draft.js";
 import {
@@ -22,6 +27,7 @@ import {
 import { patchSramBytes } from "./sram.js";
 import { findStartupRomCopySourceRanges } from "./startup-rom-copy-ranges.js";
 import { analyzeDirectCompatibility } from "./direct-compatibility.js";
+import { stageMirroredBatchWorkspaceReservation } from "./sram-batched-snapshot-analysis.js";
 import { buildEepromV120FlashTimingHook } from "./eeprom-v12x-write-compat.js";
 import * as FLASH_DIRECT_DATA from "./flash-direct-data.js";
 import * as FLASH_DIRECT_SNAPSHOT_DATA from "./flash-direct-snapshot-data.js";
@@ -57,13 +63,11 @@ function defineDirectDescriptor(rawData, spec = {}) {
     layout: required("DIRECT_LAYOUT_CONFIG_OFFSET"),
     saveProtocol: required("DIRECT_SAVE_PROTOCOL_CONFIG_OFFSET"),
   };
-  if (Number.isInteger(constants.DIRECT_SNAPSHOT_PROVIDER_COUNT_CONFIG_OFFSET)) {
-    configFields.snapshotProviderCount = required("DIRECT_SNAPSHOT_PROVIDER_COUNT_CONFIG_OFFSET");
+  if (Number.isInteger(constants.DIRECT_SNAPSHOT_WORKSPACE_BASE_CONFIG_OFFSET)) {
+    configFields.snapshotWorkspaceBase = required("DIRECT_SNAPSHOT_WORKSPACE_BASE_CONFIG_OFFSET");
+    configFields.snapshotReaderBase = required("DIRECT_SNAPSHOT_READER_BASE_CONFIG_OFFSET");
     configFields.snapshotCommitFirst = required("DIRECT_SNAPSHOT_COMMIT_FIRST_CONFIG_OFFSET");
     configFields.snapshotCommitSize = required("DIRECT_SNAPSHOT_COMMIT_SIZE_CONFIG_OFFSET");
-    configFields.snapshotTransientCount = required("DIRECT_SNAPSHOT_TRANSIENT_COUNT_CONFIG_OFFSET");
-    configFields.snapshotProviders = required("DIRECT_SNAPSHOT_PROVIDERS_CONFIG_OFFSET");
-    configFields.snapshotTransientRanges = required("DIRECT_SNAPSHOT_TRANSIENT_RANGES_CONFIG_OFFSET");
   }
   const entries = {
     sramWrite: required("DIRECT_WRITE_SRAM_ENTRY"),
@@ -105,11 +109,7 @@ function defineDirectDescriptor(rawData, spec = {}) {
     configFields,
     mutableRanges: Object.entries(configFields).map(([name, offset]) => [
       offset,
-      offset + (name === "snapshotProviders"
-        ? required("DIRECT_SNAPSHOT_PROVIDER_MAX") * 12
-        : (name === "snapshotTransientRanges"
-          ? required("DIRECT_SNAPSHOT_TRANSIENT_MAX") * 12
-          : 4)),
+      offset + 4,
     ]),
     entries,
     families,
@@ -124,11 +124,11 @@ function defineDirectDescriptor(rawData, spec = {}) {
   const familyRuntimes = {};
   if (spec.snapshotData) {
     const snapshotRuntime = defineDirectDescriptor(spec.snapshotData, {
-      label: `${descriptor.label} batched SRAM snapshot`,
+      label: `${descriptor.label} mirrored SRAM batch snapshot`,
       shape: "snapshot",
       storageFormat: DIRECT_SNAPSHOT_STORAGE,
     });
-    familyRuntimes.sramBatched = snapshotRuntime;
+    familyRuntimes.sramMirroredBatch = snapshotRuntime;
   }
   if (spec.transactionData) {
     const transactionRuntime = defineDirectDescriptor(spec.transactionData, {
@@ -171,7 +171,12 @@ function validatedFlashOptions(input, options) {
       : descriptor.protocols.customType2;
   }
   if (input.length < 0xc0 || input[0xb2] !== 0x96) throw new PatchError("Invalid GBA header.");
-  if (input.length > GBA_MAX_ROM_SIZE_BYTES) throw new PatchError(`${descriptor.label}: ROM is larger than 32 MiB.`);
+  if (input.length > GBA_MAX_ROM_SIZE_BYTES) {
+    throw new PatchError(`${descriptor.label}: ROM is larger than 32 MiB.`, {
+      code: PATCH_REASON_CODE.ROM_CAPACITY,
+      isRecoverable: true,
+    });
+  }
   const requestedRanges = options.placementExcludedRanges ?? [];
   if (!Array.isArray(requestedRanges)) throw new PatchError(`${descriptor.label}: placement exclusions must be ranges.`);
   return {
@@ -222,7 +227,10 @@ function validateFlashSource(input) {
   }
   const sourceSaveType = findSaveType(input);
   if (findBytes(input, FLASH1M_MARKER) >= 0 || sourceSaveType?.startsWith("FLASH1M")) {
-    throw new PatchError("512K FLASH is incompatible with 1M FLASH / 128 KiB save games.");
+    throw new PatchError("512K FLASH is incompatible with 1M FLASH / 128 KiB save games.", {
+      code: PATCH_REASON_CODE.INCOMPATIBLE_SAVE_SIZE,
+      isRecoverable: true,
+    });
   }
   if (sourceSaveType?.startsWith("FLASH512") || sourceSaveType?.startsWith("FLASH_")) {
     return { sourceSaveType, output: nativeFlashResult(input, sourceSaveType) };
@@ -230,7 +238,12 @@ function validateFlashSource(input) {
   if (!sourceSaveType || (!sourceSaveType.startsWith("SRAM") && !sourceSaveType.startsWith("EEPROM"))) {
     throw new PatchError(sourceSaveType
       ? `${sourceSaveType} is not supported by 512K FLASH.`
-      : "512K FLASH could not detect a supported SRAM or EEPROM save type.");
+      : "512K FLASH could not detect a supported SRAM or EEPROM save type.", {
+      code: sourceSaveType
+        ? PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE
+        : PATCH_REASON_CODE.AMBIGUOUS_SAVE_TYPE,
+      isRecoverable: true,
+    });
   }
   return { sourceSaveType, output: null };
 }
@@ -290,8 +303,18 @@ function normalizeFlashSource(input, sourceSaveType, descriptor) {
     rtc: { enabled: false },
     deferHeaderFinalization: true,
   });
-  if (normalized.result.status === "unsupported") {
-    throw new PatchError(normalized.result.warnings?.[0] || `${sourceSaveType} could not be normalized to SRAM.`);
+  const normalizedSavePatchStatus = normalized.result.savePatch?.status;
+  const normalizedSavePatchComplete = normalizedSavePatchStatus === "patched"
+    || (normalizedSavePatchStatus === "unchanged"
+      && normalized.result.savePatch?.alreadySram === true);
+  if (!normalizedSavePatchComplete) {
+    throw new PatchError(
+      normalized.result.warnings?.[0] || `${sourceSaveType} could not be normalized to SRAM.`,
+      {
+        code: normalized.result.savePatch?.reasonCode || "INCOMPLETE_HOOK_SET",
+        isRecoverable: true,
+      },
+    );
   }
   const hooks = {
       ...detectFlash512kHookSet(
@@ -316,33 +339,19 @@ function configurePayload(
   const familySettings = familyConfig(family, descriptor);
   writeU32(payload, runtime.configFields.layout, familySettings.layout);
   writeU32(payload, runtime.configFields.saveProtocol, protocol);
-  if (capabilityPlan.profile === "sram-batched-snapshot") {
-    const snapshot = capabilityPlan.batchedSnapshot;
+  if (capabilityPlan.profile === "sram-mirrored-batch-snapshot") {
+    const snapshot = capabilityPlan.mirroredBatchSnapshot;
     const fields = runtime.configFields;
-    if (!Number.isInteger(fields.snapshotProviderCount)
+    if (!Number.isInteger(fields.snapshotWorkspaceBase)
+        || !Number.isInteger(fields.snapshotReaderBase)
         || !Number.isInteger(fields.snapshotCommitFirst)
-        || !Number.isInteger(fields.snapshotCommitSize)
-        || !Number.isInteger(fields.snapshotTransientCount)
-        || !Number.isInteger(fields.snapshotProviders)
-        || !Number.isInteger(fields.snapshotTransientRanges)) {
+        || !Number.isInteger(fields.snapshotCommitSize)) {
       throw new PatchError(`${runtime.label}: snapshot configuration ABI is incomplete.`);
     }
-    writeU32(payload, fields.snapshotProviderCount, snapshot.providers.length);
+    writeU32(payload, fields.snapshotWorkspaceBase, snapshot.workspaceBase);
+    writeU32(payload, fields.snapshotReaderBase, snapshot.readerBase);
     writeU32(payload, fields.snapshotCommitFirst, snapshot.commitFirst);
     writeU32(payload, fields.snapshotCommitSize, snapshot.commitSize);
-    writeU32(payload, fields.snapshotTransientCount, snapshot.transientRanges.length);
-    snapshot.providers.forEach((provider, index) => {
-      const offset = fields.snapshotProviders + index * 12;
-      writeU32(payload, offset, provider.logicalStart);
-      writeU32(payload, offset + 4, provider.length);
-      writeU32(payload, offset + 8, provider.sourceAddress);
-    });
-    snapshot.transientRanges.forEach((range, index) => {
-      const offset = fields.snapshotTransientRanges + index * 12;
-      writeU32(payload, offset, range.logicalStart);
-      writeU32(payload, offset + 4, range.length);
-      writeU32(payload, offset + 8, range.sourceAddress);
-    });
   }
   return payload;
 }
@@ -353,6 +362,13 @@ function installDirectBackend(normalizedSource, config) {
   const operations = [...(normalized.result.operations || [])];
   const warnings = [...(normalized.result.warnings || [])];
   const runtime = capabilityPlan.runtime;
+  if (capabilityPlan.profile === "sram-mirrored-batch-snapshot") {
+    stageMirroredBatchWorkspaceReservation(
+      rom.bytes,
+      operations,
+      capabilityPlan.mirroredBatchSnapshot,
+    );
+  }
   const hookEntries = { ...runtime.entries };
   if (hooks.family === "sram" && hooks.sramReadbackVerify !== true) {
     hookEntries.sramVerify = runtime.entries.sramVerifyFast;
@@ -405,7 +421,7 @@ function installDirectBackend(normalizedSource, config) {
     },
   );
   return {
-    rom, operations, warnings, hooks, payloadBase, runtime,
+    rom, operations, warnings, hooks, payloadBase, runtime, capabilityPlan,
   };
 }
 
@@ -427,9 +443,13 @@ function directOutput(installed, sourceSaveType, config, options, eepromExportSi
   const storageFormat = installed.runtime.storageFormat;
   const saveRuntime = {
     family,
+    profile: installed.capabilityPlan.profile,
     storageFormat,
     payloadOffset: installed.payloadBase,
     payloadSize: installed.runtime.payloadSize,
+    ...(installed.capabilityPlan.mirroredBatchSnapshot
+      ? { mirroredBatchSnapshot: installed.capabilityPlan.mirroredBatchSnapshot }
+      : {}),
   };
   const output = baseResult(
     installed.rom.bytes,

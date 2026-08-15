@@ -46,12 +46,10 @@ CONFIG_SYMBOLS = {
     "DIRECT_SAVE_PROTOCOL_CONFIG_OFFSET": "direct_save_protocol_config",
 }
 SNAPSHOT_CONFIG_SYMBOLS = {
-    "DIRECT_SNAPSHOT_PROVIDER_COUNT_CONFIG_OFFSET": "direct_snapshot_provider_count_config",
+    "DIRECT_SNAPSHOT_WORKSPACE_BASE_CONFIG_OFFSET": "direct_snapshot_workspace_base_config",
+    "DIRECT_SNAPSHOT_READER_BASE_CONFIG_OFFSET": "direct_snapshot_reader_base_config",
     "DIRECT_SNAPSHOT_COMMIT_FIRST_CONFIG_OFFSET": "direct_snapshot_commit_first_config",
     "DIRECT_SNAPSHOT_COMMIT_SIZE_CONFIG_OFFSET": "direct_snapshot_commit_size_config",
-    "DIRECT_SNAPSHOT_TRANSIENT_COUNT_CONFIG_OFFSET": "direct_snapshot_transient_count_config",
-    "DIRECT_SNAPSHOT_PROVIDERS_CONFIG_OFFSET": "direct_snapshot_providers_config",
-    "DIRECT_SNAPSHOT_TRANSIENT_RANGES_CONFIG_OFFSET": "direct_snapshot_transient_ranges_config",
 }
 FLASH_READER_THUMB_CODE = 0x47707800
 FLASH_READER_LITERAL_COUNT = 1
@@ -64,15 +62,24 @@ SRAM_COMPARE_INVERTED_CODE = bytes.fromhex(
     "002030bc7047"
 )
 MAX_STATIC_STACK_USAGE = 512
+MAX_EEPROM_ENTRY_STACK_USAGE = 128
+MAX_SRAM_ENTRY_STACK_USAGE = 128
+MAX_EEPROM_COMPACTION_PATH_STACK_USAGE = 512
+EEPROM_STACK_PATHS = (
+    ("write_eeprom_patched", "eeprom_compact_sector", "flash_copy"),
+    ("write_eeprom_patched", "eeprom_compact_sector", "eeprom_visible_slot"),
+)
+TRANSACTION_STACK_PATHS = (
+    ("write_sram_cached_patched", "sram16_write_core", "sram16_write_byte"),
+    ("write_verify_sram_patched", "sram16_write_core", "sram16_write_byte"),
+)
 SNAPSHOT_STACK_PATHS = (
     ("write_sram_cached_patched", "write_sram_result", "snapshot_commit",
-     "snapshot_encode_segments", "snapshot_encode_bytes"),
+     "snapshot_commit_core",
+     "snapshot_encode_mirror", "snapshot_encode_bytes"),
     ("write_verify_sram_patched", "write_sram_result", "snapshot_commit",
-     "snapshot_encode_segments", "snapshot_encode_bytes"),
-    ("write_sram_cached_patched", "write_sram_result", "snapshot_commit",
-     "snapshot_write_raw_segments"),
-    ("write_verify_sram_patched", "write_sram_result", "snapshot_commit",
-     "snapshot_write_raw_segments"),
+     "snapshot_commit_core",
+     "snapshot_encode_mirror", "snapshot_encode_bytes"),
 )
 
 
@@ -249,7 +256,8 @@ def validate(payload: bytes, table: dict[str, int], signature: bytes,
             )
 
 
-def validate_stack_usage(elf: Path, *, snapshot: bool = False) -> None:
+def validate_stack_usage(elf: Path, *, snapshot: bool = False,
+                         transaction: bool = False) -> None:
     usage_file = elf.with_name(f"{elf.name}-payload.su")
     if not usage_file.exists():
         raise SystemExit("Direct payload stack-usage report is missing")
@@ -282,6 +290,52 @@ def validate_stack_usage(elf: Path, *, snapshot: bool = False) -> None:
             if cumulative > MAX_STATIC_STACK_USAGE:
                 offenders.append(
                     f"snapshot path {' -> '.join(path)} ({cumulative} bytes)"
+                )
+    if not snapshot and not transaction:
+        entry_usage = usage_by_symbol.get("write_eeprom_patched")
+        if entry_usage is None:
+            offenders.append("EEPROM entry write_eeprom_patched is missing")
+        elif entry_usage > MAX_EEPROM_ENTRY_STACK_USAGE:
+            offenders.append(
+                "EEPROM entry write_eeprom_patched "
+                f"({entry_usage} bytes; maximum {MAX_EEPROM_ENTRY_STACK_USAGE})"
+            )
+        for path in EEPROM_STACK_PATHS:
+            missing = [symbol for symbol in path if symbol not in usage_by_symbol]
+            if missing:
+                offenders.append(
+                    f"EEPROM path {' -> '.join(path)} misses {missing}"
+                )
+                continue
+            cumulative = sum(usage_by_symbol[symbol] for symbol in path)
+            if cumulative > MAX_EEPROM_COMPACTION_PATH_STACK_USAGE:
+                offenders.append(
+                    f"EEPROM path {' -> '.join(path)} "
+                    f"({cumulative} bytes; maximum "
+                    f"{MAX_EEPROM_COMPACTION_PATH_STACK_USAGE})"
+                )
+    if transaction:
+        for entry in ("write_sram_cached_patched", "write_verify_sram_patched"):
+            entry_usage = usage_by_symbol.get(entry)
+            if entry_usage is None:
+                offenders.append(f"SRAM transaction entry {entry} is missing")
+            elif entry_usage > MAX_SRAM_ENTRY_STACK_USAGE:
+                offenders.append(
+                    f"SRAM transaction entry {entry} "
+                    f"({entry_usage} bytes; maximum {MAX_SRAM_ENTRY_STACK_USAGE})"
+                )
+        for path in TRANSACTION_STACK_PATHS:
+            missing = [symbol for symbol in path if symbol not in usage_by_symbol]
+            if missing:
+                offenders.append(
+                    f"SRAM transaction path {' -> '.join(path)} misses {missing}"
+                )
+                continue
+            cumulative = sum(usage_by_symbol[symbol] for symbol in path)
+            if cumulative > MAX_STATIC_STACK_USAGE:
+                offenders.append(
+                    f"SRAM transaction path {' -> '.join(path)} "
+                    f"({cumulative} bytes)"
                 )
     if offenders:
         raise SystemExit("Direct payload stack budget exceeds 512 bytes: "
@@ -328,11 +382,6 @@ def embed(data_file: Path, payload: bytes, table: dict[str, int],
             "DIRECT_LAYOUT_EEPROM": 1,
             "EEPROM_LOGICAL_SIZE": 0x2000,
         })
-    if snapshot:
-        constants.update({
-            "DIRECT_SNAPSHOT_PROVIDER_MAX": 128,
-            "DIRECT_SNAPSHOT_TRANSIENT_MAX": 8,
-        })
     constants.update({name: table[symbol] + 1 for name, symbol in entries.items()})
     constants.update({name: table[symbol] for name, symbol in CONFIG_SYMBOLS.items()})
     if snapshot:
@@ -358,7 +407,7 @@ def embed(data_file: Path, payload: bytes, table: dict[str, int],
 
 def main() -> int:
     args = parse_args()
-    signature = b"lk_flash_direct_v17\0"
+    signature = b"lk_flash_direct\0"
     data_file = args.data_file or PROJECT_ROOT / "js" / "patchers" / "flash-direct-data.js"
     snapshot_data_file = args.snapshot_data_file or (
         args.data_file.with_name(f"{args.data_file.stem}-snapshot{args.data_file.suffix}")
@@ -386,7 +435,7 @@ def main() -> int:
     transaction_table = symbols(transaction_elf, transaction=True)
     validate(transaction_payload, transaction_table, signature,
              transaction=True)
-    validate_stack_usage(transaction_elf)
+    validate_stack_usage(transaction_elf, transaction=True)
     validate_relocations(transaction_elf)
     if not args.no_embed:
         embed(data_file, payload, table, signature)

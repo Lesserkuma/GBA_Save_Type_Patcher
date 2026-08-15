@@ -62,8 +62,8 @@ static inline void sram_bank_select(unsigned bank_no)
 
 #define _FLASH_WRITE(pa, pd) \
     do { \
-        *(((unsigned short *)AGB_ROM) + ((pa) / 2)) = (pd); \
-        __asm("nop"); \
+        *(((volatile unsigned short *)AGB_ROM) + ((pa) / 2)) = (pd); \
+        __asm volatile("nop" ::: "memory"); \
     } while (0)
 
 asm(R"(.text
@@ -127,6 +127,21 @@ flush_sram_manual_entry_ref:
 .thumb
 .type sram_bank_select_payload_entry, %function
 sram_bank_select_payload_entry:
+    # Saves up to 64 KiB never select bank 1. Avoid executing mapper code in
+    # RAM for those layouts; only true 128 KiB saves require the D0/bank path.
+    push {r1, r2}
+    adr r1, sram_bank_select_save_size_ref
+    ldr r2, [r1]
+    add r1, r2
+    ldr r1, [r1]
+    mov r2, # 1
+    lsl r2, # 16
+    cmp r1, r2
+    pop {r1, r2}
+    bhi sram_bank_select_payload_mapped
+    bx lr
+
+sram_bank_select_payload_mapped:
     push {r0, r1, r2, r3, r4}
     push {lr}
 
@@ -157,6 +172,10 @@ sram_bank_select_copy_loop:
     mov lr, r0
     pop {r0, r1, r2, r3, r4}
     bx lr
+
+.balign 4
+sram_bank_select_save_size_ref:
+    .word save_size - sram_bank_select_save_size_ref
 
 sram_bank_select_bx_r3:
     bx r3
@@ -267,8 +286,10 @@ eeprom_v111_expand_sram_raw:
 .ltorg
 
 patched_entrypoint:
-    bl batteryless_initialize
-    ldr pc, original_entrypoint
+    # Branch instead of linking: custom CRTs may consume the BIOS-provided LR
+    # together with the other reset registers. The reset-specific epilogue
+    # restores that LR before continuing to the original entrypoint.
+    b batteryless_initialize_at_reset
 
 .global batteryless_initialize
 .type batteryless_initialize, %function
@@ -279,7 +300,17 @@ batteryless_initialize:
     # proven post-CRT handoff. Keep the stack 8-byte aligned for nested calls.
     stmfd sp!, {r0-r12, lr}
     mrs r12, cpsr
+    mov r11, # 0
     stmfd sp!, {r11, r12}
+    b batteryless_initialize_common
+
+batteryless_initialize_at_reset:
+    stmfd sp!, {r0-r12, lr}
+    mrs r12, cpsr
+    mov r11, # 1
+    stmfd sp!, {r11, r12}
+
+batteryless_initialize_common:
 
     mov r1, # 0x0e000000
     # Lock 369in1 mapper
@@ -289,14 +320,45 @@ batteryless_initialize:
     bl sram_bank_select_arm_r4
     bl flush_dirty_sram_on_boot
 
+    # A failed or external flush must not leak its mapper state into the
+    # flash-to-SRAM restore below.
+    mov r4, # 0
+    bl sram_bank_select_arm_r4
+
     adrl r0, flash_save_sector
     mov r1, # 0x0e000000
     ldr r2, save_size
     mov r5, # 0
-sram_init_loop:
+    # EEPROM 512-byte games can enter their save code immediately after reset.
+    # Hydrate that small layout with word-wide ROM reads to stay within their
+    # startup budget, while retaining byte-wide writes required by the SRAM bus.
+    cmp r2, # 512
+    bhi sram_init_large_loop
+sram_init_small_loop:
+    .rept 16
+    ldr r4, [r0], # 4
+    strb r4, [r1], # 1
+    lsr r4, r4, # 8
+    strb r4, [r1], # 1
+    lsr r4, r4, # 8
+    strb r4, [r1], # 1
+    lsr r4, r4, # 8
+    strb r4, [r1], # 1
+    .endr
+    add r5, # 64
+    cmp r5, r2
+    bhs sram_init_done
+    b sram_init_small_loop
+
+sram_init_large_loop:
+    # Larger saves use individual Game Pak ROM reads. This preserves the bus
+    # access sequence required by FLASH512_V131 startup code while still
+    # amortizing loop control over a 64-byte block.
+    .rept 64
     ldrb r4, [r0], # 1
     strb r4, [r1], # 1
-    add r5, # 1
+    .endr
+    add r5, # 64
     cmp r5, r2
     bhs sram_init_done
     mov r4, # 1
@@ -307,7 +369,7 @@ sram_init_loop:
     mov r4, # 1
     bl sram_bank_select_arm_r4
 sram_init_continue:
-    b sram_init_loop
+    b sram_init_large_loop
 sram_init_done:
     ldr r4, storage_mode
     cmp r4, # 1
@@ -320,6 +382,13 @@ sram_init_storage_done:
     bl sram_bank_select_arm_r4
 
     ldmfd sp!, {r11, r12}
+    cmp r11, # 0
+    beq batteryless_initialize_return
+    msr cpsr_f, r12
+    ldmfd sp!, {r0-r12, lr}
+    ldr pc, original_entrypoint
+
+batteryless_initialize_return:
     msr cpsr_f, r12
     ldmfd sp!, {r0-r12, lr}
     bx lr
@@ -719,6 +788,10 @@ flush_sram_audio_no_stop_tm1:
 
     # Try flushing for various flash chips
     push {r4, r5, r6, r7}
+    # Normalize before EEPROM packing or an optional persistence callback;
+    # the preceding game write is allowed to leave either SRAM bank selected.
+    mov r4, # 0
+    bl sram_bank_select_arm_r4
     adrl r4, flash_save_sector
     sub r4, # 0x08000000
     ldr r5, save_size
@@ -750,8 +823,10 @@ try_flash:
     add r2, r7
     add r3, r7
     bl run_from_ram
-    cmp r0, #0
-    bne found_flash
+    cmp r0, # 1
+    beq found_flash
+    cmp r0, # 0
+    bne flush_sram_done
     add r6, # 24
     b try_flash
 
@@ -791,6 +866,10 @@ flush_sram_program:
     bl flush_sram_mark_success
 
 flush_sram_done:
+    # Every exit, including failed/external erase paths, returns the mapper to
+    # the bank expected by the header restore and by banking-unaware callers.
+    mov r4, # 0
+    bl sram_bank_select_arm_r4
     ldr r0, storage_mode
     cmp r0, # 1
     blne flush_sram_no_restore
@@ -868,14 +947,6 @@ flash_fn_table:
 .word program_flash_1_end
 .word verify_flash
 .word verify_flash_end
-.word identify_flash_4
-.word identify_flash_4_end
-.word erase_flash_4
-.word erase_flash_4_end
-.word program_flash_4
-.word program_flash_4_end
-.word verify_flash
-.word verify_flash_end
 .word identify_flash_2
 .word identify_flash_2_end
 .word erase_flash_2
@@ -908,7 +979,7 @@ run_from_ram:
     cmp r11, # 0x100
     bhi run_from_ram_invalid
 
-    ldr r9, =0x0203fc00
+    ldr r9, =0x0203fe00
 run_from_ram_find_workspace:
     bl run_from_ram_candidate_valid
     cmp r0, # 0
@@ -916,7 +987,7 @@ run_from_ram_find_workspace:
     ldr r0, =0x02000000
     cmp r9, r0
     beq run_from_ram_stack_fallback
-    sub r9, r9, # 0x400
+    sub r9, r9, # 0x200
     b run_from_ram_find_workspace
 
 run_from_ram_revalidate_workspace:
@@ -957,9 +1028,9 @@ run_from_ram_copy_workspace:
     cmp r0, r7
     blo run_from_ram_copy_workspace
 
-    # Execute Thumb code with the private 0x140..0x3ff stack.
+    # Execute Thumb code with the private 0x140..0x1ff stack.
     mov r11, sp
-    add sp, r9, # 0x400
+    add sp, r9, # 0x200
     mov r0, r4
     mov r1, r5
     add r2, r9, # 1
@@ -980,9 +1051,9 @@ run_from_ram_check_guard:
     cmp r2, # 8
     blo run_from_ram_check_guard
 
-    # Restore all 1 KiB exactly to the candidate's homogeneous fill value.
+    # Restore all 512 bytes exactly to the candidate's homogeneous fill value.
     mov r0, r9
-    add r1, r9, # 0x400
+    add r1, r9, # 0x200
 run_from_ram_restore_workspace:
     str r10, [r0], # 4
     cmp r0, r1
@@ -1003,7 +1074,7 @@ run_from_ram_next_workspace:
     ldr r0, =0x02000000
     cmp r9, r0
     beq run_from_ram_stack_fallback
-    sub r9, r9, # 0x400
+    sub r9, r9, # 0x200
     b run_from_ram_find_workspace
 
 run_from_ram_stack_fallback:
@@ -1022,7 +1093,7 @@ run_from_ram_invalid:
 # r9 = candidate, r8 = dispatcher's original stack pointer.
 # Returns r0 = valid and r10 = homogeneous fill word.
 run_from_ram_candidate_valid:
-    add r12, r9, # 0x400
+    add r12, r9, # 0x200
 
     ldr r0, =0x02000000
     cmp r8, r0
@@ -1080,24 +1151,80 @@ run_from_ram_candidate_bad:
     bx lr
 
 # Stack fallback, used only when no safe workspace exists before any flash
-# command has been issued.
+# command has been issued. Its register frame, alignment, copied driver,
+# validated stack allowance, and guard touch at most 511 bytes. Fail before
+# touching flash when that complete frame would leave WRAM.
 run_from_stack:
-    push {r4, r5, lr}
+    push {r4, r5, r6, r7, r8, lr}
     mov r4, sp
-    bic r2, # 1
+
+    ldr r5, =0x020001e8
+    cmp r4, r5
+    blo run_from_stack_check_iwram
+    ldr r5, =0x02040000
+    cmp r4, r5
+    blo run_from_stack_bounds_ok
+run_from_stack_check_iwram:
+    ldr r5, =0x030001e8
+    cmp r4, r5
+    blo run_from_stack_invalid
+    ldr r5, =0x03008000
+    cmp r4, r5
+    bhs run_from_stack_invalid
+
+run_from_stack_bounds_ok:
+    bic sp, sp, # 7
+    bic r6, r2, # 1
+    bic r7, r3, # 1
+    sub r8, r7, r6
+    # Keep the copied Thumb entry stack 8-byte aligned for either code size.
+    tst r8, # 4
+    subne sp, sp, # 4
 
 run_from_stack_loop:
-    ldr r5, [r3, # -4]!
+    ldr r5, [r7, # -4]!
     push {r5}
-    cmp r2, r3
+    cmp r6, r7
     bne run_from_stack_loop
 
-    add r2, sp, # 1
+    # Guard the complete statically validated 0xc0 driver-stack allowance.
+    sub r6, sp, # 0xc0
+    sub r6, r6, # 0x20
+    mov r7, r6
+    ldr r5, =0xa55a3cc3
+    mov r8, # 0
+run_from_stack_write_guard:
+    eor r3, r5, r8
+    str r3, [r7], # 4
+    add r8, r8, # 1
+    cmp r8, # 8
+    blo run_from_stack_write_guard
+
+    add r12, sp, # 1
     mov lr, pc
-    bx r2
+    bx r12
+
+    mov r8, r0
+    mov r7, r6
+    mov r3, # 0
+run_from_stack_check_guard:
+    eor r2, r5, r3
+    ldr r12, [r7], # 4
+    cmp r12, r2
+    movne r8, # 0
+    add r3, r3, # 1
+    cmp r3, # 8
+    blo run_from_stack_check_guard
 
     mov sp, r4
-    pop {r4, r5, lr}
+    mov r0, r8
+    pop {r4, r5, r6, r7, r8, lr}
+    bx lr
+
+run_from_stack_invalid:
+    mov r0, # 0
+    mov sp, r4
+    pop {r4, r5, r6, r7, r8, lr}
     bx lr
 )");
 
@@ -1115,7 +1242,7 @@ int identify_flash_1()
     _FLASH_WRITE(0, 0xFF);
     rom_data = *(unsigned *)AGB_ROM;
 
-    // Type 1 or 4
+    // Probe the Intel command family before selecting its supported driver.
     _FLASH_WRITE(0, 0x90);
     data = *(unsigned *)AGB_ROM;
     _FLASH_WRITE(0, 0x50);
@@ -1129,12 +1256,13 @@ int identify_flash_1()
         _FLASH_WRITE(0, 0x50);
         _FLASH_WRITE(0, 0xFF);
         if (data != 0x96) {
-            // resume_interrupts();
-
+            /* This is the unsupported buffered-programming variant. Return a
+             * distinct result so the dispatcher fails closed instead of
+             * trying the AMD probes or programming it as Type 1. */
             for (volatile int i = 0; i < 1024; ++i)
                 __asm("nop");
 
-            return 0;
+            return 2;
         }
 
         // resume_interrupts();
@@ -1148,6 +1276,7 @@ int erase_flash_1(unsigned sa, unsigned save_size)
 {
     volatile unsigned timeout;
     unsigned status;
+    int result = 1;
 
     // Erase at each possible 64 KiB boundary within a 128 KiB save area.
     for (unsigned i = 0; i < save_size && i < 0x20000; i += AGB_SRAM_SIZE) {
@@ -1171,11 +1300,14 @@ int erase_flash_1(unsigned sa, unsigned save_size)
         _FLASH_WRITE(erase_addr, 0xFF);
         /* Preserve the old all-clear requirement, but do not time out on an
          * already-ready error status. This also catches swapped low bits. */
-        if (timeout == 0 || status != 0x80)
-            return 0;
+        if (timeout == 0 || status != 0x80) {
+            result = 0;
+            break;
+        }
     }
 
-    return 1;
+    sram_bank_select(0);
+    return result;
 }
 asm("erase_flash_1_end:");
 
@@ -1184,25 +1316,29 @@ int program_flash_1(unsigned sa, unsigned save_size)
     volatile unsigned timeout;
     unsigned status;
     unsigned address = sa;
+    unsigned bank = 0;
     int result = 1;
 
-    // Write data
-    sram_bank_select(0);
+    /* Enter read-array mode before touching the mapper. A mapper-select write
+     * while Intel status mode is active can itself be consumed as a command. */
     _FLASH_WRITE(sa, 0x50);
     _FLASH_WRITE(sa, 0xFF);
+    sram_bank_select(bank);
     for (unsigned i=0; i<save_size; i+=2) {
         address = sa + i;
         if (i == AGB_SRAM_SIZE) {
-            /* Do not switch the SRAM mapper while the flash is in status
-             * mode. Re-normalize the command state after the switch too. */
-            _FLASH_WRITE(address - 2, 0x50);
-            _FLASH_WRITE(address - 2, 0xFF);
-            sram_bank_select(1);
-            _FLASH_WRITE(address, 0x50);
-            _FLASH_WRITE(address, 0xFF);
+            bank = 1;
+            sram_bank_select(bank);
         }
+        /* Cache the source before any high-A24 target command can latch D0 as
+         * a different SRAM bank on the repro mapper. */
+        unsigned value =
+            (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 |
+            (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i)));
+        if (value == 0xFFFF)
+            continue;
         _FLASH_WRITE(address, 0x40);
-        _FLASH_WRITE(address, (*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))));
+        _FLASH_WRITE(address, value);
         _FLASH_WRITE(address, 0x70);
         for (timeout = 0x4000; timeout; --timeout) {
             __asm("nop");
@@ -1211,13 +1347,15 @@ int program_flash_1(unsigned sa, unsigned save_size)
                 break;
             }
         }
+        /* Leave status mode before restoring the logical source bank. */
+        _FLASH_WRITE(address, 0x50);
+        _FLASH_WRITE(address, 0xFF);
         if (timeout == 0 || status != 0x80) {
             result = 0;
             break;
         }
+        sram_bank_select(bank);
     }
-    _FLASH_WRITE(address, 0x50);
-    _FLASH_WRITE(address, 0xFF);
     sram_bank_select(0);
     return result;
 }
@@ -1259,7 +1397,7 @@ int erase_flash_2(unsigned sa, unsigned save_size)
         _FLASH_WRITE(erase_addr, 0x30);
         for (timeout = 0x1000000; timeout; --timeout) {
             __asm("nop");
-            if (*(((unsigned short *)AGB_ROM)+(erase_addr/2)) == 0xFFFF) {
+            if (*(((volatile unsigned short *)AGB_ROM)+(erase_addr/2)) == 0xFFFF) {
                 break;
             }
         }
@@ -1274,18 +1412,26 @@ asm("erase_flash_2_end:");
 int program_flash_2(unsigned sa, unsigned save_size)
 {
     volatile unsigned timeout;
+    unsigned bank = 0;
     // Write data
-    sram_bank_select(0);
+    sram_bank_select(bank);
     for (unsigned i=0; i<save_size; i+=2) {
-        if (i == AGB_SRAM_SIZE)
-            sram_bank_select(1);
+        if (i == AGB_SRAM_SIZE) {
+            bank = 1;
+            sram_bank_select(bank);
+        }
+        unsigned value =
+            (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 |
+            (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i)));
+        if (value == 0xFFFF)
+            continue;
         _FLASH_WRITE(0xAAA, 0xA9);
         _FLASH_WRITE(0x555, 0x56);
         _FLASH_WRITE(0xAAA, 0xA0);
-        _FLASH_WRITE(sa+i, (*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))));
+        _FLASH_WRITE(sa+i, value);
         for (timeout = 0x4000; timeout; --timeout) {
             __asm("nop");
-            if (*(((unsigned short *)AGB_ROM)+((sa+i)/2)) == ((*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))))) {
+            if (*(((volatile unsigned short *)AGB_ROM)+((sa+i)/2)) == value) {
                 break;
             }
         }
@@ -1294,6 +1440,10 @@ int program_flash_2(unsigned sa, unsigned save_size)
             sram_bank_select(0);
             return 0;
         }
+        /* A target write with A24=1 also latches data bit 0 on the repro
+         * mapper. The cached value made polling independent of that side
+         * effect; restore the logical source bank before the next word. */
+        sram_bank_select(bank);
     }
     _FLASH_WRITE(sa, 0xF0);
     sram_bank_select(0);
@@ -1337,7 +1487,7 @@ int erase_flash_3(unsigned sa, unsigned save_size)
         _FLASH_WRITE(erase_addr, 0x30);
         for (timeout = 0x1000000; timeout; --timeout) {
             __asm("nop");
-            if (*(((unsigned short *)AGB_ROM)+(erase_addr/2)) == 0xFFFF) {
+            if (*(((volatile unsigned short *)AGB_ROM)+(erase_addr/2)) == 0xFFFF) {
                 break;
             }
         }
@@ -1352,18 +1502,26 @@ asm("erase_flash_3_end:");
 int program_flash_3(unsigned sa, unsigned save_size)
 {
     volatile unsigned timeout;
+    unsigned bank = 0;
     // Write data
-    sram_bank_select(0);
+    sram_bank_select(bank);
     for (unsigned i=0; i<save_size; i+=2) {
-        if (i == AGB_SRAM_SIZE)
-            sram_bank_select(1);
+        if (i == AGB_SRAM_SIZE) {
+            bank = 1;
+            sram_bank_select(bank);
+        }
+        unsigned value =
+            (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 |
+            (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i)));
+        if (value == 0xFFFF)
+            continue;
         _FLASH_WRITE(0xAAA, 0xAA);
         _FLASH_WRITE(0x555, 0x55);
         _FLASH_WRITE(0xAAA, 0xA0);
-        _FLASH_WRITE(sa+i, (*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))));
+        _FLASH_WRITE(sa+i, value);
         for (timeout = 0x4000; timeout; --timeout) {
             __asm("nop");
-            if (*(((unsigned short *)AGB_ROM)+((sa+i)/2)) == ((*(unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(i))))) {
+            if (*(((volatile unsigned short *)AGB_ROM)+((sa+i)/2)) == value) {
                 break;
             }
         }
@@ -1372,116 +1530,13 @@ int program_flash_3(unsigned sa, unsigned save_size)
             sram_bank_select(0);
             return 0;
         }
+        sram_bank_select(bank);
     }
     _FLASH_WRITE(sa, 0xF0);
     sram_bank_select(0);
     return 1;
 }
 asm("program_flash_3_end:");
-
-int identify_flash_4()
-{
-    unsigned rom_data, data;
-    // stop_dma_interrupts();
-    rom_data = *(unsigned *)AGB_ROM;
-
-    // Type 1 or 4
-    _FLASH_WRITE(0, 0xFF);
-    _FLASH_WRITE(0, 0x90);
-    data = *(unsigned *)AGB_ROM;
-    _FLASH_WRITE(0, 0xFF);
-    if (rom_data != data) {
-        // Check if the chip is responding to this command,
-        // which then needs a different write command later.
-        _FLASH_WRITE(0x59, 0x42);
-        data = *(unsigned char *)(AGB_ROM + 0xB2);
-        _FLASH_WRITE(0x59, 0x96);
-        _FLASH_WRITE(0, 0xFF);
-        if (data != 0x96) {
-            // resume_interrupts();
-
-            for (volatile int i = 0; i < 1024; ++i)
-                __asm("nop");
-
-            return 1;
-        }
-    }
-    return 0;
-}
-asm("identify_flash_4_end:");
-
-int erase_flash_4(unsigned sa, unsigned save_size)
-{
-    volatile unsigned timeout;
-    // Erase at each possible 64 KiB boundary within a 128 KiB save area.
-    for (unsigned i = 0; i < save_size && i < 0x20000; i += AGB_SRAM_SIZE) {
-        unsigned erase_addr = sa + i;
-
-        _FLASH_WRITE(erase_addr, 0xFF);
-        _FLASH_WRITE(erase_addr, 0x60);
-        _FLASH_WRITE(erase_addr, 0xD0);
-        _FLASH_WRITE(erase_addr, 0x20);
-        _FLASH_WRITE(erase_addr, 0xD0);
-        for (timeout = 0x1000000; timeout; --timeout) {
-            __asm("nop");
-            if ((*(((unsigned short *)AGB_ROM)+(erase_addr/2)) & 0x80) == 0x80) {
-                break;
-            }
-        }
-        _FLASH_WRITE(erase_addr, 0xFF);
-        if (timeout == 0)
-            return 0;
-
-        for (volatile int delay = 0; delay < 1024; ++delay)
-            __asm("nop");
-    }
-    return 1;
-}
-asm("erase_flash_4_end:");
-
-int program_flash_4(unsigned sa, unsigned save_size)
-{
-    // Write data
-    unsigned c = 0;
-    volatile unsigned timeout;
-    sram_bank_select(0);
-    while (c < save_size) {
-        if (c == AGB_SRAM_SIZE)
-            sram_bank_select(1);
-        _FLASH_WRITE(sa+c, 0xEA);
-        for (timeout = 0x4000; timeout; --timeout) {
-            __asm("nop");
-            if ((*(((unsigned short *)AGB_ROM)+((sa+c)/2)) & 0x80) == 0x80) {
-                break;
-            }
-        }
-        if (timeout == 0) {
-            _FLASH_WRITE(sa+c, 0xFF);
-            sram_bank_select(0);
-            return 0;
-        }
-        _FLASH_WRITE(sa+c, 0x1FF);
-        for (int i=0; i<1024; i+=2) {
-            _FLASH_WRITE(sa+c+i, (*(unsigned char *)(AGB_SRAM_WINDOWED(c+i+1))) << 8 | (*(unsigned char *)(AGB_SRAM_WINDOWED(c+i))));
-        }
-        _FLASH_WRITE(sa+c, 0xD0);
-        for (timeout = 0x4000; timeout; --timeout) {
-            __asm("nop");
-            if ((*(((unsigned short *)AGB_ROM)+((sa+c)/2)) & 0x80) == 0x80) {
-                break;
-            }
-        }
-        _FLASH_WRITE(sa+c, 0xFF);
-        if (timeout == 0) {
-            sram_bank_select(0);
-            return 0;
-        }
-        c += 1024;
-    }
-    sram_bank_select(0);
-    return 1;
-}
-asm("program_flash_4_end:");
 
 int verify_flash(unsigned sa, unsigned save_size)
 {

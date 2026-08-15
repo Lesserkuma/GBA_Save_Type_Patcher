@@ -169,8 +169,8 @@ irq_rtc_tick_restore:
     b       irq_vblank_common
     .size irq_handler_continuous, . - irq_handler_continuous
 
-// Legacy Fake RTC and save-only configurations retain the original handler
-// entry and therefore execute no additional work on their VBlank hot path.
+// Save-only configurations retain the regular full handler entry and execute
+// no additional RTC work on their VBlank hot path.
 irq_handler:
     irq_fast_chain_non_vblank irq_handler_vblank
 irq_handler_vblank:

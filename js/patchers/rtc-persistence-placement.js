@@ -3,7 +3,10 @@
 import { PatchError } from "../core/errors.js";
 import { alignDown, alignUp, isBlankRegion, overlapsAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND } from "../domain/constants.js";
-import { GBA_MAX_ROM_SIZE_BYTES } from "../domain/gba-constants.js";
+import {
+  GBA_MAX_ROM_SIZE_BYTES,
+  GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+} from "../domain/gba-constants.js";
 import { stageErasedRomExpansion, stagePatchOperation } from "../patch-engine/draft.js";
 import {
   PATCH_BLOCK_ALIGNMENT,
@@ -115,6 +118,7 @@ export function findStandaloneRtcPersistenceLayout(bytes, spans = {}, excludedRa
     const addonLayout = layoutStandaloneRtcAddonsAtBlockEnd(codeBlockEnd, normalizedSpans);
 
     if (addonLayout.prefixOffset < codeBlockStart) continue;
+    if (persistenceBlockEnd > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES) continue;
     if (reserveContainsForbiddenOffset(persistenceBlockOffset, persistenceBlockEnd)) continue;
     if (overlapsAnyRange(addonLayout.prefixOffset, codeBlockEnd, normalizedRanges)) continue;
     if (overlapsAnyRange(persistenceBlockOffset, persistenceBlockEnd, normalizedRanges)) continue;

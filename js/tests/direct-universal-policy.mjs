@@ -11,23 +11,31 @@ import {
 } from "../patchers/custom-flash.js";
 import { patchFlash512kBytes } from "../patchers/flash512k.js";
 import { analyzeDirectCompatibility } from "../patchers/direct-compatibility.js";
-import { DIRECT_SRAM_LAYOUTS } from "../patchers/direct-abi-signatures.js";
+import {
+  DIRECT_SDK_HOOKS,
+  DIRECT_SRAM_LAYOUTS,
+} from "../patchers/direct-abi-signatures.js";
+import { detectFlash512kHookSet } from "../patchers/flash512k-common.js";
 import { EEPROM_V120_RUNTIME_WRAPPER_OFFSETS } from "../patchers/eeprom-v120-wrapper-data.js";
 import {
   FLASH_DIRECT_CONSTANTS as BASE_PAYLOAD_CONSTANTS,
   FLASH_DIRECT_PAYLOAD_HEX as BASE_PAYLOAD_HEX,
+  FLASH_DIRECT_SIGNATURE_HEX as BASE_SIGNATURE_HEX,
 } from "../patchers/flash-direct-data.js";
 import {
   FLASH_DIRECT_CONSTANTS as SNAPSHOT_PAYLOAD_CONSTANTS,
   FLASH_DIRECT_PAYLOAD_HEX as SNAPSHOT_PAYLOAD_HEX,
+  FLASH_DIRECT_SIGNATURE_HEX as SNAPSHOT_SIGNATURE_HEX,
 } from "../patchers/flash-direct-snapshot-data.js";
 import {
   FLASH_DIRECT_CONSTANTS as TRANSACTION_PAYLOAD_CONSTANTS,
   FLASH_DIRECT_PAYLOAD_HEX as TRANSACTION_PAYLOAD_HEX,
+  FLASH_DIRECT_SIGNATURE_HEX as TRANSACTION_SIGNATURE_HEX,
 } from "../patchers/flash-direct-transaction-data.js";
-import { analyzeBatchedSramSnapshot } from "../patchers/sram-batched-snapshot-analysis.js";
+import { analyzeMirroredBatchSnapshot } from "../patchers/sram-batched-snapshot-analysis.js";
 import {
   analyzeDirectSramAccesses,
+  analyzeSramByteWriteCallers,
   analyzeSramWriteVerifyWrappers,
   inventoryLiteralSaveAccesses,
 } from "../patchers/thumb-direct-sram-analysis.js";
@@ -46,6 +54,98 @@ const strategySource = (await Promise.all(strategyFiles.map(async (relative) => 
 )))).join("\n");
 const directPayloadSource = await readFile(
   path.join(repository, "payloads/flash-direct/payload.c"), "utf8",
+);
+
+const verifierStart = directPayloadSource.indexOf("uint8_t *verify_sram_cached_patched");
+const verifierEnd = directPayloadSource.indexOf(
+  "NAKED uint8_t *verify_sram_patched",
+  verifierStart,
+);
+const verifierSource = directPayloadSource.slice(verifierStart, verifierEnd);
+assert.ok(verifierStart >= 0 && verifierEnd > verifierStart);
+assert.match(verifierSource, /if \(source_in_save && !target_in_save\)/);
+assert.match(verifierSource, /expected_source = target;/);
+assert.match(verifierSource, /save_target = source;/);
+assert.match(verifierSource, /first = \(uintptr_t\)save_target/);
+assert.match(verifierSource, /return target \+ cursor \+ index;/);
+
+const SAVE_BASE = 0x0e000000;
+const SAVE_APERTURE_SIZE = 0x10000;
+const RAM_BASE = 0x02000000;
+
+function isSaveRange(address, size) {
+  return address >= SAVE_BASE
+    && address < SAVE_BASE + SAVE_APERTURE_SIZE
+    && size <= SAVE_BASE + SAVE_APERTURE_SIZE - address;
+}
+
+function verifySramModel({ source, target, size, ram, save }) {
+  let expectedSource = source;
+  let saveTarget = target;
+  if (isSaveRange(source, size) && !isSaveRange(target, size)) {
+    expectedSource = target;
+    saveTarget = source;
+  }
+  const first = saveTarget & 0x7fff;
+  const expectedBytes = isSaveRange(expectedSource, size) ? save : ram;
+  const expectedFirst = isSaveRange(expectedSource, size)
+    ? expectedSource - SAVE_BASE
+    : expectedSource - RAM_BASE;
+  for (let index = 0; index < size; index += 1) {
+    if (expectedBytes[expectedFirst + index] !== save[first + index]) {
+      return (target + index) >>> 0;
+    }
+  }
+  return 0;
+}
+
+const orientationSave = new Uint8Array(0x8000);
+const orientationRam = new Uint8Array(0x100);
+orientationSave.set([0x10, 0x20, 0x30, 0x40], 0x120);
+orientationRam.set([0x10, 0x20, 0x30, 0x40], 0x20);
+for (const [source, target] of [
+  [RAM_BASE + 0x20, SAVE_BASE + 0x120],
+  [SAVE_BASE + 0x120, RAM_BASE + 0x20],
+]) {
+  assert.equal(verifySramModel({
+    source,
+    target,
+    size: 4,
+    ram: orientationRam,
+    save: orientationSave,
+  }), 0);
+  orientationRam[0x22] ^= 0xff;
+  assert.equal(
+    verifySramModel({
+      source,
+      target,
+      size: 4,
+      ram: orientationRam,
+      save: orientationSave,
+    }),
+    (target + 2) >>> 0,
+    "a mismatch must be reported relative to the original second argument",
+  );
+  orientationRam[0x22] ^= 0xff;
+}
+assert.equal(verifySramModel({
+  source: RAM_BASE,
+  target: SAVE_BASE,
+  size: 0,
+  ram: orientationRam,
+  save: orientationSave,
+}), 0);
+
+const expectedSignatureHex = Buffer.from("lk_flash_direct\0", "ascii").toString("hex");
+assert.deepEqual(
+  [BASE_SIGNATURE_HEX, SNAPSHOT_SIGNATURE_HEX, TRANSACTION_SIGNATURE_HEX],
+  [expectedSignatureHex, expectedSignatureHex, expectedSignatureHex],
+  "every Direct runtime must expose exactly the one unversioned payload signature",
+);
+assert.doesNotMatch(
+  await readFile(path.join(repository, "js/patchers/flash512k.js"), "utf8"),
+  /legacy|signature(?:s|List)|lk_flash_direct[_-]?v\d/i,
+  "Direct input recognition must not contain legacy-marker handling",
 );
 
 assert.doesNotMatch(
@@ -99,10 +199,8 @@ const SNAPSHOT_CONFIG = [
   ...BASE_CONFIG,
   "DIRECT_SNAPSHOT_COMMIT_FIRST_CONFIG_OFFSET",
   "DIRECT_SNAPSHOT_COMMIT_SIZE_CONFIG_OFFSET",
-  "DIRECT_SNAPSHOT_PROVIDERS_CONFIG_OFFSET",
-  "DIRECT_SNAPSHOT_PROVIDER_COUNT_CONFIG_OFFSET",
-  "DIRECT_SNAPSHOT_TRANSIENT_COUNT_CONFIG_OFFSET",
-  "DIRECT_SNAPSHOT_TRANSIENT_RANGES_CONFIG_OFFSET",
+  "DIRECT_SNAPSHOT_READER_BASE_CONFIG_OFFSET",
+  "DIRECT_SNAPSHOT_WORKSPACE_BASE_CONFIG_OFFSET",
 ].sort();
 const generatedRuntimes = [
   { label: "base", constants: BASE_PAYLOAD_CONSTANTS, payload: hexToBytes(BASE_PAYLOAD_HEX) },
@@ -187,13 +285,22 @@ for (const runtime of generatedRuntimes) {
   }, analyzerDescriptor);
   assert.equal(ordinary.profile, "sram-v16");
   assert.equal(ordinary.runtime, analyzerDescriptor);
+  const byteTransaction = analyzeDirectCompatibility(new Uint8Array(0), {
+    family: "sram",
+    sourceSaveType: "SRAM_V113",
+    sramWriteVerify: [],
+    sramByteWriteCallers: [{ offset: 0x100 }],
+    sramReadbackVerify: true,
+  }, analyzerDescriptor);
+  assert.equal(byteTransaction.profile, "sram-byte-write-transaction");
+  assert.equal(byteTransaction.runtime, analyzerTransactionRuntime);
   const transaction = analyzeDirectCompatibility(new Uint8Array(0), {
     family: "sram",
     sourceSaveType: "SRAM_V111",
     sramWriteVerify: [{ offset: 0x100 }],
     sramReadbackVerify: true,
   }, analyzerDescriptor);
-  assert.equal(transaction.profile, "sram-transaction-v16");
+  assert.equal(transaction.profile, "sram-write-verify-transaction");
   assert.equal(transaction.runtime, analyzerTransactionRuntime);
 }
 
@@ -217,7 +324,8 @@ for (const [sourceSaveType, eepromRuntimeTimer, expectedProfile, expectedMode] o
   ["EEPROM_V120", true, "eeprom-v120-runtime-timer", "settled-wrapper"],
   ["EEPROM_V121", true, "eeprom-v120-runtime-timer", "settled-wrapper"],
   ["EEPROM_V122", false, "eeprom-v5", "settled-wrapper"],
-  ["EEPROM_V124", false, "eeprom-v5", "direct"],
+  ["EEPROM_V124", false, "eeprom-v5", "settled-wrapper"],
+  ["EEPROM_V126", false, "eeprom-v5", "settled-wrapper"],
 ]) {
   const plan = analyzeDirectCompatibility(new Uint8Array(0), {
     family: "eeprom",
@@ -452,6 +560,10 @@ function syntheticSnapshotRom({
   embeddedOnly = false,
   intermediateRead = false,
   earlyReturn = false,
+  workspaceReference = false,
+  armWorkspaceReference = false,
+  workspaceProvider = false,
+  heapOverlap = false,
 } = {}) {
   const bytes = new Uint8Array(0x5000);
   const starts = [0x100, 0x1000, 0x1f00, overlap ? 0x2000 : 0x2e00];
@@ -461,7 +573,10 @@ function syntheticSnapshotRom({
       const record = at + index * 24;
       writeU32(bytes, record, 0x08003000 + index * 4);
       writeU32(bytes, record + 4,
-        (ephemeralSource ? 0x03000100 : 0x02000100) + sourceDelta + index * length);
+        (workspaceProvider
+          ? 0x02037f70
+          : (ephemeralSource ? 0x03000100 : 0x02000100))
+          + sourceDelta + index * length);
       writeU32(bytes, record + 8, length);
       writeU32(bytes, record + 12, 0x0e000000 + logicalStart);
       writeU32(bytes, record + 16, badCallback && index === 2 ? 0x08003100 : 0x08003101);
@@ -483,6 +598,73 @@ function syntheticSnapshotRom({
     emitTransaction(bytes, referenceOffset + 0x100, tableOffset + 0x200, 16, bankRegister);
     emitTransaction(bytes, referenceOffset + 0x180, tableOffset + 0x200, 20, bankRegister);
   }
+  const allocator = 0x3d00;
+  const startup = 0x3e00;
+  const heapLiterals = 0x3e30;
+  writeU16(bytes, allocator, 0xb510);
+  writeU16(bytes, allocator + 2, 0x1c04);
+  writeU16(bytes, allocator + 4, 0x6022);
+  writeU16(bytes, allocator + 6, 0x60a1);
+  writeU16(bytes, allocator + 8, 0x6062);
+  writeU16(bytes, allocator + 10, 0xbc10);
+  writeU16(bytes, allocator + 12, 0xbc01);
+  writeU16(bytes, allocator + 14, 0x4700);
+  writeU16(bytes, startup, 0xb510);
+  emitLiteralLoad(bytes, startup + 2, 0, heapLiterals);
+  emitLiteralLoad(bytes, startup + 4, 1, heapLiterals + 4);
+  emitLiteralLoad(bytes, startup + 6, 2, heapLiterals + 8);
+  writeU16(bytes, startup + 8, 0x1a52);
+  emitBl(bytes, startup + 10, allocator);
+  if (workspaceReference) emitLiteralLoad(bytes, startup + 14, 3, heapLiterals + 12);
+  writeU16(bytes, startup + 16, 0xbc10);
+  writeU16(bytes, startup + 18, 0xbc01);
+  writeU16(bytes, startup + 20, 0x4700);
+  writeU32(bytes, heapLiterals, 0x0200d000);
+  writeU32(bytes, heapLiterals + 4, heapOverlap ? 0x02039000 : 0x02010000);
+  writeU32(bytes, heapLiterals + 8, 0x02040000);
+  writeU32(bytes, heapLiterals + 12, 0x0203ff80);
+  if (armWorkspaceReference) {
+    const arm = 0x3f00;
+    writeU32(bytes, arm, 0xe59f0000); // ldr r0, [pc]
+    writeU32(bytes, arm + 8, 0x0203ff80);
+  }
+  return bytes;
+}
+
+{
+  const fixture = new Uint8Array(0x100);
+  const writeTarget = 0x80;
+  writeU16(fixture, 0x20, 0x2201); // movs r2, #1
+  emitBl(fixture, 0x22, writeTarget);
+  assert.deepEqual(
+    analyzeSramByteWriteCallers(fixture, [writeTarget])
+      .map((caller) => caller.offset),
+    [0x22],
+  );
+  writeU16(fixture, 0x20, 0x2202); // another constant is not the capability
+  assert.deepEqual(analyzeSramByteWriteCallers(fixture, [writeTarget]), []);
+}
+
+{
+  const fixture = new Uint8Array(0x400);
+  const writeTarget = 0x100;
+  fixture.set(DIRECT_SDK_HOOKS.sramWrite[0].marker, writeTarget);
+  fixture.set(DIRECT_SDK_HOOKS.sramRead.marker, 0x180);
+  fixture.set(DIRECT_SDK_HOOKS.sramVerify.marker, 0x280);
+  writeU16(fixture, 0x40, 0x2201);
+  emitBl(fixture, 0x42, writeTarget);
+  const hooks = detectFlash512kHookSet(fixture, "byte-write fixture", "sram");
+  assert.deepEqual(
+    hooks.sramByteWriteCallers.map((caller) => caller.offset),
+    [0x42],
+    "the generic SDK hook detector must carry byte-write capability evidence",
+  );
+}
+
+function replaceGameCode(source, gameCodeBytes) {
+  const bytes = source.slice();
+  bytes.set(gameCodeBytes, 0xac);
+  repairHeaderChecksum(bytes);
   return bytes;
 }
 
@@ -490,41 +672,68 @@ const syntheticHooks = Object.freeze({
   family: "sram",
   sramRead: Object.freeze([0x3500]),
   sramWrite: Object.freeze([Object.freeze({ offsets: Object.freeze([0x3600]) })]),
+  sramVerify: Object.freeze([0x3700]),
 });
-const synthetic = analyzeBatchedSramSnapshot(syntheticSnapshotRom(), syntheticHooks);
+const synthetic = analyzeMirroredBatchSnapshot(syntheticSnapshotRom(), syntheticHooks);
 assert.ok(synthetic, "semantic snapshot fixture must opt in");
-assert.deepEqual(synthetic.transientRanges, [{
-  logicalStart: 0,
-  length: 0x100,
-  sourceAddress: 0x02007900,
-}]);
-assert.equal(synthetic.providers.length, 8);
+assert.deepEqual(synthetic, {
+  workspaceBase: 0x02037f70,
+  readerBase: 0x0203ff80,
+  commitFirst: 0x6d00,
+  commitSize: 0xf00,
+});
+assert.equal(
+  analyzeMirroredBatchSnapshot(syntheticSnapshotRom({ embeddedOnly: true }), syntheticHooks),
+  null,
+  "an unreferenced record blob is not a batch capability",
+);
 for (const options of [
   { badCallback: true },
   { ephemeralSource: true },
   { overlap: true },
-  { duplicate: true },
-  { embeddedOnly: true },
   { intermediateRead: true },
   { earlyReturn: true },
 ]) {
-  assert.equal(
-    analyzeBatchedSramSnapshot(syntheticSnapshotRom(options), syntheticHooks),
-    null,
-    `unsafe snapshot fixture must fail closed: ${JSON.stringify(options)}`,
+  assert.throws(
+    () => analyzeMirroredBatchSnapshot(syntheticSnapshotRom(options), syntheticHooks),
+    (error) => error.code === "DIRECT_SRAM_PRIVATE_WORKSPACE_UNPROVEN",
+    `recognized but unsafe batch fixture must reject: ${JSON.stringify(options)}`,
   );
 }
+assert.throws(
+  () => analyzeMirroredBatchSnapshot(
+    syntheticSnapshotRom({ duplicate: true }), syntheticHooks,
+  ),
+  (error) => error.code === "DIRECT_SRAM_PRIVATE_WORKSPACE_UNPROVEN",
+);
+for (const [risk, options] of [
+  ["ARM/DMA literal", { armWorkspaceReference: true }],
+  ["provider overlap", { workspaceProvider: true }],
+  ["heap overlap", { heapOverlap: true }],
+]) {
+  assert.throws(
+    () => analyzeMirroredBatchSnapshot(syntheticSnapshotRom(options), syntheticHooks),
+    (error) => error.code === "DIRECT_SRAM_PRIVATE_WORKSPACE_UNPROVEN",
+    `${risk} must fail closed before a private workspace is selected`,
+  );
+}
+assert.throws(
+  () => analyzeMirroredBatchSnapshot(
+    syntheticSnapshotRom({ workspaceReference: true }), syntheticHooks,
+  ),
+  (error) => error.code === "DIRECT_SRAM_PRIVATE_WORKSPACE_UNPROVEN",
+);
 for (const [tableOffset, referenceOffset, bankRegister] of [
   [0x1800, 0x400, 3],
   [0x2400, 0x800, 6],
 ]) {
-  const relocated = analyzeBatchedSramSnapshot(
+  const relocated = analyzeMirroredBatchSnapshot(
     syntheticSnapshotRom({ tableOffset, referenceOffset, bankRegister }),
     syntheticHooks,
   );
   assert.ok(relocated, "relocated/register-varied snapshot fixture must opt in");
-  assert.deepEqual(relocated.providers, synthetic.providers);
-  assert.deepEqual(relocated.transientRanges, synthetic.transientRanges);
+  assert.equal(relocated.workspaceBase, synthetic.workspaceBase);
+  assert.equal(relocated.readerBase, synthetic.readerBase);
   assert.equal(relocated.commitFirst, synthetic.commitFirst);
   assert.equal(relocated.commitSize, synthetic.commitSize);
 }
@@ -578,6 +787,15 @@ for (const [inputName, source] of policyInputs) {
         operationPlan(baseline),
         `${name}: header mutation changed non-header operations`,
       );
+    }
+    for (const gameCode of [
+      Uint8Array.of(0, 0, 0, 0),
+      Uint8Array.from(Buffer.from("abcd", "ascii")),
+      Uint8Array.of(0xff, 0x20, 0x7f, 0x01),
+    ]) {
+      const changed = patch(replaceGameCode(source, gameCode));
+      assert.deepEqual(changed.result.saveRuntime, baseline.result.saveRuntime);
+      assert.deepEqual(operationPlan(changed), operationPlan(baseline));
     }
   }
 }

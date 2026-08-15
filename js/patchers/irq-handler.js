@@ -5,7 +5,12 @@ import { asciiBytes, findAlignedBytes, findBytes, hexToBytes, readU16, readU32, 
 import { PatchError } from "../core/errors.js";
 import { alignUp, isBlankRegion, isOffsetWithinAnyRange } from "../core/ranges.js";
 import { PATCH_OPERATION_KIND, RTC_TICK_MODES } from "../domain/constants.js";
-import { GBA_IWRAM_END_ADDRESS, GBA_IWRAM_START_ADDRESS, GBA_ROM_BASE_ADDRESS } from "../domain/gba-constants.js";
+import {
+  GBA_IWRAM_END_ADDRESS,
+  GBA_IWRAM_START_ADDRESS,
+  GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+  GBA_ROM_BASE_ADDRESS,
+} from "../domain/gba-constants.js";
 import { stageNamedPatchWrite } from "../patch-engine/draft.js";
 import { ensureDirectPayloadRegion, markedPayloadSpan } from "./payload-placement.js";
 import { IRQ_HANDLER_CONSTANTS, IRQ_HANDLER_PAYLOAD_HEX } from "./irq-handler-data.js";
@@ -1046,6 +1051,9 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       warnings.push(...localWarnings);
       return { requested: true, status: "failed", size: IRQ_HANDLER_PAYLOAD.length };
     }
+    if (payloadBase < 0 || payloadBase + payloadSpan > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES) {
+      throw new PatchError("Shared IRQ: payload would overlap the reserved 256-byte ROM tail");
+    }
     excludedRanges.push([payloadBase, payloadBase + payloadSpan]);
     if (payloadBase + IRQ_HANDLER_PAYLOAD.length > workRom.bytes.length) {
       throw new PatchError("Shared IRQ: payload placement is outside the ROM");
@@ -1071,10 +1079,11 @@ function installIrqHandler(rom, operations, warnings, options, context) {
       && site.storeOffset <= entrypointOffset + 0x1000
     ));
     const hasActiveEntrypointInstaller = activeEntrypointInstallers.length > 0;
-    const hasActiveThumbReinstaller = thumbStartupSites.some((site) => (
+    const entrypointThumbReinstallers = thumbStartupSites.filter((site) => (
       site.storeOffset >= entrypointOffset
       && site.storeOffset <= entrypointOffset + 0x20000
     ));
+    const hasActiveThumbReinstaller = entrypointThumbReinstallers.length > 0;
     const startupCallbackEntry = hasActiveEntrypointInstaller && hasActiveThumbReinstaller
       ? (options.startupCallbackEntry || 0)
       : 0;
@@ -1115,37 +1124,63 @@ function installIrqHandler(rom, operations, warnings, options, context) {
         && site.storeOffset <= mainOffset + 0x2000
       ))
       : [];
-    const hasUniqueAssociatedThumbReinstaller = associatedThumbReinstallers.length === 1;
+    // Some SDK link layouts place their IRQ-manager helper before main in ROM
+    // even though main calls it during startup (AW2P is one such layout). ROM
+    // address order alone therefore cannot disprove that association. Retain
+    // the tighter main-relative proof when it succeeds; otherwise accept only
+    // the single unambiguous reinstaller in the already bounded reset-startup
+    // window. Multiple candidates still fall back to first VBlank.
+    const preMainThumbReinstallers = associatedThumbReinstallers.length === 1
+      ? associatedThumbReinstallers
+      : (associatedThumbReinstallers.length === 0 && entrypointThumbReinstallers.length === 1
+        ? entrypointThumbReinstallers
+        : []);
+    const hasUniquePreMainThumbReinstaller = preMainThumbReinstallers.length === 1;
     const startupCallbackOffset = Number.isSafeInteger(startupCallbackEntry)
       ? startupCallbackEntry - GBA_ROM_BASE_ADDRESS
       : -1;
-    const hasUpperIwramDmaFill = (
-      options.allowPreMainStartupCallback === true
-      && startupCallbackEntry !== 0
+    const startupIwramClear = uniqueActiveInstaller === null
+      ? null
+      : findArmDestructiveIwramClear(
+        workRom.bytes,
+        entrypointOffset,
+        uniqueActiveInstaller.storeOffset,
+      );
+    const hasProvenStartupIwramClear = (
+      startupIwramClear !== null
+      && startupIwramClear.clearStart === GBA_IWRAM_START_ADDRESS
+      && startupIwramClear.clearEnd >= GBA_IWRAM_END_ADDRESS
+      && startupIwramClear.endOffset <= uniqueActiveInstaller.storeOffset
+    );
+    const hasMatchingPostClearHandoff = (
+      postClearSites.length === 1
+      && postClearSites[0].branchOffset === uniqueActiveInstaller?.storeOffset + 12
+    );
+    const hasBatterylessPreMainProfile = (
+      startupCallbackEntry !== 0
       && uniqueActiveInstaller !== null
       && hasProvenArmHandler
       && hasProvenAlignedIwramStack
-      && hasUniqueAssociatedThumbReinstaller
-      && postClearSites.length === 0
+      && hasProvenStartupIwramClear
+      && hasUniquePreMainThumbReinstaller
+      && hasMatchingPostClearHandoff
+    );
+    const hasUpperIwramDmaFill = (
+      hasBatterylessPreMainProfile
     )
       ? patchUpperIwramDmaFills(
         new Uint8Array(workRom.bytes),
         [],
-        associatedThumbReinstallers,
+        preMainThumbReinstallers,
         excludedRanges,
       ) > 0
       : false;
     const preMainStartupCallbackEntry = (
-      options.allowPreMainStartupCallback === true
+      hasBatterylessPreMainProfile
       && startupCallbackOffset >= 0
       && startupCallbackOffset + 4 <= workRom.bytes.length
       && (startupCallbackEntry & 3) === 0
       && context.entrypointSource?.length >= 4
-      && uniqueActiveInstaller !== null
-      && hasProvenArmHandler
-      && hasProvenAlignedIwramStack
-      && hasUniqueAssociatedThumbReinstaller
-      && postClearSites.length === 0
       && !hasUpperIwramDmaFill
     )
       ? startupCallbackEntry

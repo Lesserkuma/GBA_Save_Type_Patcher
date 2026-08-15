@@ -2,7 +2,11 @@
 
 import { sameBytes } from "../core/binary.js";
 import { PatchError } from "../core/errors.js";
-import { GBA_MAX_ROM_SIZE_BYTES, PATCH_OPERATION_KIND } from "../domain/constants.js";
+import {
+  GBA_MAX_ROM_SIZE_BYTES,
+  GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+  PATCH_OPERATION_KIND,
+} from "../domain/constants.js";
 import { isPatchOperation } from "../domain/contracts.js";
 import { PATCH_HEADER } from "../domain/gba-constants.js";
 import { computeGbaHeaderChecksum } from "../patchers/patch-state.js";
@@ -43,6 +47,24 @@ function assertRange(offset, byteLength, limit, code = "PATCH_PLAN_RANGE_ERROR")
   }
 }
 
+function assertPayloadPlacementRange(operation) {
+  if (
+    operation.kind === PATCH_OPERATION_KIND.PAYLOAD_INSTALL
+    && operation.offset + operation.byteLength > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES
+  ) {
+    throw new PatchError("Payload overlaps the reserved 256-byte ROM tail.", {
+      code: "PAYLOAD_RESERVED_TAIL_OVERLAP",
+      stage: "planValidation",
+      context: {
+        id: operation.id,
+        offset: operation.offset,
+        byteLength: operation.byteLength,
+        limit: GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES,
+      },
+    });
+  }
+}
+
 function validateOperation(operation, ids, finalLength) {
     if (!operation || typeof operation.id !== "string" || ids.has(operation.id) || !OPERATION_KINDS.has(operation.kind)) {
       throw new PatchError("Patch plan has an invalid operation identity or kind.", {
@@ -64,6 +86,7 @@ function validateOperation(operation, ids, finalLength) {
     }
     if (operation.kind === PATCH_OPERATION_KIND.ROM_EXPAND) finalLength = Math.max(finalLength, operation.offset + operation.byteLength);
     assertRange(operation.offset, operation.byteLength, finalLength);
+    assertPayloadPlacementRange(operation);
     if (!(operation.expectedBefore instanceof Uint8Array) || operation.expectedBefore.length !== operation.byteLength) {
       throw new PatchError("Patch preimage length does not match the operation.", {
         code: "PATCH_PREIMAGE_LENGTH_MISMATCH",
@@ -377,6 +400,7 @@ function replayReportedOperations(inputBytes, operations) {
       continue;
     }
     assertRange(operation.offset, operation.byteLength, output.length, "PATCH_OPERATION_RANGE_ERROR");
+    assertPayloadPlacementRange(operation);
     const actual = output.slice(operation.offset, operation.offset + operation.byteLength);
     if (!sameBytes(actual, operation.expectedBefore)) {
       throw new PatchError("Reported patch preimage does not match.", {

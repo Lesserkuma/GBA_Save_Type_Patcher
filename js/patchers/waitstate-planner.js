@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { findTailBlankRegion, isBlankRegion, overlapsAnyRange } from "../core/ranges.js";
+import { GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES } from "../domain/gba-constants.js";
 import { stageErasedRomExpansion } from "../patch-engine/draft.js";
 import {
   lastNonEmptyBatterylessBlockStart,
@@ -18,7 +19,11 @@ export {
 function waitstatePayloadFitsAtBlockEnd(bytes, blockStart, size) {
   const blockEnd = blockStart + C.BATTERYLESS_REGION_ALIGNMENT;
   const payloadBase = blockEnd - size;
-  if (payloadBase < 0 || blockEnd > bytes.length) return null;
+  if (
+    payloadBase < 0
+    || blockEnd > bytes.length
+    || blockEnd > GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES
+  ) return null;
   if (overlapsBatterylessPowerBoundaryGuard(payloadBase, blockEnd)) return null;
   if (!isBlankRegion(bytes, payloadBase, size)) return null;
   return payloadBase;

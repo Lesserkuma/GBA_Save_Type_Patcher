@@ -17,7 +17,7 @@
 #define RTC_PERSIST_HALF_SIZE 0x20000u
 #define RTC_PERSIST_RECORD_SIZE 32u
 #define RTC_PERSIST_DISABLED 0xFFFFFFFFu
-#define RTC_PERSIST_FLAG_CUSTOM_BACKEND 1u
+#define RTC_PERSIST_FLAG_MAPPER_CLEANUP 1u
 #define RTC_PERSIST_FLAG_SHARED_SAVE_AREA 2u
 #define RTC_PERSIST_MAGIC 0x31544352u /* "RCT1" */
 #define RTC_PERSIST_COMMIT 0x46525443u /* same bytes as volatile RTC sentinel */
@@ -25,6 +25,9 @@
 #define RTC_PERSIST_CHECK_XOR 0xA55A3CC3u
 #define RTC_MAX_TIMESTAMP 0xBC19137Fu
 #define RTC_MAX_SPEED 9999u
+#define RTC_FLASH_PROBE_NONE 0u
+#define RTC_FLASH_PROBE_SUPPORTED 1u
+#define RTC_FLASH_PROBE_UNSUPPORTED 2u
 #define FLASH_TIMEOUT 0x01000000u
 #define PROGRAM_TIMEOUT 0x00004000u
 #define RAM_CODE __attribute__((section(".rtc_flash_ram_code"), aligned(4), noinline, used))
@@ -144,47 +147,69 @@ static inline __attribute__((always_inline)) uint16_t batch_halfword(
         | ((uint16_t)batch->source[byte_index + 1u] << 8));
 }
 
-RAM_CODE uint32_t rtc_flash_identify_1(void)
+RAM_CODE uint32_t rtc_flash_identify_1(uint32_t normalize_mapper)
 {
-    uint32_t original = *(volatile uint32_t *)ROM_BASE;
+    uint32_t original;
     uint32_t identified;
     uint8_t special;
 
+    /* A preceding game save may leave either mapper bank selected. Normalize
+     * while this independently copied routine is already executing from RAM,
+     * then clear the Intel status that the high-A24 selector write can set. */
+    if (normalize_mapper) {
+        *(volatile uint8_t *)GBA_SRAM_BANK_SELECT_ADDRESS = 0;
+        __asm volatile("nop\nnop\nnop\nnop" ::: "memory");
+    }
+    /* Intel status errors are sticky. Clear them before comparing array and
+     * identifier data so a previous command cannot poison this probe. */
+    flash_write(0, 0x0050);
     flash_write(0, 0x00FF);
+    original = *(volatile uint32_t *)ROM_BASE;
     flash_write(0, 0x0090);
     identified = *(volatile uint32_t *)ROM_BASE;
+    flash_write(0, 0x0050);
     flash_write(0, 0x00FF);
     if (original == identified)
-        return 0;
+        return RTC_FLASH_PROBE_NONE;
 
     flash_write(0x59u, 0x0042);
     special = ROM_BASE[0xB2];
     flash_write(0x59u, 0x0096);
+    flash_write(0, 0x0050);
     flash_write(0, 0x00FF);
     if (special != 0x96u) {
         volatile uint32_t delay;
         for (delay = 0; delay != 1024u; ++delay)
             __asm volatile("nop");
-        return 2; /* Batteryless type 4. */
+        /* Recognized buffered Intel hardware is deliberately unsupported.
+         * Preserve the probe result so the caller can abort before erase. */
+        return RTC_FLASH_PROBE_UNSUPPORTED;
     }
-    return 1;
+    return RTC_FLASH_PROBE_SUPPORTED;
 }
 
 RAM_CODE uint32_t rtc_flash_erase_1(uint32_t target)
 {
     volatile uint32_t timeout;
+    uint16_t status = 0;
+
+    flash_write(target, 0x0050);
     flash_write(target, 0x00FF);
     flash_write(target, 0x0060);
     flash_write(target, 0x00D0);
     flash_write(target, 0x0020);
     flash_write(target, 0x00D0);
+    flash_write(target, 0x0070);
     for (timeout = FLASH_TIMEOUT; timeout; --timeout) {
         __asm volatile("nop");
-        if (ROM_HALFWORDS[target >> 1] == 0x0080u)
+        status = ROM_HALFWORDS[target >> 1];
+        if (status & 0x0080u)
             break;
     }
+    flash_write(target, 0x0050);
     flash_write(target, 0x00FF);
-    return timeout != 0 && ROM_HALFWORDS[target >> 1] == 0xFFFFu;
+    return timeout != 0 && status == 0x0080u
+        && ROM_HALFWORDS[target >> 1] == 0xFFFFu;
 }
 
 RAM_CODE uint32_t rtc_flash_program_1(uint32_t target,
@@ -194,14 +219,17 @@ RAM_CODE uint32_t rtc_flash_program_1(uint32_t target,
     uint32_t index;
     uint16_t status = 0;
 
+    flash_write(target, 0x0050);
     flash_write(target, 0x00FF);
     flash_write(target, 0x0060);
     flash_write(target, 0x00D0);
+    flash_write(target, 0x0070);
     for (timeout = PROGRAM_TIMEOUT; timeout; --timeout) {
         status = ROM_HALFWORDS[target >> 1];
         if (status & 0x0080u)
             break;
     }
+    flash_write(target, 0x0050);
     flash_write(target, 0x00FF);
     if (!timeout || status != 0x0080u)
         return 0;
@@ -209,78 +237,23 @@ RAM_CODE uint32_t rtc_flash_program_1(uint32_t target,
     for (index = 0; index < batch->count; index += 2u) {
         uint32_t address = target + index;
         uint16_t value = batch_halfword(batch, index);
+        if (value == 0xFFFFu)
+            continue;
         flash_write(address, 0x0040);
         flash_write(address, value);
+        flash_write(address, 0x0070);
+        status = 0;
         for (timeout = PROGRAM_TIMEOUT; timeout; --timeout) {
             status = ROM_HALFWORDS[address >> 1];
             if (status & 0x0080u)
                 break;
         }
-        if (!timeout) {
-            flash_write(target, 0x00FF);
+        flash_write(address, 0x0050);
+        flash_write(address, 0x00FF);
+        if (!timeout || status != 0x0080u) {
             return 0;
         }
     }
-    flash_write(target, 0x00FF);
-    for (index = 0; index < batch->count; index += 2u) {
-        if (ROM_HALFWORDS[(target + index) >> 1] != batch_halfword(batch, index))
-            return 0;
-    }
-    return 1;
-}
-
-RAM_CODE uint32_t rtc_flash_erase_4(uint32_t target)
-{
-    volatile uint32_t timeout;
-    volatile uint32_t delay;
-    flash_write(target, 0x00FF);
-    flash_write(target, 0x0060);
-    flash_write(target, 0x00D0);
-    flash_write(target, 0x0020);
-    flash_write(target, 0x00D0);
-    for (timeout = FLASH_TIMEOUT; timeout; --timeout) {
-        __asm volatile("nop");
-        if (ROM_HALFWORDS[target >> 1] & 0x0080u)
-            break;
-    }
-    flash_write(target, 0x00FF);
-    for (delay = 0; delay != 1024u; ++delay)
-        __asm volatile("nop");
-    return timeout != 0 && ROM_HALFWORDS[target >> 1] == 0xFFFFu;
-}
-
-RAM_CODE uint32_t rtc_flash_program_4(uint32_t target,
-                                      const ProgramBatch *batch)
-{
-    volatile uint32_t timeout;
-    uint32_t page = target & ~0x3FFu;
-    uint32_t index;
-
-    flash_write(page, 0x00EA);
-    for (timeout = PROGRAM_TIMEOUT; timeout; --timeout) {
-        if (ROM_HALFWORDS[page >> 1] & 0x0080u)
-            break;
-    }
-    if (!timeout) {
-        flash_write(page, 0x00FF);
-        return 0;
-    }
-    flash_write(page, 0x01FF);
-    for (index = 0; index != 0x400u; index += 2u) {
-        uint32_t address = page + index;
-        uint16_t value = 0xFFFFu;
-        if (address >= target && address - target < batch->count)
-            value = batch_halfword(batch, address - target);
-        flash_write(address, value);
-    }
-    flash_write(page, 0x00D0);
-    for (timeout = FLASH_TIMEOUT; timeout; --timeout) {
-        if (ROM_HALFWORDS[page >> 1] & 0x0080u)
-            break;
-    }
-    flash_write(page, 0x00FF);
-    if (!timeout)
-        return 0;
     for (index = 0; index < batch->count; index += 2u) {
         if (ROM_HALFWORDS[(target + index) >> 1] != batch_halfword(batch, index))
             return 0;
@@ -407,6 +380,21 @@ RAM_CODE uint32_t rtc_flash_ram_code_end(void)
     return 0;
 }
 
+/* The modern A24/D0 SRAM mapper only latches reliably while execution has
+ * left GamePak ROM. Keep this tiny selector in the copy-to-stack section for
+ * standalone SRAM persistence as well as custom-flash cleanup. */
+RAM_CODE uint32_t rtc_mapper_cleanup_driver(void)
+{
+    *(volatile uint8_t *)GBA_SRAM_BANK_SELECT_ADDRESS = 0;
+    __asm volatile("nop\nnop\nnop\nnop" ::: "memory");
+    return 1;
+}
+
+RAM_CODE uint32_t rtc_mapper_cleanup_driver_end(void)
+{
+    return 0;
+}
+
 static void runtime_pause(RuntimeBackup *backup)
 {
     backup->soundcnt_l = REG_SOUNDCNT_L;
@@ -440,11 +428,16 @@ static void runtime_restore(const RuntimeBackup *backup)
     REG_TM0CNT_H = backup->timer0;
 }
 
-static void custom_backend_cleanup(void)
+static void mapper_cleanup(void)
 {
-    if (rtc_persist_flags_config & RTC_PERSIST_FLAG_CUSTOM_BACKEND) {
-        *(volatile uint8_t *)GBA_SRAM_BANK_SELECT_ADDRESS = 0;
-        __asm volatile("b 1f\n1:" ::: "memory");
+    /* Only SRAM/custom pipelines that guarantee the A24/D0 mapper set this
+     * flag. The selector itself must execute from RAM; a bare write here is
+     * both unreliable on that mapper and a ROM write on ordinary hardware. */
+    if (rtc_persist_flags_config & RTC_PERSIST_FLAG_MAPPER_CLEANUP) {
+        (void)rtc_persist_run_from_stack(
+            0, 0,
+            (const void *)rtc_mapper_cleanup_driver,
+            (const void *)rtc_mapper_cleanup_driver_end);
     }
 }
 
@@ -453,33 +446,43 @@ static uint32_t run_driver(uint32_t argument0, uint32_t argument1,
 {
     uint32_t result = rtc_persist_run_from_stack(
         argument0, argument1, (const void *)start, (const void *)end);
-    custom_backend_cleanup();
+    mapper_cleanup();
     return result;
 }
 
 static uint32_t select_flash_driver(FlashDriver *driver)
 {
-    uint32_t first = run_driver(0, 0,
+    uint32_t result;
+
+    driver->type = 0;
+    result = run_driver(
+        (rtc_persist_flags_config & RTC_PERSIST_FLAG_MAPPER_CLEANUP) != 0u,
+        0,
         (uintptr_t)rtc_flash_identify_1, (uintptr_t)rtc_flash_erase_1);
-    if (first == 1u) {
+    if (result == RTC_FLASH_PROBE_SUPPORTED) {
         driver->type = 1;
         return 1;
     }
-    if (first == 2u) {
-        driver->type = 4;
-        return 1;
-    }
-    if (run_driver(0, 0,
-            (uintptr_t)rtc_flash_identify_2, (uintptr_t)rtc_flash_erase_2)) {
+    /* Type 4 and every unexpected result fail closed before another probe,
+     * and necessarily before rtc_persist_flush can erase or program ROM. */
+    if (result != RTC_FLASH_PROBE_NONE)
+        return 0;
+
+    result = run_driver(0, 0,
+        (uintptr_t)rtc_flash_identify_2, (uintptr_t)rtc_flash_erase_2);
+    if (result == RTC_FLASH_PROBE_SUPPORTED) {
         driver->type = 2;
         return 1;
     }
-    if (run_driver(0, 0,
-            (uintptr_t)rtc_flash_identify_3, (uintptr_t)rtc_flash_erase_3)) {
+    if (result != RTC_FLASH_PROBE_NONE)
+        return 0;
+
+    result = run_driver(0, 0,
+        (uintptr_t)rtc_flash_identify_3, (uintptr_t)rtc_flash_erase_3);
+    if (result == RTC_FLASH_PROBE_SUPPORTED) {
         driver->type = 3;
         return 1;
     }
-    driver->type = 0;
     return 0;
 }
 
@@ -488,9 +491,6 @@ static uint32_t erase_flash(const FlashDriver *driver, uint32_t target)
     if (driver->type == 1u)
         return run_driver(target, 0,
             (uintptr_t)rtc_flash_erase_1, (uintptr_t)rtc_flash_program_1);
-    if (driver->type == 4u)
-        return run_driver(target, 0,
-            (uintptr_t)rtc_flash_erase_4, (uintptr_t)rtc_flash_program_4);
     if (driver->type == 2u)
         return run_driver(target, 0,
             (uintptr_t)rtc_flash_erase_2, (uintptr_t)rtc_flash_program_2);
@@ -510,9 +510,6 @@ static uint32_t program_record(const FlashDriver *driver, uint32_t target,
     batch.count = sizeof(*record);
     if (driver->type == 1u) {
         start = (uintptr_t)rtc_flash_program_1;
-        end = (uintptr_t)rtc_flash_erase_4;
-    } else if (driver->type == 4u) {
-        start = (uintptr_t)rtc_flash_program_4;
         end = (uintptr_t)rtc_flash_identify_2;
     } else if (driver->type == 2u) {
         start = (uintptr_t)rtc_flash_program_2;
@@ -637,7 +634,7 @@ uint32_t rtc_persist_flush(uint32_t release_mask)
     result = 1;
 
 restore:
-    custom_backend_cleanup();
+    mapper_cleanup();
     runtime_restore(&backup);
     REG_IME = old_ime;
     rtc_persist_irq_restore(old_cpsr);

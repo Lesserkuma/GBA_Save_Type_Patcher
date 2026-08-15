@@ -43,6 +43,10 @@ const probe = offsetOf("payload_probe");
 const userSnapshot = offsetOf("rtc_user_snapshot");
 const irqSnapshot = offsetOf("rtc_user_snapshot_irq");
 const privilegedSnapshot = offsetOf("rtc_snapshot_privileged");
+const zodiacProbe = offsetOf("payload_zodiac_probe");
+const zodiacGetTimeDate = offsetOf("payload_zodiac_gettimedate");
+const zodiacAvailableConfig = offsetOf("payload_zodiac_available_address_config");
+const zodiacStatusConfig = offsetOf("payload_zodiac_status_address_config");
 const runtimeMenu = offsetOf("fake_rtc_menu_run_runtime");
 const backupScratch = offsetOf("select_runtime_backup_scratch");
 const backupVisualState = offsetOf("runtime_backup_visual_state");
@@ -68,6 +72,22 @@ assert.equal(readU32(bytes, privilegedSnapshot + 4), 0xe3a0209b); // enter Undef
 assert.equal(readU32(bytes, privilegedSnapshot + 0x24), 0xe3a02097); // phase in Abort SP
 assert.equal(readU32(bytes, privilegedSnapshot + 0x58), 0xe3a0109b); // timestamp in Undefined LR
 assert.equal(readU32(bytes, privilegedSnapshot + 0x74), 0xe3a02097); // sentinel in Abort LR
+
+// Zodiac/Wizard-style adapters read per-ROM state addresses from relocated
+// config words and preserve the compact raw-reader return convention.
+assert.equal(readU16(bytes, zodiacProbe), 0xb510); // push r4, lr
+assert.equal(readU16(bytes, zodiacProbe + 4), 0x6824); // load configured address
+assert.equal(readU16(bytes, zodiacProbe + 0x12), 0x7020); // available = 1
+assert.equal(readU16(bytes, zodiacProbe + 0x16), 0x6824); // load status address
+assert.equal(readU16(bytes, zodiacProbe + 0x18), 0x2140); // 24-hour status
+assert.equal(readU16(bytes, zodiacProbe + 0x1a), 0x7021);
+assert.equal(readU32(bytes, zodiacProbe + 0x20), base + zodiacAvailableConfig);
+assert.equal(readU32(bytes, zodiacProbe + 0x24), base + zodiacStatusConfig);
+assert.equal(readU32(bytes, zodiacAvailableConfig), 0);
+assert.equal(readU32(bytes, zodiacStatusConfig), 0);
+assert.equal(readU16(bytes, zodiacGetTimeDate), 0xb510); // aligned wrapper call
+assert.equal(readU16(bytes, zodiacGetTimeDate + 6), 0x2000); // return 0
+assert.equal(readU16(bytes, zodiacGetTimeDate + 8), 0xbd10);
 
 // The runtime menu used to put the complete palette/OAM backup on the
 // interrupted game's IWRAM stack. Keep that frame small and place the 684-byte

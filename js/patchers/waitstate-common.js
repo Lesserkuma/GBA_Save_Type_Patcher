@@ -44,7 +44,7 @@ export function stageWaitstateWriteWithinRomLimit(rom, operations, offset, newBy
     });
   }
   const oldBytes = rom.bytes.slice(offset, end);
-  stageWaitstateWrite(rom.bytes, operations, "superfw WAITCNT patch", offset, writable, {
+  stageWaitstateWrite(rom.bytes, operations, "Structural WAITCNT patch", offset, writable, {
     codeName,
     oldBytes: bytesToHex(oldBytes, " "),
     newBytes: bytesToHex(writable, " "),
