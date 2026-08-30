@@ -42,6 +42,7 @@ export const RTC_PERSISTENCE_HALF_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_HALF_
 export const RTC_PERSISTENCE_RECORD_SIZE = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_RECORD_SIZE;
 export const RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_MAPPER_CLEANUP;
 export const RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_SHARED_SAVE_AREA;
+export const RTC_PERSISTENCE_VISOLY_MAPPER_CLEANUP_FLAG = RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP;
 
 function validateGeneratedRtcData() {
   const constants = RTC_PAYLOAD_CONSTANTS;
@@ -59,6 +60,9 @@ function validateGeneratedRtcData() {
     || !Number.isInteger(constants.RTC_TICK_MODE_CONFIG_OFFSET)
     || !Number.isInteger(constants.RTC_TICK_MODE_VBLANK)
     || !Number.isInteger(constants.RTC_TICK_MODE_READ)
+    || !Number.isInteger(constants.RTC_MENU_ON_BOOT_CONFIG_OFFSET)
+    || constants.RTC_MENU_ON_BOOT_SKIP !== 0
+    || constants.RTC_MENU_ON_BOOT_SHOW !== 1
     || !Number.isInteger(constants.RTC_PERSIST_BLOCK_CONFIG_OFFSET)
     || !Number.isInteger(constants.RTC_PERSIST_FLAGS_CONFIG_OFFSET)
     || constants.RTC_PERSIST_BLOCK_SIZE !== 0x40000
@@ -67,6 +71,7 @@ function validateGeneratedRtcData() {
     || constants.RTC_PERSIST_RECORD_SIZE <= 0
     || !Number.isInteger(constants.RTC_PERSIST_FLAG_MAPPER_CLEANUP)
     || !Number.isInteger(constants.RTC_PERSIST_FLAG_SHARED_SAVE_AREA)
+    || !Number.isInteger(constants.RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP)
   ) {
     throw new PatchError("RTC generated payload data is missing or invalid.", {
       code: "RTC_GENERATED_DATA_INVALID",
@@ -100,6 +105,17 @@ function configureRtcTickMode(payloadBuild, tickMode) {
   const value = tickMode === RTC_TICK_MODES.READ
     ? RTC_PAYLOAD_CONSTANTS.RTC_TICK_MODE_READ
     : RTC_PAYLOAD_CONSTANTS.RTC_TICK_MODE_VBLANK;
+  writeU32(payloadBuild.payloadBytes, offset, value);
+}
+
+function configureRtcBootMenu(payloadBuild, showMenuOnBoot) {
+  const offset = RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_CONFIG_OFFSET;
+  if (offset < 0 || offset + 4 > payloadBuild.payloadBytes.length) {
+    throw new PatchError("RTC: boot-menu configuration is outside the payload");
+  }
+  const value = showMenuOnBoot === false
+    ? RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SKIP
+    : RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SHOW;
   writeU32(payloadBuild.payloadBytes, offset, value);
 }
 
@@ -853,6 +869,7 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
   const linkAddr = (GBA_ROM_BASE_ADDRESS + payloadOffset) >>> 0;
   const payloadBuild = relocatePayload(embeddedPayloadBytes(), linkAddr);
   configureRtcTickMode(payloadBuild, tickMode);
+  configureRtcBootMenu(payloadBuild, rtcOptions.showMenuOnBoot);
   configureRtcHandlerProfile(payloadBuild, handlerProfile, linkAddr);
   const persistenceContext = rtcOptions.saveOnGlobalHotkey === false
     ? { ...context, persistenceBlockOffset: null, persistenceFlags: 0 }
@@ -896,6 +913,7 @@ function patchRtcOnWorkingRom(workRom, operations, warnings, originalBytes, rtcO
     persistenceFlushEntry,
     persistence,
     tickMode,
+    showMenuOnBoot: rtcOptions.showMenuOnBoot !== false,
     size: RTC_PAYLOAD_SIZE,
     payloadSpan: rtcPayloadSpanForLayout(),
     placement,

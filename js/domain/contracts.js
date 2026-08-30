@@ -34,7 +34,7 @@ const BATTERYLESS_OPTION_KEYS = new Set(["mode", "countdownFrames", "indicator",
 const CUSTOM_FLASH_OPTION_KEYS = new Set(["saveChipModel", "saveChipType"]);
 const SRAM_OPTION_KEYS = new Set(["flash1mBankSwitchStyle"]);
 const WAITSTATE_OPTION_KEYS = new Set(["enabled", "mode"]);
-const RTC_OPTION_KEYS = new Set(["enabled", "tickMode", "saveOnGlobalHotkey"]);
+const RTC_OPTION_KEYS = new Set(["enabled", "tickMode", "showMenuOnBoot", "saveOnGlobalHotkey"]);
 const PATCH_OPERATION_KEYS = new Set([
   "id", "kind", "component", "offset", "byteLength", "expectedBefore",
   "replacement", "labelKey", "alignment", "dependencies", "allowOverlap", "metadata",
@@ -93,10 +93,11 @@ export function isPatchOptions(options) {
 
   const customFlashType = customFlashSaveChipTypeFromModel(options.customFlash.saveChipModel);
   if (customFlashType === null
-      || !["modern", "gbata"].includes(options.sram.flash1mBankSwitchStyle)
+      || !["modern", "gbata", "visoly"].includes(options.sram.flash1mBankSwitchStyle)
       || typeof options.waitstate.enabled !== "boolean"
       || options.waitstate.mode !== "supercard_exact"
       || typeof options.rtc.enabled !== "boolean"
+      || typeof options.rtc.showMenuOnBoot !== "boolean"
       || typeof options.rtc.saveOnGlobalHotkey !== "boolean"
       || !Object.values(RTC_TICK_MODES).includes(options.rtc.tickMode)) return false;
 

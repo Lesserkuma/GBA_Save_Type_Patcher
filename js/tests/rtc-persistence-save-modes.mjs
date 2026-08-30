@@ -14,6 +14,7 @@ import {
   RTC_HANDLER_SIGNATURES,
   RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG,
   RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
+  RTC_PERSISTENCE_VISOLY_MAPPER_CLEANUP_FLAG,
 } from "../patchers/rtc.js";
 import { WORKER_MESSAGE_TYPE } from "../worker/protocol.js";
 
@@ -29,6 +30,10 @@ const mapperCleanupSource = rtcPersistenceSource.slice(
   rtcPersistenceSource.indexOf("static void mapper_cleanup(void)"),
   rtcPersistenceSource.indexOf("static uint32_t run_driver", rtcPersistenceSource.indexOf("static void mapper_cleanup(void)")),
 );
+const visolyMapperDriverSource = rtcPersistenceSource.slice(
+  rtcPersistenceSource.indexOf("RAM_CODE uint32_t rtc_visoly_mapper_cleanup_driver(void)"),
+  rtcPersistenceSource.indexOf("RAM_CODE uint32_t rtc_visoly_mapper_cleanup_driver_end(void)"),
+);
 assert.ok(
   mapperDriverSource.includes("GBA_SRAM_BANK_SELECT_ADDRESS")
     && mapperDriverSource.includes('asm volatile("nop\\nnop\\nnop\\nnop"'),
@@ -38,6 +43,40 @@ assert.ok(
   mapperCleanupSource.includes("rtc_persist_run_from_stack")
     && !mapperCleanupSource.includes("GBA_SRAM_BANK_SELECT_ADDRESS"),
   "RTC cleanup must dispatch the mapper write from RAM instead of GamePak ROM",
+);
+for (const token of [
+  "0x0930ECA8u",
+  "0x0802468Au",
+  "0x0800ECA8u",
+  "0x08ECA800u",
+  "0x080268A0u",
+  "0x0942468Au",
+  "repeat < 2000u",
+]) {
+  assert.ok(visolyMapperDriverSource.includes(token), `Visoly RTC cleanup: ${token}`);
+}
+for (const value of ["0x1234u", "0x5678u", "0xABCDu"]) {
+  assert.ok(
+    visolyMapperDriverSource.includes(
+      `*command = ${value};\n    for (repeat = 0; repeat < 2000u; ++repeat)\n        __asm volatile("nop");`,
+    ),
+    `Visoly RTC cleanup must write ${value} once before its 2000-NOP delay`,
+  );
+}
+assert.equal(
+  visolyMapperDriverSource.match(/__asm volatile\("nop"\);/g)?.length,
+  3,
+  "Visoly RTC cleanup must contain exactly three explicit NOP delay loops",
+);
+assert.ok(
+  visolyMapperDriverSource.includes("execution_address < 0x03000000u")
+    && visolyMapperDriverSource.includes("execution_address >= 0x03008000u"),
+  "Visoly RTC cleanup must reject a non-IWRAM execution stack before unlocking",
+);
+assert.ok(
+  mapperCleanupSource.indexOf("RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP")
+    < mapperCleanupSource.indexOf("RTC_PERSIST_FLAG_MAPPER_CLEANUP"),
+  "Visoly cleanup must take precedence over the modern mapper write",
 );
 
 const identify1Source = rtcPersistenceSource.slice(
@@ -174,11 +213,13 @@ async function patchMode(
   persistenceEnabled = true,
   flash1mBankSwitchStyle = "modern",
   rtcTickMode = "read",
+  showMenuOnBoot = true,
 ) {
   const options = cloneDefaultOptions();
   options.patchMode = patchMode;
   options.rtc.enabled = true;
   options.rtc.tickMode = rtcTickMode;
+  options.rtc.showMenuOnBoot = showMenuOnBoot;
   options.rtc.saveOnGlobalHotkey = persistenceEnabled;
   options.batteryless.hotkeyMask = 0x204;
   options.sram.flash1mBankSwitchStyle = flash1mBankSwitchStyle;
@@ -190,6 +231,7 @@ async function patchMode(
     flash1mBankSwitchStyle,
     persistenceEnabled ? "on" : "off",
     rtcTickMode,
+    showMenuOnBoot ? "menu" : "skip-menu",
   ].join("-");
   const response = new Promise((resolve) => pendingResponses.set(requestId, resolve));
   const rom = syntheticRtcSramRom();
@@ -209,6 +251,9 @@ async function patchMode(
 }
 
 assert.equal(RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_MAPPER_CLEANUP, 1);
+assert.equal(RTC_PAYLOAD_CONSTANTS.RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP, 4);
+assert.equal(RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SKIP, 0);
+assert.equal(RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SHOW, 1);
 assert.equal(
   Object.hasOwn(RTC_PAYLOAD_CONSTANTS, "RTC_PERSIST_FLAG_CUSTOM_BACKEND"),
   false,
@@ -218,6 +263,7 @@ assert.equal(
 const persistenceFlagCases = Object.freeze([
   { mode: "sram", style: "modern", flags: RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG },
   { mode: "sram", style: "gbata", flags: 0 },
+  { mode: "sram", style: "visoly", flags: RTC_PERSISTENCE_VISOLY_MAPPER_CLEANUP_FLAG },
   { mode: "flash512k", style: "modern", flags: 0 },
   {
     mode: "custom-flash",
@@ -236,6 +282,12 @@ const persistenceFlagCases = Object.freeze([
     style: "gbata",
     flags: RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
   },
+  {
+    mode: "batteryless-sram",
+    style: "visoly",
+    flags: RTC_PERSISTENCE_VISOLY_MAPPER_CLEANUP_FLAG
+      | RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
+  },
 ]);
 
 for (const { mode, style, flags } of persistenceFlagCases) {
@@ -244,6 +296,7 @@ for (const { mode, style, flags } of persistenceFlagCases) {
   const { result } = response;
   const label = `${mode}/${style}`;
   assert.equal(result.rtc.statusCode, "changed", `${mode}: Fake RTC`);
+  assert.equal(result.rtc.showMenuOnBoot, true, `${mode}: boot menu shown by default`);
   assert.equal(result.irqHandler.statusCode, "changed", `${mode}: shared IRQ`);
   assert.equal(
     Object.hasOwn(result.irqHandler, "shortIrqHandler"),
@@ -260,6 +313,14 @@ for (const { mode, style, flags } of persistenceFlagCases) {
     result.rtc.persistence.flags,
     flags,
     `${label}: persistence mapper/shared flags`,
+  );
+  assert.equal(
+    readU32(
+      new Uint8Array(response.patchedBuffer),
+      result.rtc.payloadOffset + RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_CONFIG_OFFSET,
+    ),
+    RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SHOW,
+    `${label}: embedded boot-menu default`,
   );
   assert.equal(
     readU32(
@@ -286,7 +347,20 @@ for (const { mode, style, flags } of persistenceFlagCases) {
   assert.equal(result.irqHandler.saveFlushAuto, false, `${mode}: no unrelated automatic flush`);
 }
 
-for (const style of ["modern", "gbata"]) {
+const skippedBootMenuResponse = await patchMode("sram", false, "modern", "read", false);
+assert.equal(skippedBootMenuResponse.type, WORKER_MESSAGE_TYPE.PATCH_COMPLETED);
+assert.equal(skippedBootMenuResponse.result.rtc.showMenuOnBoot, false);
+assert.equal(
+  readU32(
+    new Uint8Array(skippedBootMenuResponse.patchedBuffer),
+    skippedBootMenuResponse.result.rtc.payloadOffset
+      + RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_CONFIG_OFFSET,
+  ),
+  RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SKIP,
+  "Skip must be written into the embedded RTC boot-menu configuration",
+);
+
+for (const style of ["modern", "gbata", "visoly"]) {
   const disabledResponse = await patchMode("sram", false, style);
   assert.equal(disabledResponse.type, WORKER_MESSAGE_TYPE.PATCH_COMPLETED);
   assert.equal(disabledResponse.result.rtc.persistence, null);

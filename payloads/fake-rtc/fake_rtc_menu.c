@@ -747,6 +747,10 @@ static void load_menu_fields(RtcFields *fields) {
     timestamp_to_fields(menu_timestamp, menu_speed, fields);
 }
 
+void fake_rtc_initialize_default(void) {
+    rtc_state_write(FAKE_RTC_DEFAULT_TIMESTAMP, clamp_speed(FAKE_RTC_DEFAULT_SPEED));
+}
+
 static void fake_rtc_menu_loop(uint16_t tile_base, uint16_t sprite_limit, uint8_t initial_rendered, RtcFields *fields) {
     uint16_t prev_keys = 0;
     uint16_t hold_up = 0;

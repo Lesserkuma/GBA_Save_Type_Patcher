@@ -8,6 +8,23 @@ import { isPatchResponse, WORKER_MESSAGE_TYPE } from "../worker/protocol.js";
 
 const defaultOptions = cloneDefaultOptions();
 assert.equal(isPatchOptions(defaultOptions), true);
+assert.equal(defaultOptions.rtc.showMenuOnBoot, true);
+assert.equal(isPatchOptions({
+  ...defaultOptions,
+  rtc: { ...defaultOptions.rtc, showMenuOnBoot: false },
+}), true);
+assert.equal(isPatchOptions({
+  ...defaultOptions,
+  rtc: { ...defaultOptions.rtc, showMenuOnBoot: "skip" },
+}), false);
+assert.equal(isPatchOptions({
+  ...defaultOptions,
+  sram: { ...defaultOptions.sram, flash1mBankSwitchStyle: "visoly" },
+}), true);
+assert.equal(isPatchOptions({
+  ...defaultOptions,
+  sram: { ...defaultOptions.sram, flash1mBankSwitchStyle: "unknown" },
+}), false);
 assert.equal(isPatchOptions({ ...defaultOptions, shortIrqHandler: true }), false);
 assert.equal(isPatchOptions({
   ...defaultOptions,
@@ -52,4 +69,4 @@ for (const invalid of [
   assert.equal(isPatchResponse({ ...response, ...invalid }), false);
 }
 
-console.log("Worker protocol v4: ok");
+console.log("Worker protocol v5: ok");

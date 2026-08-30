@@ -2,8 +2,8 @@
 //
 // RTC runtime handlers.
 //
-// The menu is only a boot/configuration front-end. After it has initialized the
-// banked CPU registers, the actual RTC handlers run SuperFW-style:
+// The boot path and optional menu initialize the banked CPU registers. The
+// actual RTC handlers then run SuperFW-style:
 //   - current timestamp in UNDEF[LR]
 //   - speed in UNDEF[SP]
 //   - continuous-mode VBlank phase in ABORT[SP]
@@ -19,6 +19,7 @@
     .equ RTC_STATE_MAGIC, 0x46525443   // same sentinel as rtc_state.S
     .equ RTC_TICK_MODE_VBLANK, 0
     .equ RTC_TICK_MODE_READ, 1
+    .equ RTC_MENU_ON_BOOT_SHOW, 1
     .equ RTC_MAX_TIMESTAMP, 0xBC19137F // 2099-12-31 23:59:59
     .equ GBA_REG_IE, 0x04000200
     .equ GBA_REG_IME_OFFSET, 8
@@ -27,13 +28,14 @@
     .equ CPSR_MODE_USER, 0x10
     .equ CPSR_IRQ_DISABLE, 0x80
     .extern fake_rtc_menu_run
+    .extern fake_rtc_initialize_default
     .extern rtc_persist_load
     .extern rtc_persist_flush_initial
 
 // --------------------------------------------------------------------------
-// Probe: this is the only runtime handler that may open the menu. ABORT[LR]
-// records whether the menu has already run, so soft resets keep the current
-// RTC value and skip the boot menu.
+// Probe: this is the only runtime handler that may open the boot menu.
+// ABORT[LR] records whether RTC initialization has run, so soft resets keep the
+// current RTC value and never repeat cold-boot initialization.
 // --------------------------------------------------------------------------
     .section .text.payload_probe, "ax", %progbits
     .thumb
@@ -89,13 +91,26 @@ payload_probe:
     beq     2f
     push    {lr}
     // Cold boot: load the checksummed record at the end of the configured
-    // writable 256-KiB block first. The menu is always shown once afterward,
-    // using restored values when the record was valid and defaults otherwise.
+    // writable 256-KiB block first. Show the menu when configured, using
+    // restored values when the record was valid and defaults otherwise.
+    // Skipping the menu keeps a restored value or initializes the defaults.
     bl      rtc_persist_load
+    ldr     r1, =rtc_menu_on_boot_config
+    ldr     r1, [r1]
+    cmp     r1, #RTC_MENU_ON_BOOT_SHOW
+    beq     .Lprobe_show_boot_menu
+    cmp     r0, #0
+    bne     .Lprobe_boot_ready
+    bl      fake_rtc_initialize_default
+    b       .Lprobe_boot_ready
+
+.Lprobe_show_boot_menu:
     bl      fake_rtc_menu_run
     // Persist the initial/menu-confirmed state immediately. Normal game-save
     // flushes update the same record later.
     bl      rtc_persist_flush_initial
+
+.Lprobe_boot_ready:
     pop     {r1}
     movs    r0, #1
     bx      r1
@@ -230,8 +245,8 @@ rtc_snapshot_privileged:
     .size rtc_snapshot_privileged, . - rtc_snapshot_privileged
 
 // --------------------------------------------------------------------------
-// Reset: keep the menu-selected RTC value. Some games call reset during init;
-// wiping UNDEF[LR] here would discard the user's menu selection. So this is a
+// Reset: keep the initialized RTC value. Some games call reset during init;
+// wiping UNDEF[LR] here would discard the current value. So this is a
 // resource-free success return.
 // --------------------------------------------------------------------------
     .section .text.payload_reset, "ax", %progbits
@@ -272,6 +287,12 @@ payload_getstatus:
 rtc_tick_mode_config:
     .word   RTC_TICK_MODE_VBLANK
     .size rtc_tick_mode_config, . - rtc_tick_mode_config
+
+    .global rtc_menu_on_boot_config
+    .type rtc_menu_on_boot_config, %object
+rtc_menu_on_boot_config:
+    .word   RTC_MENU_ON_BOOT_SHOW
+    .size rtc_menu_on_boot_config, . - rtc_menu_on_boot_config
 
     .thumb
     .thumb_func

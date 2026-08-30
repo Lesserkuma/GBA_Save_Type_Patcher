@@ -3,7 +3,12 @@
 import { hexToBytes } from "../core/binary.js";
 import { sha256Hex } from "../core/hash.js";
 import { PatchError } from "../core/errors.js";
-import { BATTERYLESS_PAYLOAD_GBATA_HEX, BATTERYLESS_PAYLOAD_HEX } from "../patchers/sram-data.js";
+import {
+  BATTERYLESS_PAYLOAD_GBATA_HEX,
+  BATTERYLESS_PAYLOAD_HEX,
+  BATTERYLESS_PAYLOAD_VISOLY_HEX,
+  VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX,
+} from "../patchers/sram-data.js";
 import { FLASH_DIRECT_PAYLOAD_HEX } from "../patchers/flash-direct-data.js";
 import { FLASH_DIRECT_PAYLOAD_HEX as FLASH_DIRECT_SNAPSHOT_HEX } from "../patchers/flash-direct-snapshot-data.js";
 import { FLASH_DIRECT_PAYLOAD_HEX as FLASH_DIRECT_TRANSACTION_HEX } from "../patchers/flash-direct-transaction-data.js";
@@ -15,6 +20,8 @@ import { PAYLOAD_MANIFESTS } from "./payload-manifests.js";
 const ARTIFACTS = Object.freeze({
   batterylessSram: [BATTERYLESS_PAYLOAD_HEX, "GPL-3.0-or-later AND MIT"],
   batterylessSramGbata: [BATTERYLESS_PAYLOAD_GBATA_HEX, "GPL-3.0-or-later AND MIT"],
+  batterylessSramVisoly: [BATTERYLESS_PAYLOAD_VISOLY_HEX, "GPL-3.0-or-later AND MIT"],
+  visolySramBankSwitch: [VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX, "GPL-3.0-or-later AND MIT"],
   flashDirect: [FLASH_DIRECT_PAYLOAD_HEX, "GPL-3.0-only AND MIT"],
   flashDirectSnapshot: [FLASH_DIRECT_SNAPSHOT_HEX, "GPL-3.0-only AND MIT"],
   flashDirectTransaction: [FLASH_DIRECT_TRANSACTION_HEX, "GPL-3.0-only AND MIT"],

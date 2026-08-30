@@ -55,6 +55,7 @@ const strategySource = (await Promise.all(strategyFiles.map(async (relative) => 
 const directPayloadSource = await readFile(
   path.join(repository, "payloads/flash-direct/payload.c"), "utf8",
 );
+const indexSource = await readFile(path.join(repository, "index.html"), "utf8");
 
 const verifierStart = directPayloadSource.indexOf("uint8_t *verify_sram_cached_patched");
 const verifierEnd = directPayloadSource.indexOf(
@@ -152,6 +153,64 @@ assert.doesNotMatch(
   directPayloadSource,
   /\bcfi_(?:physical|try|buffer)|flash_(?:program_buffer|marker_exponent|buffer_exponent)/,
   "Direct payload must not probe or select unsupported buffered programming",
+);
+assert.match(
+  indexSource,
+  /512K\/1M FLASH[\s\S]*Macronix MX29L010\/0xC209/,
+  "the native Direct option must advertise MX29L010 hardware support",
+);
+for (const definition of [
+  /#define FLASH_MAKER_MACRONIX 0xC2u/,
+  /#define FLASH_DEVICE_MX29L010 0x09u/,
+]) {
+  assert.match(
+    directPayloadSource,
+    definition,
+    "Direct payload must identify the Macronix MX29L010 by its native ID",
+  );
+}
+const flashIdentifyStart = directPayloadSource.indexOf(
+  "static uint32_t flash_is_native_1m",
+);
+const flashIdentifyEnd = directPayloadSource.indexOf(
+  "static FlashReadFn flash_prepare_reader",
+  flashIdentifyStart,
+);
+const flashIdentifySource = directPayloadSource.slice(
+  flashIdentifyStart,
+  flashIdentifyEnd,
+);
+assert.match(
+  flashIdentifySource,
+  /save\[SAVE_MAGIC_0\] = 0xF0u;\s*save\[SAVE_MAGIC_0\] = 0xF0u;/,
+  "native ID mode must use the MX29L010-compatible Nintendo reset sequence",
+);
+const flashPrepareStart = directPayloadSource.indexOf(
+  "static FlashReadFn flash_prepare_reader",
+);
+const flashPrepareEnd = directPayloadSource.indexOf(
+  "static FlashReadFn flash_reader_on_stack",
+  flashPrepareStart,
+);
+const flashPrepareSource = directPayloadSource.slice(
+  flashPrepareStart,
+  flashPrepareEnd,
+);
+assert.ok(flashPrepareStart >= 0 && flashPrepareEnd > flashPrepareStart);
+assert.match(
+  flashPrepareSource,
+  /direct_save_protocol_config != SAVE_PROTOCOL_STANDARD/,
+  "native bank selection must never leak into custom FLASH protocols",
+);
+assert.match(
+  flashPrepareSource,
+  /flash_is_native_1m\(reader\)/,
+  "native bank selection must be gated by the runtime chip ID",
+);
+assert.match(
+  flashPrepareSource,
+  /save\[SAVE_MAGIC_0\] = 0xB0u;[\s\S]*save\[0\] = 0u;/,
+  "native 1M FLASH access must select bank zero with the standard command",
 );
 
 assert.match(
@@ -435,6 +494,29 @@ function syntheticDirectSramRom() {
   bytes.set(layout.verify.marker, anchor + layout.verify.offset);
   repairHeaderChecksum(bytes);
   return bytes;
+}
+
+function syntheticNativeFlash1mRom() {
+  const bytes = new Uint8Array(0x100000);
+  const saveType = "FLASH1M_V103";
+  bytes[0xb2] = 0x96;
+  for (let index = 0; index < saveType.length; index += 1) {
+    bytes[0x100 + index] = saveType.charCodeAt(index);
+  }
+  repairHeaderChecksum(bytes);
+  return bytes;
+}
+
+{
+  const source = syntheticNativeFlash1mRom();
+  const native = patchFlash512kBytes(source);
+  assert.equal(native.result.status, "unchanged");
+  assert.equal(native.result.sourceSaveType, "FLASH1M_V103");
+  assert.equal(native.result.targetSaveType, "FLASH1M");
+  assert.equal(native.result.logicalSaveSizeBytes, 131072);
+  assert.equal(native.result.targetSaveSizeBytes, 131072);
+  assert.equal(native.result.bankSwitchMode, "flash1m");
+  assert.deepEqual(native.bytes, source);
 }
 
 function emitBl(bytes, offset, target) {

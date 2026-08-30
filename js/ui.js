@@ -327,6 +327,7 @@ export function syncOptionsFromForm(state) {
   options.waitstate.mode = "supercard_exact";
   options.rtc.enabled = f.elements.rtcEnabled.checked;
   options.rtc.tickMode = f.elements.rtcTickMode.value;
+  options.rtc.showMenuOnBoot = f.elements.rtcMenuOnBoot.value !== "skip";
   options.rtc.saveOnGlobalHotkey = f.elements.rtcSaveOnGlobalHotkey.value !== "disabled";
   replaceOptions(state, options);
 }
@@ -364,7 +365,9 @@ export function readValidatedOptions(state) {
   }
 
   options.sram = options.sram || {};
-  options.sram.flash1mBankSwitchStyle = options.sram.flash1mBankSwitchStyle === "gbata" ? "gbata" : "modern";
+  options.sram.flash1mBankSwitchStyle = ["modern", "gbata", "visoly"].includes(
+    options.sram.flash1mBankSwitchStyle,
+  ) ? options.sram.flash1mBankSwitchStyle : "modern";
 
   options.batteryless.lastBlock = options.batteryless.lastBlock === "keep-empty" ? "keep-empty" : "usable";
   options.batteryless.hotkey = normalizeHotkeyKeys(options.batteryless.hotkey);
@@ -381,6 +384,7 @@ export function readValidatedOptions(state) {
 
   const rtcEnabled = options.rtc?.enabled === true;
   const rtcTickMode = options.rtc?.tickMode ?? DEFAULT_OPTIONS.rtc.tickMode;
+  const rtcShowMenuOnBoot = options.rtc?.showMenuOnBoot !== false;
   const rtcSaveOnGlobalHotkey = options.rtc?.saveOnGlobalHotkey !== false;
   if (!Object.values(RTC_TICK_MODES).includes(rtcTickMode)) {
     throw optionError(UI_TEXT.RTC_TICK_MODE_INVALID, "rtc.tickMode");
@@ -388,6 +392,7 @@ export function readValidatedOptions(state) {
   options.rtc = {
     enabled: rtcEnabled,
     tickMode: rtcTickMode,
+    showMenuOnBoot: rtcShowMenuOnBoot,
     saveOnGlobalHotkey: rtcSaveOnGlobalHotkey,
   };
   if (options.patchMode === PATCH_MODES.NONE && !options.waitstate.enabled && !options.rtc.enabled) {

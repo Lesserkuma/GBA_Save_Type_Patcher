@@ -8,7 +8,7 @@
 // Layout:
 //   UNDEF[LR] = current timestamp, seconds since 2000-01-01 00:00:00
 //   UNDEF[SP] = speed 0..9999, stored as a word-sized value
-//   ABORT[LR] = init sentinel, written after menu confirmation
+//   ABORT[LR] = init sentinel, written after boot initialization or menu confirmation
 //   ABORT[SP] = cached speed in bits 18..31, sub-second phase in bits 0..17
 //
 // Soft resets preserve the banked registers. A compact copy can additionally

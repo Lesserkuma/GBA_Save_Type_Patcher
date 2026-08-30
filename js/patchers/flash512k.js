@@ -218,7 +218,16 @@ function baseResult(bytes, sourceSaveType, status, operations, warnings, saveRun
 }
 
 function nativeFlashResult(input, sourceSaveType) {
-  return baseResult(new Uint8Array(input), sourceSaveType, "unchanged", [], [], null);
+  const output = baseResult(
+    new Uint8Array(input), sourceSaveType, "unchanged", [], [], null,
+  );
+  if (sourceSaveType?.startsWith("FLASH1M")) {
+    output.result.targetSaveType = "FLASH1M";
+    output.result.logicalSaveSizeBytes = 131072;
+    output.result.targetSaveSizeBytes = 131072;
+    output.result.bankSwitchMode = "flash1m";
+  }
+  return output;
 }
 
 function validateFlashSource(input) {
@@ -226,8 +235,11 @@ function validateFlashSource(input) {
     throw new PatchError("This ROM already contains the Direct Save-FLASH backend.");
   }
   const sourceSaveType = findSaveType(input);
-  if (findBytes(input, FLASH1M_MARKER) >= 0 || sourceSaveType?.startsWith("FLASH1M")) {
-    throw new PatchError("512K FLASH is incompatible with 1M FLASH / 128 KiB save games.", {
+  if (sourceSaveType?.startsWith("FLASH1M")) {
+    return { sourceSaveType, output: nativeFlashResult(input, sourceSaveType) };
+  }
+  if (findBytes(input, FLASH1M_MARKER) >= 0) {
+    throw new PatchError("512K/1M FLASH found an unresolved 1M FLASH library conflict.", {
       code: PATCH_REASON_CODE.INCOMPATIBLE_SAVE_SIZE,
       isRecoverable: true,
     });
@@ -237,8 +249,8 @@ function validateFlashSource(input) {
   }
   if (!sourceSaveType || (!sourceSaveType.startsWith("SRAM") && !sourceSaveType.startsWith("EEPROM"))) {
     throw new PatchError(sourceSaveType
-      ? `${sourceSaveType} is not supported by 512K FLASH.`
-      : "512K FLASH could not detect a supported SRAM or EEPROM save type.", {
+      ? `${sourceSaveType} is not supported by 512K/1M FLASH.`
+      : "512K/1M FLASH could not detect a supported SRAM, EEPROM, or native FLASH save type.", {
       code: sourceSaveType
         ? PATCH_REASON_CODE.UNSUPPORTED_SAVE_TYPE
         : PATCH_REASON_CODE.AMBIGUOUS_SAVE_TYPE,

@@ -21,16 +21,21 @@ import {
 } from "../patchers/waitstate-payload.js";
 import { encodeThumbBlToTarget } from "../core/thumb.js";
 import {
+  BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX,
   BATTERYLESS_PAYLOAD_GBATA_HEX,
   BATTERYLESS_PAYLOAD_HEX,
+  BATTERYLESS_PAYLOAD_VISOLY_HEX,
   BATTERYLESS_SIGNATURE_HEX,
   BATTERYLESS_WRITE_HOOKS,
   PATCH_BY_SAVE_TYPE,
   SRAM_CONSTANTS,
+  VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX,
 } from "../patchers/sram-data.js";
 
 const modern = Buffer.from(BATTERYLESS_PAYLOAD_HEX, "hex");
 const gbata = Buffer.from(BATTERYLESS_PAYLOAD_GBATA_HEX, "hex");
+const visoly = Buffer.from(BATTERYLESS_PAYLOAD_VISOLY_HEX, "hex");
+const visolyHelper = Buffer.from(VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX, "hex");
 const selector = SRAM_CONSTANTS.BATTERYLESS_SRAM_BANK_SELECT_PATCHED & ~1;
 const mappedSelector = selector + 22;
 const ramTail = selector + 76;
@@ -173,10 +178,13 @@ assert.equal(modern.readUInt16LE(ramTail), 0x4a05); // load copied mapper litera
 assert.equal(modern.readUInt16LE(ramTail + 2), 0x7010); // modern byte write
 assert.equal(gbata.readUInt16LE(ramTail + 6), 0x8011); // GBATA unlock write
 assert.equal(gbata.readUInt16LE(ramTail + 10), 0x8010); // GBATA bank write
+assert.equal(visoly.readUInt16LE(ramTail + 2), 0x3101); // helper is immediately after tail
+assert.equal(visoly.readUInt16LE(ramTail + 4), 0x4708); // branch to full IWRAM helper
 assert.equal(modern.readUInt16LE(ramTail + 20), 0x4770);
 assert.equal(gbata.readUInt16LE(ramTail + 20), 0x4770);
 assert.equal(modern.readUInt32LE(mapperAddress), 0x09000000);
 assert.equal(gbata.readUInt32LE(mapperAddress), 0x09000000);
+assert.equal(visoly.indexOf(visolyHelper), ramTail + 28);
 
 const resetTransferWord = Buffer.from(
   "044090e40140c1e42444a0e10140c1e42444a0e10140c1e42444a0e10140c1e4",
@@ -187,7 +195,7 @@ const resetTransferByte = Buffer.from("0140d0e40140c1e4", "hex");
 const resetTransferByteBlock = Buffer.concat(
   Array.from({ length: 64 }, () => resetTransferByte),
 );
-for (const [name, payload] of [["modern", modern], ["gbata", gbata]]) {
+for (const [name, payload] of [["modern", modern], ["gbata", gbata], ["visoly", visoly]]) {
   const transferOffset = payload.indexOf(
     resetTransferBlock,
     SRAM_CONSTANTS.BATTERYLESS_INITIALIZE_SRAM & ~3,
@@ -277,10 +285,41 @@ for (const [saveType, expectedFirstInstruction] of [
 
 for (const offset of [0x0c, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x2c, 0x34]) {
   assert.equal(modern.readUInt32LE(offset), gbata.readUInt32LE(offset));
+  assert.equal(modern.readUInt32LE(offset), visoly.readUInt32LE(offset));
 }
 
 assertDiscoverableFromBootVector(modern);
 assertDiscoverableFromBootVector(gbata);
+assertDiscoverableFromBootVector(visoly);
+
+{
+  const patched = patchSramBytes(mapperSpecializationFixture("FLASH1M_V103"), {
+    saveTypeOverride: "FLASH1M_V103",
+    batteryless: true,
+    batterylessMode: "auto",
+    flash1mBankSwitchStyle: "visoly",
+  });
+  assert.equal(patched.result.batteryless.status, "patched");
+  assert.equal(patched.result.batteryless.flash1mBankSwitchStyle, "visoly");
+  assert.equal(patched.result.batteryless.flash1mBankSwitches, 1);
+  const payloadOffset = patched.result.batteryless.payloadOffset;
+  assert.deepEqual(
+    Buffer.from(patched.bytes.slice(
+      payloadOffset + visoly.indexOf(visolyHelper),
+      payloadOffset + visoly.indexOf(visolyHelper) + visolyHelper.length,
+    )),
+    visolyHelper,
+  );
+  const installedThunk = Buffer.from(patched.bytes.slice(0x200, 0x218));
+  assert.equal(
+    installedThunk.subarray(0, 4).toString("hex"),
+    BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX,
+  );
+  assert.equal(
+    installedThunk.readUInt32LE(4),
+    0x08000000 + payloadOffset + SRAM_CONSTANTS.BATTERYLESS_SRAM_BANK_SELECT_PATCHED,
+  );
+}
 
 const originalSource = new Uint8Array(0x20000).fill(0xff);
 const originalBytes = Buffer.from(originalSource.buffer);

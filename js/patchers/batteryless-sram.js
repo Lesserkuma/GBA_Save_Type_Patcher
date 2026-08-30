@@ -2,6 +2,7 @@
 
 import { decodeArmBranchTargetAt, makeArmBranchInstruction } from "../core/arm.js";
 import {
+  bytesToHex,
   cachedHexToBytes,
   findAlignedBytes,
   findBytes,
@@ -25,15 +26,18 @@ import {
 import {
   BATTERYLESS_ARM_BRANCH_THUNK_HEX,
   BATTERYLESS_EEPROM_V111_EPILOGUE_PATCH_HEX,
+  BATTERYLESS_FLASH1M_DIRECT_BANK_SWITCH_PATCH_HEX,
   BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX,
   BATTERYLESS_PAYLOAD_GBATA_HEX,
   BATTERYLESS_PAYLOAD_HEX,
+  BATTERYLESS_PAYLOAD_VISOLY_HEX,
   BATTERYLESS_SIGNATURE_HEX,
   BATTERYLESS_THUMB_BRANCH_THUNK_HEX,
   BATTERYLESS_WRITE_HOOKS,
   FLASH1M_BANK_SWITCH_GBATA_PATCH_HEX,
   FLASH1M_BANK_SWITCH_MODERN_PATCH_HEX,
   SRAM_CONSTANTS,
+  VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX,
 } from "./sram-data.js";
 import {
   alignDown,
@@ -47,6 +51,8 @@ import { buildEepromV12xWriteCompatHook } from "./eeprom-v12x-write-compat.js";
 const C = SRAM_CONSTANTS;
 const BATTERYLESS_PAYLOAD_MODERN = hexToBytes(BATTERYLESS_PAYLOAD_HEX);
 const BATTERYLESS_PAYLOAD_GBATA = hexToBytes(BATTERYLESS_PAYLOAD_GBATA_HEX);
+const BATTERYLESS_PAYLOAD_VISOLY = hexToBytes(BATTERYLESS_PAYLOAD_VISOLY_HEX);
+const VISOLY_SRAM_BANK_SWITCH_PAYLOAD = hexToBytes(VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX);
 const BATTERYLESS_PAYLOAD = BATTERYLESS_PAYLOAD_MODERN;
 const BATTERYLESS_SIGNATURE = hexToBytes(BATTERYLESS_SIGNATURE_HEX);
 const BATTERYLESS_THUMB_BRANCH_THUNK = hexToBytes(BATTERYLESS_THUMB_BRANCH_THUNK_HEX);
@@ -54,18 +60,22 @@ const BATTERYLESS_ARM_BRANCH_THUNK = hexToBytes(BATTERYLESS_ARM_BRANCH_THUNK_HEX
 const BATTERYLESS_EEPROM_V111_EPILOGUE_PATCH = hexToBytes(BATTERYLESS_EEPROM_V111_EPILOGUE_PATCH_HEX);
 const BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK = hexToBytes(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX);
 export const FLASH1M_BANK_SWITCH_STYLE_MODERN = "modern";
-const FLASH1M_BANK_SWITCH_STYLE_GBATA = "gbata";
+export const FLASH1M_BANK_SWITCH_STYLE_GBATA = "gbata";
+export const FLASH1M_BANK_SWITCH_STYLE_VISOLY = "visoly";
 const BATTERYLESS_LAST_BLOCK_USABLE = "usable";
 export const BATTERYLESS_LAST_BLOCK_KEEP_EMPTY = "keep-empty";
 const FLASH1M_BANK_SWITCH_PATCH_HEX_BY_STYLE = {
   [FLASH1M_BANK_SWITCH_STYLE_MODERN]: FLASH1M_BANK_SWITCH_MODERN_PATCH_HEX,
   [FLASH1M_BANK_SWITCH_STYLE_GBATA]: FLASH1M_BANK_SWITCH_GBATA_PATCH_HEX,
+  [FLASH1M_BANK_SWITCH_STYLE_VISOLY]: BATTERYLESS_FLASH1M_DIRECT_BANK_SWITCH_PATCH_HEX,
 };
 const FLASH1M_BANK_SWITCH_MODERN_PATCH = hexToBytes(FLASH1M_BANK_SWITCH_MODERN_PATCH_HEX);
 const FLASH1M_BANK_SWITCH_GBATA_PATCH = hexToBytes(FLASH1M_BANK_SWITCH_GBATA_PATCH_HEX);
+const FLASH1M_BANK_SWITCH_DIRECT_PATCH = hexToBytes(BATTERYLESS_FLASH1M_DIRECT_BANK_SWITCH_PATCH_HEX);
 const FLASH1M_BANK_SWITCH_PATCHES = [
   FLASH1M_BANK_SWITCH_MODERN_PATCH,
   FLASH1M_BANK_SWITCH_GBATA_PATCH,
+  FLASH1M_BANK_SWITCH_DIRECT_PATCH,
 ];
 const FLASH1M_SWITCH_BANK_CODE_NAMES = new Set([
   "flash1m_v102_switch_bank",
@@ -75,15 +85,20 @@ const FLASH1M_SRAM_BANK_SELECT_ROM_OFFSET = 0x01000000;
 const BATTERYLESS_PAYLOAD_BY_STYLE = {
   [FLASH1M_BANK_SWITCH_STYLE_MODERN]: BATTERYLESS_PAYLOAD_MODERN,
   [FLASH1M_BANK_SWITCH_STYLE_GBATA]: BATTERYLESS_PAYLOAD_GBATA,
+  [FLASH1M_BANK_SWITCH_STYLE_VISOLY]: BATTERYLESS_PAYLOAD_VISOLY,
 };
 export function normalizeFlash1mBankSwitchStyle(style) {
-  return style === FLASH1M_BANK_SWITCH_STYLE_GBATA
-    ? FLASH1M_BANK_SWITCH_STYLE_GBATA
-    : FLASH1M_BANK_SWITCH_STYLE_MODERN;
+  if (style === FLASH1M_BANK_SWITCH_STYLE_GBATA) return FLASH1M_BANK_SWITCH_STYLE_GBATA;
+  if (style === FLASH1M_BANK_SWITCH_STYLE_VISOLY) return FLASH1M_BANK_SWITCH_STYLE_VISOLY;
+  return FLASH1M_BANK_SWITCH_STYLE_MODERN;
 }
 
 export function batterylessPayloadForStyle(style) {
   return BATTERYLESS_PAYLOAD_BY_STYLE[normalizeFlash1mBankSwitchStyle(style)];
+}
+
+export function visolySramBankSwitchPayload() {
+  return new Uint8Array(VISOLY_SRAM_BANK_SWITCH_PAYLOAD);
 }
 
 export function batterylessBootVectorOffset(payload = BATTERYLESS_PAYLOAD) {
@@ -109,11 +124,26 @@ function isFlash1mSwitchBankWrite(writeInfo) {
   return FLASH1M_SWITCH_BANK_CODE_NAMES.has(writeInfo?.code_name);
 }
 
-export function resolveFlash1mBankSwitchWriteInfo(writeInfo, style) {
+export function makeFlash1mBankSwitchThunk(targetAddress) {
+  const patch = new Uint8Array(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4 + 16);
+  patch.set(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK);
+  writeU32(patch, BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length, targetAddress >>> 0);
+  for (let i = BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4; i < patch.length; i += 2) {
+    patch[i] = 0xc0;
+    patch[i + 1] = 0x46;
+  }
+  return patch;
+}
+
+export function resolveFlash1mBankSwitchWriteInfo(writeInfo, style, targetAddress = null) {
   if (!isFlash1mSwitchBankWrite(writeInfo)) return writeInfo;
+  const normalizedStyle = normalizeFlash1mBankSwitchStyle(style);
+  if (normalizedStyle === FLASH1M_BANK_SWITCH_STYLE_VISOLY && Number.isInteger(targetAddress)) {
+    return { ...writeInfo, hex: bytesToHex(makeFlash1mBankSwitchThunk(targetAddress)) };
+  }
   return {
     ...writeInfo,
-    hex: FLASH1M_BANK_SWITCH_PATCH_HEX_BY_STYLE[normalizeFlash1mBankSwitchStyle(style)],
+    hex: FLASH1M_BANK_SWITCH_PATCH_HEX_BY_STYLE[normalizedStyle],
   };
 }
 
@@ -500,13 +530,7 @@ function patchBatterylessWriteHooks(
 function patchBatterylessFlash1mBankSwitch(out, payloadBase, saveType, operations, prefixSize = 0, payload = BATTERYLESS_PAYLOAD) {
   if (!saveType || !saveType.startsWith("FLASH1M")) return 0;
   const targetAddress = (C.GBA_ROM_BASE + payloadBase + C.BATTERYLESS_SRAM_BANK_SELECT_PATCHED) >>> 0;
-  const patch = new Uint8Array(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4 + 16);
-  patch.set(BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK);
-  writeU32(patch, BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length, targetAddress);
-  for (let i = BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK.length + 4; i < patch.length; i += 2) {
-    patch[i] = 0xc0;
-    patch[i + 1] = 0x46;
-  }
+  const patch = makeFlash1mBankSwitchThunk(targetAddress);
   for (const directPatch of FLASH1M_BANK_SWITCH_PATCHES) {
     if (patch.length !== directPatch.length) throw new PatchError("Batteryless SRAM: FLASH1M bank-switch patch has the wrong length");
   }

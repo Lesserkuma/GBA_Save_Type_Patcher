@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only AND MIT
 
 /*
- * Direct 64 KiB Save-FLASH backend for GBA Save Type Patcher.
+ * Direct Save-FLASH backend with a 64 KiB physical layout for
+ * GBA Save Type Patcher. The standard protocol supports native 512-Kbit
+ * chips and the bank-zero half of native 1-Mbit GBA chips.
  *
  * The low-level command protocol is derived from
  * metroid-maniac/gba-flash-patcher (MIT). Custom Type 1/2 command handling
@@ -31,6 +33,10 @@
 #define EWRAM_END 0x02040000u
 #define SAVE_MAGIC_0 0x5555u
 #define SAVE_MAGIC_1 0x2AAAu
+#define FLASH_MAKER_MACRONIX 0xC2u
+#define FLASH_DEVICE_MX29L010 0x09u
+#define FLASH_MAKER_SANYO 0x62u
+#define FLASH_DEVICE_LE26FV10N1TS 0x13u
 #define SECTOR_SIZE 0x1000u
 #define SRAM_LOGICAL_SIZE 0x8000u
 #define SRAM_HEADER_BASE 0x8000u
@@ -309,11 +315,6 @@ static FlashReadFn flash_range_reader_on_stack(FlashReaderStorage *storage)
     return storage;
 }
 
-static FlashReadFn flash_reader_on_stack(FlashReaderStorage *storage)
-{
-    return flash_range_reader_on_stack(flash_byte_reader_on_stack(storage));
-}
-
 #ifndef DIRECT_SNAPSHOT_BUILD
 static uint32_t sram_probe_fill_blank_zero(FlashReaderStorage *storage,
                                            uint32_t first,
@@ -366,6 +367,58 @@ static void flash_cleanup(void)
                     == SAVE_PROTOCOL_CUSTOM_TYPE_2) {
         *(volatile uint8_t *)GBA_SRAM_BANK_SELECT_ADDRESS = 0;
     }
+}
+
+static uint32_t flash_is_native_1m(FlashReadFn reader)
+{
+    volatile uint8_t *save = (volatile uint8_t *)SAVE_BASE;
+    uint8_t maker;
+    uint8_t device;
+
+    save[SAVE_MAGIC_0] = 0xAAu;
+    save[SAVE_MAGIC_1] = 0x55u;
+    save[SAVE_MAGIC_0] = 0x90u;
+    maker = flash_read(reader, 0u);
+    device = flash_read(reader, 1u);
+
+    /* Use both JEDEC reset forms used by Nintendo's native FLASH library. */
+    save[SAVE_MAGIC_0] = 0xAAu;
+    save[SAVE_MAGIC_1] = 0x55u;
+    save[SAVE_MAGIC_0] = 0xF0u;
+    save[SAVE_MAGIC_0] = 0xF0u;
+
+    return (maker == FLASH_MAKER_MACRONIX
+            && device == FLASH_DEVICE_MX29L010)
+        || (maker == FLASH_MAKER_SANYO
+            && device == FLASH_DEVICE_LE26FV10N1TS);
+}
+
+/*
+ * The GBA exposes one 64-KiB Save aperture. Native 1-Mbit chips place the
+ * second half behind the standard AA/55/B0 bank command. The Direct layouts
+ * intentionally occupy only the first half, so identify genuine 1-Mbit
+ * hardware and restore bank zero before every public read/write/verify call.
+ * A 512-Kbit chip never receives the bank command.
+ */
+static FlashReadFn flash_prepare_reader(FlashReadFn reader)
+{
+    volatile uint8_t *save = (volatile uint8_t *)SAVE_BASE;
+    if (!reader || direct_save_protocol_config != SAVE_PROTOCOL_STANDARD)
+        return reader;
+    flash_cleanup();
+    if (!flash_is_native_1m(reader))
+        return reader;
+    save[SAVE_MAGIC_0] = 0xAAu;
+    save[SAVE_MAGIC_1] = 0x55u;
+    save[SAVE_MAGIC_0] = 0xB0u;
+    save[0] = 0u;
+    return reader;
+}
+
+static FlashReadFn flash_reader_on_stack(FlashReaderStorage *storage)
+{
+    return flash_prepare_reader(
+        flash_range_reader_on_stack(flash_byte_reader_on_stack(storage)));
 }
 
 /* Command loads and busy polling preserve the caller's exact IRQ state. */
@@ -3586,7 +3639,8 @@ uint32_t read_sram_cached_patched(uint8_t *source, uint8_t *destination,
 #ifdef DIRECT_SNAPSHOT_BUILD
     reader = snapshot_persistent_reader();
 #else
-    reader = flash_byte_reader_on_stack(&reader_storage);
+    reader = flash_prepare_reader(
+        flash_byte_reader_on_stack(&reader_storage));
 #endif
     if (!direct_config_matches(SAVE_LAYOUT_SRAM)
         || first > SRAM_LOGICAL_SIZE || size > SRAM_LOGICAL_SIZE - first)

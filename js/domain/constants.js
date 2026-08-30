@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-export const APP_VERSION = "1.11";
-export const WORKER_PROTOCOL_VERSION = 4;
+export const APP_VERSION = "1.12";
+export const WORKER_PROTOCOL_VERSION = 5;
 
 export {
   GBA_MAX_ROM_SIZE_BYTES,
@@ -106,6 +106,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   rtc: Object.freeze({
     enabled: false,
     tickMode: RTC_TICK_MODES.VBLANK,
+    showMenuOnBoot: true,
     saveOnGlobalHotkey: true,
   }),
 });

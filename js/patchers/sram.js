@@ -8,7 +8,7 @@ import {
 import { PatchError } from "../core/errors.js";
 import { addPrefixGuardToRanges, findTailBlankRegion } from "../core/ranges.js";
 import { GBA_PAYLOAD_PLACEMENT_LIMIT_BYTES } from "../domain/gba-constants.js";
-import { PATCH_REASON_CODE } from "../domain/constants.js";
+import { PATCH_OPERATION_KIND, PATCH_REASON_CODE } from "../domain/constants.js";
 import { applyWaitstateForPipeline, planWaitstateForLayout } from "./waitstate.js";
 import {
   applyRtcForPipeline,
@@ -16,6 +16,7 @@ import {
   RTC_PAYLOAD_SIZE,
   RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG,
   RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG,
+  RTC_PERSISTENCE_VISOLY_MAPPER_CLEANUP_FLAG,
 } from "./rtc.js";
 import { applyIrqHandlerForPipeline, IRQ_HANDLER_PAYLOAD_SIZE, irqHandlerPayloadSpanForLayout } from "./irq-handler.js";
 import { applyPatchHeaderMarker, makePatchHeaderFlags, PATCH_SAVE_MEDIUM, updateGbaHeaderChecksum } from "./patch-state.js";
@@ -23,13 +24,14 @@ import {
   PATCH_BY_SAVE_TYPE,
   SRAM_CONSTANTS,
 } from "./sram-data.js";
-import { alignedPayloadSpan } from "./payload-placement.js";
+import { alignedPayloadSpan, ensureDirectPayloadRegion } from "./payload-placement.js";
 import { ensureStandaloneRtcPersistenceLayout } from "./rtc-persistence-placement.js";
 import { findStartupRomCopySourceRanges } from "./startup-rom-copy-ranges.js";
 import { detectRomSaveMetadata, findSaveType } from "./save-type.js";
 import {
   BATTERYLESS_LAST_BLOCK_KEEP_EMPTY,
   FLASH1M_BANK_SWITCH_STYLE_MODERN,
+  FLASH1M_BANK_SWITCH_STYLE_VISOLY,
   applyBatterylessPatch,
   batterylessPatchExcludedRanges,
   batterylessPayloadForStyle,
@@ -43,8 +45,9 @@ import {
   rangeForSpan,
   routeBatterylessBootVector,
   resolveFlash1mBankSwitchWriteInfo,
+  visolySramBankSwitchPayload,
 } from "./batteryless-sram.js";
-import { writeSramCode, writeSramU32Value } from "./sram-common.js";
+import { stageSramWrite, writeSramCode, writeSramU32Value } from "./sram-common.js";
 
 const C = SRAM_CONSTANTS;
 const firstBytePatternCache = new Map();
@@ -112,11 +115,21 @@ function planSimplePatch(data, patchInfo, warnings) {
   return { ok: true, steps };
 }
 
-function applySimplePatch(out, plan, operations, flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN) {
+function applySimplePatch(
+  out,
+  plan,
+  operations,
+  flash1mBankSwitchStyle = FLASH1M_BANK_SWITCH_STYLE_MODERN,
+  flash1mBankSwitchTarget = null,
+) {
   for (const { step, matchOffsets } of plan.steps) {
     for (const matchOffset of matchOffsets) {
       for (const writeInfo of step.writes) {
-        const resolvedWriteInfo = resolveFlash1mBankSwitchWriteInfo(writeInfo, flash1mBankSwitchStyle);
+        const resolvedWriteInfo = resolveFlash1mBankSwitchWriteInfo(
+          writeInfo,
+          flash1mBankSwitchStyle,
+          flash1mBankSwitchTarget,
+        );
         writeSramCode(out, matchOffset + (resolvedWriteInfo.target_add || 0), resolvedWriteInfo, operations, step.name);
       }
     }
@@ -238,6 +251,9 @@ function createSramPatchContext(inputBytes, options) {
     rtcPersistenceExcludedRanges: [],
     rtcPersistenceBlockOffset: null,
     rtcPersistenceRange: null,
+    visolyBankSwitchPayloadOffset: null,
+    visolyBankSwitchTarget: null,
+    visolyBankSwitchExcludedRanges: [],
     skipSavePatch: false,
     sramPatchApplied: false,
     savePatchReasonCode: null,
@@ -273,7 +289,47 @@ function payloadPlacementExcludedRanges(context) {
   return [
     ...context.waitstateFixedWriteRanges,
     ...context.startupRomCopySourceRanges,
+    ...context.visolyBankSwitchExcludedRanges,
   ];
+}
+
+function installVisolyBankSwitchPayload(context) {
+  if (
+    context.batteryless
+    || context.flash1mBankSwitchStyle !== FLASH1M_BANK_SWITCH_STYLE_VISOLY
+    || !context.saveType?.startsWith("FLASH1M")
+  ) return true;
+
+  const payload = visolySramBankSwitchPayload();
+  const payloadSpan = alignedPayloadSpan(payload.length);
+  const payloadOffset = ensureDirectPayloadRegion(
+    context.rom,
+    context.operations,
+    context.warnings,
+    payloadSpan,
+    "Visoly/F2A SRAM bank switch",
+    payloadPlacementExcludedRanges(context),
+  );
+  if (payloadOffset === null) {
+    context.savePatchReasonCode = PATCH_REASON_CODE.ROM_CAPACITY;
+    return false;
+  }
+
+  stageSramWrite(
+    context.rom.bytes,
+    context.operations,
+    "Visoly/F2A SRAM bank-switch payload",
+    payloadOffset,
+    payload,
+    {
+      kind: PATCH_OPERATION_KIND.PAYLOAD_INSTALL,
+      codeName: "visoly_sram_bank_switch_payload",
+    },
+  );
+  context.visolyBankSwitchPayloadOffset = payloadOffset;
+  context.visolyBankSwitchTarget = (C.GBA_ROM_BASE + payloadOffset + 1) >>> 0;
+  context.visolyBankSwitchExcludedRanges = [[payloadOffset, payloadOffset + payloadSpan]];
+  return true;
 }
 
 function unsupportedSramResult(context, saveType) {
@@ -477,6 +533,7 @@ function applySaveConversion(context) {
       context.savePatchPlan,
       context.operations,
       context.flash1mBankSwitchStyle,
+      context.visolyBankSwitchTarget,
     );
   } else if (context.patchInfo.type === "tail_trampoline") {
     const excluded = [
@@ -484,6 +541,7 @@ function applySaveConversion(context) {
       ...context.rtcExcludedRanges,
       ...context.waitstateExcludedRanges,
       ...context.irqHandlerExcludedRanges,
+      ...context.visolyBankSwitchExcludedRanges,
     ];
     applied = applyTailTrampolinePatch(
       context.rom.bytes,
@@ -590,6 +648,7 @@ function applyRtcAndBatteryless(context) {
           ...context.waitstateExcludedRanges,
           ...context.irqHandlerExcludedRanges,
           ...context.rtcPersistenceExcludedRanges,
+          ...context.visolyBankSwitchExcludedRanges,
         ],
         persistenceBlockOffset: context.rtcPersistenceEnabled
           ? (context.batterylessPayloadOffset === null
@@ -599,7 +658,9 @@ function applyRtcAndBatteryless(context) {
         persistenceFlags: context.rtcPersistenceEnabled
           ? (context.flash1mBankSwitchStyle === FLASH1M_BANK_SWITCH_STYLE_MODERN
             ? RTC_PERSISTENCE_MAPPER_CLEANUP_FLAG
-            : 0)
+            : context.flash1mBankSwitchStyle === FLASH1M_BANK_SWITCH_STYLE_VISOLY
+              ? RTC_PERSISTENCE_VISOLY_MAPPER_CLEANUP_FLAG
+              : 0)
             | (context.batterylessPayloadOffset !== null
               ? RTC_PERSISTENCE_SHARED_SAVE_AREA_FLAG
               : 0)
@@ -666,6 +727,7 @@ function applySramWaitstate(context) {
         ...context.rtcExcludedRanges,
         ...context.irqHandlerExcludedRanges,
         ...context.rtcPersistenceExcludedRanges,
+        ...context.visolyBankSwitchExcludedRanges,
       ],
       waitstatePayloadOffset: context.waitstatePayloadOffset,
       batterylessPayloadOffset: context.batterylessPayloadOffset,
@@ -682,6 +744,7 @@ function irqExcludedRanges(context) {
     ...context.waitstateExcludedRanges,
     ...context.irqHandlerExcludedRanges,
     ...context.rtcPersistenceExcludedRanges,
+    ...context.visolyBankSwitchExcludedRanges,
   ];
   if (context.batterylessResult?.payloadOffset !== undefined
       && context.batterylessResult?.payloadOffset !== null) {
@@ -815,6 +878,7 @@ export function patchSramBytes(inputBytes, options = {}) {
   if (unsupported) return unsupported;
   if (!planSaveConversion(context)) return atomicSaveConversionFailure(context);
   if (!planBatterylessLayout(context)) return atomicSaveConversionFailure(context);
+  if (!installVisolyBankSwitchPayload(context)) return atomicSaveConversionFailure(context);
   if (!applySaveConversion(context)) return atomicSaveConversionFailure(context);
   planNonBatterylessAddons(context);
   applyRtcAndBatteryless(context);

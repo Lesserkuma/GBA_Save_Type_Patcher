@@ -14,6 +14,8 @@ OUTPUT = PROJECT_ROOT / "js" / "generated" / "payload-manifests.js"
 ARTIFACTS = (
     ("batterylessSram", "batteryless-sram", "GPL-3.0-or-later AND MIT", "js/patchers/sram-data.js", "BATTERYLESS_PAYLOAD_HEX"),
     ("batterylessSramGbata", "batteryless-sram-gbata", "GPL-3.0-or-later AND MIT", "js/patchers/sram-data.js", "BATTERYLESS_PAYLOAD_GBATA_HEX"),
+    ("batterylessSramVisoly", "batteryless-sram-visoly", "GPL-3.0-or-later AND MIT", "js/patchers/sram-data.js", "BATTERYLESS_PAYLOAD_VISOLY_HEX"),
+    ("visolySramBankSwitch", "visoly-sram-bank-switch", "GPL-3.0-or-later AND MIT", "js/patchers/sram-data.js", "VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX"),
     ("flashDirect", "flash-direct", "GPL-3.0-only AND MIT", "js/patchers/flash-direct-data.js", "FLASH_DIRECT_PAYLOAD_HEX"),
     ("flashDirectSnapshot", "flash-direct-snapshot", "GPL-3.0-only AND MIT", "js/patchers/flash-direct-snapshot-data.js", "FLASH_DIRECT_PAYLOAD_HEX"),
     ("flashDirectTransaction", "flash-direct-transaction", "GPL-3.0-only AND MIT", "js/patchers/flash-direct-transaction-data.js", "FLASH_DIRECT_PAYLOAD_HEX"),

@@ -26,10 +26,37 @@
 
 #define SRAM_BANK_SWITCH_STYLE_MODERN 0
 #define SRAM_BANK_SWITCH_STYLE_GBATA 1
+#define SRAM_BANK_SWITCH_STYLE_VISOLY 2
 #ifndef SRAM_BANK_SWITCH_STYLE
 #define SRAM_BANK_SWITCH_STYLE SRAM_BANK_SWITCH_STYLE_MODERN
 #endif
 
+#if SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_VISOLY
+typedef void (*SramBankSelectFn)(unsigned bank_no);
+#define SRAM_BANK_SELECT_PARAMS_0 \
+    unsigned unused0 __attribute__((unused)), \
+    unsigned unused1 __attribute__((unused)), \
+    SramBankSelectFn bank_selector __attribute__((unused))
+#define SRAM_BANK_SELECT_PARAMS_2 \
+    , SramBankSelectFn bank_selector __attribute__((unused))
+static inline __attribute__((always_inline)) void sram_bank_select_indirect(
+    SramBankSelectFn bank_selector,
+    unsigned bank_no)
+{
+    register unsigned call_bank asm("r0") = bank_no;
+    register SramBankSelectFn call_target asm("r3") = bank_selector;
+    __asm volatile(
+        "mov lr, pc\n"
+        "bx r3\n"
+        : "+r"(call_bank), "+r"(call_target)
+        :
+        : "r1", "r2", "lr", "cc", "memory");
+}
+#define SRAM_BANK_SELECT(bank_no) sram_bank_select_indirect(bank_selector, bank_no)
+#define SRAM_BANK_RESELECT_AFTER_FLASH(bank_no) ((void)(bank_no))
+#else
+#define SRAM_BANK_SELECT_PARAMS_0 void
+#define SRAM_BANK_SELECT_PARAMS_2
 static inline void sram_bank_select(unsigned bank_no)
 {
 #if SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_GBATA
@@ -39,6 +66,9 @@ static inline void sram_bank_select(unsigned bank_no)
     SRAM_BANK_SEL8 = (unsigned char)bank_no;
 #endif
 }
+#define SRAM_BANK_SELECT(bank_no) sram_bank_select(bank_no)
+#define SRAM_BANK_RESELECT_AFTER_FLASH(bank_no) SRAM_BANK_SELECT(bank_no)
+#endif
 
 #if SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_GBATA
 #define SRAM_BANK_SELECT_THUMB_RAM_ASM R"(
@@ -47,6 +77,16 @@ static inline void sram_bank_select(unsigned bank_no)
     strh r1, [r2]
     lsl r0, # 11
     strh r0, [r2]
+)"
+#elif SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_VISOLY
+#define SRAM_BANK_SELECT_THUMB_RAM_ASM R"(
+    # At the end of the copy loop r1 points at the standalone Visoly helper
+    # immediately following this fixed-size tail in Game Pak ROM.
+    add r1, # 1
+    bx r1
+    nop
+    nop
+    nop
 )"
 #else
 #define SRAM_BANK_SELECT_THUMB_RAM_ASM R"(
@@ -57,6 +97,56 @@ static inline void sram_bank_select(unsigned bank_no)
     nop
     nop
     nop
+)"
+#endif
+
+#if SRAM_BANK_SWITCH_STYLE == SRAM_BANK_SWITCH_STYLE_VISOLY
+#define SRAM_DRIVER_WORKSPACE_START_ASM R"(
+    # Visoly protected commands must execute from IWRAM. Scan downward from
+    # the top while retaining the normal stack/DMA collision checks.
+    ldr r9, =0x03007e00
+)"
+#define SRAM_DRIVER_WORKSPACE_FLOOR_ASM R"(
+    ldr r0, =0x03000000
+)"
+#define SRAM_DRIVER_SELECTOR_ARGUMENT_ASM R"(
+    ldr r2, 1f
+    b 2f
+    .balign 4
+1:  .word sram_bank_select_payload_entry + 1
+2:
+)"
+#define SRAM_DRIVER_STACK_BOUNDS_ASM R"(
+    ldr r5, =0x030001e8
+    cmp r4, r5
+    blo run_from_stack_invalid
+    ldr r5, =0x03008000
+    cmp r4, r5
+    bhs run_from_stack_invalid
+)"
+#else
+#define SRAM_DRIVER_WORKSPACE_START_ASM R"(
+    ldr r9, =0x0203fe00
+)"
+#define SRAM_DRIVER_WORKSPACE_FLOOR_ASM R"(
+    ldr r0, =0x02000000
+)"
+#define SRAM_DRIVER_SELECTOR_ARGUMENT_ASM R"(
+)"
+#define SRAM_DRIVER_STACK_BOUNDS_ASM R"(
+    ldr r5, =0x020001e8
+    cmp r4, r5
+    blo run_from_stack_check_iwram
+    ldr r5, =0x02040000
+    cmp r4, r5
+    blo run_from_stack_bounds_ok
+run_from_stack_check_iwram:
+    ldr r5, =0x030001e8
+    cmp r4, r5
+    blo run_from_stack_invalid
+    ldr r5, =0x03008000
+    cmp r4, r5
+    bhs run_from_stack_invalid
 )"
 #endif
 
@@ -195,6 +285,144 @@ sram_bank_select_tail_start:
 sram_bank_select_tail_address:
     .word 0x09000000
 sram_bank_select_tail_end:
+
+# The Visoly/F2A mapper needs its complete one-shot unlock sequence to execute
+# from IWRAM. This position-independent helper is also exported as a small
+# standalone payload for the regular (battery-backed) SRAM patch.
+.global visoly_sram_bank_switch_payload_start
+.type visoly_sram_bank_switch_payload_start, %function
+visoly_sram_bank_switch_payload_start:
+    # Preserve the registers that the original Nintendo selector preserved.
+    # r1/r2 and condition flags remain caller-clobbered, matching the existing
+    # modern and GBATA replacements.
+    push {r3, r4, r5}
+    push {lr}
+
+    # Standard GBA user/system stacks live in IWRAM. Refuse to issue a partial
+    # unlock sequence if an unusual caller provides an EWRAM or invalid stack.
+    mov r3, sp
+    ldr r1, visoly_iwram_stack_min
+    cmp r3, r1
+    blo visoly_sram_bank_switch_return
+    ldr r1, visoly_iwram_stack_end
+    cmp r3, r1
+    bhs visoly_sram_bank_switch_return
+
+    # Copy code plus its literal table before disabling IME. No protected
+    # command has been issued yet, so Game Pak fetches are still harmless.
+    sub sp, # 132
+    adr r1, visoly_sram_bank_switch_ram_start
+    mov r2, sp
+    mov r3, # visoly_sram_bank_switch_ram_end - visoly_sram_bank_switch_ram_start
+visoly_sram_bank_switch_copy_loop:
+    ldrb r4, [r1]
+    strb r4, [r2]
+    add r1, # 1
+    add r2, # 1
+    sub r3, # 1
+    bne visoly_sram_bank_switch_copy_loop
+
+    ldr r4, visoly_ime_address
+    ldrh r5, [r4]
+    mov r1, # 0
+    strh r1, [r4]
+    mov r3, sp
+    add r3, # 1
+    bl visoly_sram_bank_switch_bx_r3
+    ldr r4, visoly_ime_address
+    strh r5, [r4]
+    add sp, # 132
+
+visoly_sram_bank_switch_return:
+    pop {r3}
+    mov lr, r3
+    pop {r3, r4, r5}
+    bx lr
+
+visoly_sram_bank_switch_bx_r3:
+    bx r3
+
+.balign 4
+visoly_iwram_stack_min:
+    .word 0x03000084
+visoly_iwram_stack_end:
+    .word 0x03008000
+visoly_ime_address:
+    .word 0x04000208
+
+.balign 4
+visoly_sram_bank_switch_ram_start:
+    # The shared delay routine uses BL. Keep the selector's return address in
+    # caller-clobbered r12 until the protected sequence has completed.
+    mov r12, lr
+    ldr r4, visoly_address_0802468a
+
+    ldr r1, visoly_address_0930eca8
+    ldr r2, visoly_value_5354
+    strh r2, [r1]
+
+    ldr r2, visoly_value_1234
+    strh r2, [r4]
+    bl visoly_delay_2000_nops
+
+    ldr r1, visoly_address_0800eca8
+    ldr r2, visoly_value_5354
+    strh r2, [r1]
+    strh r2, [r4]
+
+    ldr r2, visoly_value_5678
+    strh r2, [r4]
+    bl visoly_delay_2000_nops
+
+    ldr r1, visoly_address_0930eca8
+    ldr r2, visoly_value_5354
+    strh r2, [r1]
+    strh r2, [r4]
+
+    ldr r1, visoly_address_08eca800
+    ldr r2, visoly_value_5678
+    strh r2, [r1]
+    ldr r1, visoly_address_080268a0
+    ldr r2, visoly_value_1234
+    strh r2, [r1]
+
+    ldr r2, visoly_value_abcd
+    strh r2, [r4]
+    bl visoly_delay_2000_nops
+
+    ldr r1, visoly_address_0930eca8
+    ldr r2, visoly_value_5354
+    strh r2, [r1]
+    ldr r1, visoly_address_0942468a
+    mov r2, # 3
+    and r0, r2
+    strh r0, [r1]
+    bx r12
+
+visoly_delay_2000_nops:
+    mov r3, # 125
+    lsl r3, # 4
+visoly_delay_2000_nops_loop:
+    nop
+    sub r3, # 1
+    bne visoly_delay_2000_nops_loop
+    bx lr
+
+.balign 4
+visoly_address_0802468a: .word 0x0802468a
+visoly_address_0930eca8: .word 0x0930eca8
+visoly_address_0800eca8: .word 0x0800eca8
+visoly_address_08eca800: .word 0x08eca800
+visoly_address_080268a0: .word 0x080268a0
+visoly_address_0942468a: .word 0x0942468a
+visoly_value_5354: .word 0x00005354
+visoly_value_1234: .word 0x00001234
+visoly_value_5678: .word 0x00005678
+visoly_value_abcd: .word 0x0000abcd
+visoly_sram_bank_switch_ram_end:
+
+.global visoly_sram_bank_switch_payload_end
+visoly_sram_bank_switch_payload_end:
 
 .ltorg
 
@@ -979,12 +1207,12 @@ run_from_ram:
     cmp r11, # 0x100
     bhi run_from_ram_invalid
 
-    ldr r9, =0x0203fe00
+)" SRAM_DRIVER_WORKSPACE_START_ASM R"(
 run_from_ram_find_workspace:
     bl run_from_ram_candidate_valid
     cmp r0, # 0
     bne run_from_ram_revalidate_workspace
-    ldr r0, =0x02000000
+)" SRAM_DRIVER_WORKSPACE_FLOOR_ASM R"(
     cmp r9, r0
     beq run_from_ram_stack_fallback
     sub r9, r9, # 0x200
@@ -1033,9 +1261,10 @@ run_from_ram_copy_workspace:
     add sp, r9, # 0x200
     mov r0, r4
     mov r1, r5
-    add r2, r9, # 1
+)" SRAM_DRIVER_SELECTOR_ARGUMENT_ASM R"(
+    add r3, r9, # 1
     mov lr, pc
-    bx r2
+    bx r3
     mov sp, r11
     mov r11, r0
 
@@ -1071,7 +1300,7 @@ run_from_ram_verify_restore:
     bx lr
 
 run_from_ram_next_workspace:
-    ldr r0, =0x02000000
+)" SRAM_DRIVER_WORKSPACE_FLOOR_ASM R"(
     cmp r9, r0
     beq run_from_ram_stack_fallback
     sub r9, r9, # 0x200
@@ -1099,6 +1328,22 @@ run_from_ram_candidate_valid:
     cmp r8, r0
     blo run_from_ram_candidate_dma
     ldr r0, =0x02040000
+    cmp r8, r0
+    bhs run_from_ram_candidate_check_iwram
+    ldr r0, =0x1000
+    sub r1, r8, r0
+    add r2, r8, # 0x100
+    cmp r12, r1
+    bls run_from_ram_candidate_dma
+    cmp r9, r2
+    blo run_from_ram_candidate_bad
+    b run_from_ram_candidate_dma
+
+run_from_ram_candidate_check_iwram:
+    ldr r0, =0x03000000
+    cmp r8, r0
+    blo run_from_ram_candidate_dma
+    ldr r0, =0x03008000
     cmp r8, r0
     bhs run_from_ram_candidate_dma
     ldr r0, =0x1000
@@ -1158,19 +1403,7 @@ run_from_stack:
     push {r4, r5, r6, r7, r8, lr}
     mov r4, sp
 
-    ldr r5, =0x020001e8
-    cmp r4, r5
-    blo run_from_stack_check_iwram
-    ldr r5, =0x02040000
-    cmp r4, r5
-    blo run_from_stack_bounds_ok
-run_from_stack_check_iwram:
-    ldr r5, =0x030001e8
-    cmp r4, r5
-    blo run_from_stack_invalid
-    ldr r5, =0x03008000
-    cmp r4, r5
-    bhs run_from_stack_invalid
+)" SRAM_DRIVER_STACK_BOUNDS_ASM R"(
 
 run_from_stack_bounds_ok:
     bic sp, sp, # 7
@@ -1200,6 +1433,7 @@ run_from_stack_write_guard:
     cmp r8, # 8
     blo run_from_stack_write_guard
 
+)" SRAM_DRIVER_SELECTOR_ARGUMENT_ASM R"(
     add r12, sp, # 1
     mov lr, pc
     bx r12
@@ -1228,14 +1462,14 @@ run_from_stack_invalid:
     bx lr
 )");
 
-int identify_flash_1()
+int identify_flash_1(SRAM_BANK_SELECT_PARAMS_0)
 {
     unsigned rom_data, data;
     // stop_dma_interrupts();
 
     /* The preceding game write may leave either SRAM mapper bank selected.
      * Normalize it while this routine is already executing from RAM. */
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
 
     /* Intel status errors are sticky until Clear Status or hardware reset. */
     _FLASH_WRITE(0, 0x50);
@@ -1270,9 +1504,9 @@ int identify_flash_1()
     }
     return 0;
 }
-asm("identify_flash_1_end:");
+asm(".balign 4\nidentify_flash_1_end:");
 
-int erase_flash_1(unsigned sa, unsigned save_size)
+int erase_flash_1(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
     volatile unsigned timeout;
     unsigned status;
@@ -1306,12 +1540,12 @@ int erase_flash_1(unsigned sa, unsigned save_size)
         }
     }
 
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
     return result;
 }
-asm("erase_flash_1_end:");
+asm(".balign 4\nerase_flash_1_end:");
 
-int program_flash_1(unsigned sa, unsigned save_size)
+int program_flash_1(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
     volatile unsigned timeout;
     unsigned status;
@@ -1323,12 +1557,12 @@ int program_flash_1(unsigned sa, unsigned save_size)
      * while Intel status mode is active can itself be consumed as a command. */
     _FLASH_WRITE(sa, 0x50);
     _FLASH_WRITE(sa, 0xFF);
-    sram_bank_select(bank);
+    SRAM_BANK_SELECT(bank);
     for (unsigned i=0; i<save_size; i+=2) {
         address = sa + i;
         if (i == AGB_SRAM_SIZE) {
             bank = 1;
-            sram_bank_select(bank);
+            SRAM_BANK_SELECT(bank);
         }
         /* Cache the source before any high-A24 target command can latch D0 as
          * a different SRAM bank on the repro mapper. */
@@ -1354,14 +1588,14 @@ int program_flash_1(unsigned sa, unsigned save_size)
             result = 0;
             break;
         }
-        sram_bank_select(bank);
+        SRAM_BANK_RESELECT_AFTER_FLASH(bank);
     }
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
     return result;
 }
-asm("program_flash_1_end:");
+asm(".balign 4\nprogram_flash_1_end:");
 
-int identify_flash_2()
+int identify_flash_2(SRAM_BANK_SELECT_PARAMS_0)
 {
     unsigned rom_data, data;
     // stop_dma_interrupts();
@@ -1379,9 +1613,9 @@ int identify_flash_2()
     }
     return 0;
 }
-asm("identify_flash_2_end:");
+asm(".balign 4\nidentify_flash_2_end:");
 
-int erase_flash_2(unsigned sa, unsigned save_size)
+int erase_flash_2(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
     volatile unsigned timeout;
     // Erase at each possible 64 KiB boundary within a 128 KiB save area.
@@ -1407,18 +1641,18 @@ int erase_flash_2(unsigned sa, unsigned save_size)
     }
     return 1;
 }
-asm("erase_flash_2_end:");
+asm(".balign 4\nerase_flash_2_end:");
 
-int program_flash_2(unsigned sa, unsigned save_size)
+int program_flash_2(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
     volatile unsigned timeout;
     unsigned bank = 0;
     // Write data
-    sram_bank_select(bank);
+    SRAM_BANK_SELECT(bank);
     for (unsigned i=0; i<save_size; i+=2) {
         if (i == AGB_SRAM_SIZE) {
             bank = 1;
-            sram_bank_select(bank);
+            SRAM_BANK_SELECT(bank);
         }
         unsigned value =
             (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 |
@@ -1437,21 +1671,21 @@ int program_flash_2(unsigned sa, unsigned save_size)
         }
         if (timeout == 0) {
             _FLASH_WRITE(sa, 0xF0);
-            sram_bank_select(0);
+            SRAM_BANK_SELECT(0);
             return 0;
         }
         /* A target write with A24=1 also latches data bit 0 on the repro
          * mapper. The cached value made polling independent of that side
          * effect; restore the logical source bank before the next word. */
-        sram_bank_select(bank);
+        SRAM_BANK_RESELECT_AFTER_FLASH(bank);
     }
     _FLASH_WRITE(sa, 0xF0);
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
     return 1;
 }
-asm("program_flash_2_end:");
+asm(".balign 4\nprogram_flash_2_end:");
 
-int identify_flash_3()
+int identify_flash_3(SRAM_BANK_SELECT_PARAMS_0)
 {
     unsigned rom_data, data;
     // stop_dma_interrupts();
@@ -1469,9 +1703,9 @@ int identify_flash_3()
     }
     return 0;
 }
-asm("identify_flash_3_end:");
+asm(".balign 4\nidentify_flash_3_end:");
 
-int erase_flash_3(unsigned sa, unsigned save_size)
+int erase_flash_3(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
     volatile unsigned timeout;
     // Erase at each possible 64 KiB boundary within a 128 KiB save area.
@@ -1497,18 +1731,18 @@ int erase_flash_3(unsigned sa, unsigned save_size)
     }
     return 1;
 }
-asm("erase_flash_3_end:");
+asm(".balign 4\nerase_flash_3_end:");
 
-int program_flash_3(unsigned sa, unsigned save_size)
+int program_flash_3(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
     volatile unsigned timeout;
     unsigned bank = 0;
     // Write data
-    sram_bank_select(bank);
+    SRAM_BANK_SELECT(bank);
     for (unsigned i=0; i<save_size; i+=2) {
         if (i == AGB_SRAM_SIZE) {
             bank = 1;
-            sram_bank_select(bank);
+            SRAM_BANK_SELECT(bank);
         }
         unsigned value =
             (*(volatile unsigned char *)(AGB_SRAM_WINDOWED(i+1))) << 8 |
@@ -1527,33 +1761,33 @@ int program_flash_3(unsigned sa, unsigned save_size)
         }
         if (timeout == 0) {
             _FLASH_WRITE(sa, 0xF0);
-            sram_bank_select(0);
+            SRAM_BANK_SELECT(0);
             return 0;
         }
-        sram_bank_select(bank);
+        SRAM_BANK_RESELECT_AFTER_FLASH(bank);
     }
     _FLASH_WRITE(sa, 0xF0);
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
     return 1;
 }
-asm("program_flash_3_end:");
+asm(".balign 4\nprogram_flash_3_end:");
 
-int verify_flash(unsigned sa, unsigned save_size)
+int verify_flash(unsigned sa, unsigned save_size SRAM_BANK_SELECT_PARAMS_2)
 {
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
     for (unsigned i = 0; i < save_size; ++i) {
         if (i == AGB_SRAM_SIZE)
-            sram_bank_select(1);
+            SRAM_BANK_SELECT(1);
         if (*(volatile unsigned char *)(AGB_ROM + sa + i) !=
             *(volatile unsigned char *)AGB_SRAM_WINDOWED(i)) {
-            sram_bank_select(0);
+            SRAM_BANK_SELECT(0);
             return 0;
         }
     }
-    sram_bank_select(0);
+    SRAM_BANK_SELECT(0);
     return 1;
 }
-asm("verify_flash_end:");
+asm(".balign 4\nverify_flash_end:");
 
 asm(R"(
 .arm

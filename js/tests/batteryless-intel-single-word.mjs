@@ -67,7 +67,7 @@ for (const [name, range] of Object.entries(ranges)) {
 const source = readFileSync(
   new URL("../../payloads/batteryless-sram/payload.c", import.meta.url),
   "utf8",
-);
+).replaceAll("\r\n", "\n");
 assert.doesNotMatch(source, /m36|0x88C40020|0x88C60020|0x880F008A|0x88C50020/i);
 assert.doesNotMatch(
   source,
@@ -82,10 +82,10 @@ assert.doesNotMatch(
 
 const identifySource = source.slice(
   source.indexOf("int identify_flash_1"),
-  source.indexOf('asm("identify_flash_1_end:")'),
+  source.indexOf("identify_flash_1_end:"),
 );
 assert.ok(
-  identifySource.indexOf("sram_bank_select(0)") < identifySource.indexOf("_FLASH_WRITE(0, 0x50)"),
+  identifySource.indexOf("SRAM_BANK_SELECT(0)") < identifySource.indexOf("_FLASH_WRITE(0, 0x50)"),
   "SRAM mapper bank must be normalized before the Intel probe",
 );
 const unsupportedIntelBranch = identifySource.indexOf("if (data != 0x96)");
@@ -97,7 +97,7 @@ assert.ok(
 
 const programSource = source.slice(
   source.indexOf("int program_flash_1"),
-  source.indexOf('asm("program_flash_1_end:")'),
+  source.indexOf("program_flash_1_end:"),
 );
 for (const operation of [
   "0x40",
@@ -112,7 +112,7 @@ for (const operation of [
 assert.doesNotMatch(programSource, /0xE8|buffer/i, "Intel Type 1 must remain single-word only");
 
 const initialArrayReset = programSource.indexOf("_FLASH_WRITE(sa, 0xFF)");
-const initialBankSelect = programSource.indexOf("sram_bank_select(bank)");
+const initialBankSelect = programSource.indexOf("SRAM_BANK_SELECT(bank)");
 const intelSourceRead = programSource.indexOf("unsigned value =");
 const intelErasedSkip = programSource.indexOf("if (value == 0xFFFF)");
 const intelProgramCommand = programSource.indexOf("_FLASH_WRITE(address, 0x40)");
@@ -120,7 +120,7 @@ const intelTargetWrite = programSource.indexOf("_FLASH_WRITE(address, value)");
 const intelPoll = programSource.indexOf("for (timeout = 0x4000", intelTargetWrite);
 const intelClearStatus = programSource.indexOf("_FLASH_WRITE(address, 0x50)", intelPoll);
 const intelArrayReset = programSource.indexOf("_FLASH_WRITE(address, 0xFF)", intelClearStatus);
-const intelBankRestore = programSource.indexOf("sram_bank_select(bank)", intelArrayReset);
+const intelBankRestore = programSource.indexOf("SRAM_BANK_RESELECT_AFTER_FLASH(bank)", intelArrayReset);
 
 assert.ok(
   initialArrayReset >= 0 && initialArrayReset < initialBankSelect,
@@ -150,22 +150,22 @@ assert.ok(
   "Intel flash must leave status mode before restoring the logical SRAM bank",
 );
 assert.ok(
-  programSource.lastIndexOf("sram_bank_select(0)") > intelBankRestore,
+  programSource.lastIndexOf("SRAM_BANK_SELECT(0)") > intelBankRestore,
   "Intel program cleanup must return the mapper to bank zero",
 );
 
 const eraseSource = source.slice(
   source.indexOf("int erase_flash_1"),
-  source.indexOf('asm("erase_flash_1_end:")'),
+  source.indexOf("erase_flash_1_end:"),
 );
 assert.ok(
-  eraseSource.lastIndexOf("sram_bank_select(0)")
+  eraseSource.lastIndexOf("SRAM_BANK_SELECT(0)")
     > eraseSource.lastIndexOf("_FLASH_WRITE(erase_addr, 0xFF)"),
   "Type 1 erase cleanup must normalize bank zero after read-array reset",
 );
 assert.ok(
   eraseSource.lastIndexOf("return result")
-    > eraseSource.lastIndexOf("sram_bank_select(0)"),
+    > eraseSource.lastIndexOf("SRAM_BANK_SELECT(0)"),
   "Type 1 erase must normalize the mapper on success and failure",
 );
 
@@ -238,11 +238,11 @@ const runnerSource = source.slice(
 );
 for (const operation of [
   "cmp r11, # 0x100",
-  "ldr r9, =0x0203fe00",
+  "SRAM_DRIVER_WORKSPACE_START_ASM",
   "add r0, r9, # 0x100",
   "add r0, r9, # 0x120",
   "add sp, r9, # 0x200",
-  "add r2, r9, # 1",
+  "add r3, r9, # 1",
   "add r1, r9, # 0x200",
   "add r12, r9, # 0x200",
 ]) {
@@ -267,10 +267,7 @@ assert.equal(0x200 - fallbackRegisterFrame, 0x1e8, "stack bounds must account fo
 assert.ok(0x1e8 >= fallbackMaxAfterFrame, "post-frame WRAM bound must cover the fallback");
 for (const operation of [
   "push {r4, r5, r6, r7, r8, lr}",
-  "ldr r5, =0x020001e8",
-  "ldr r5, =0x02040000",
-  "ldr r5, =0x030001e8",
-  "ldr r5, =0x03008000",
+  "SRAM_DRIVER_STACK_BOUNDS_ASM",
   "bic sp, sp, # 7",
   "tst r8, # 4",
   "subne sp, sp, # 4",
@@ -282,6 +279,15 @@ for (const operation of [
 ]) {
   assert.ok(runnerSource.includes(operation), `missing safe stack fallback operation: ${operation}`);
 }
+for (const operation of [
+  "ldr r9, =0x0203fe00",
+  "ldr r5, =0x020001e8",
+  "ldr r5, =0x02040000",
+  "ldr r5, =0x030001e8",
+  "ldr r5, =0x03008000",
+]) {
+  assert.ok(source.includes(operation), `missing default workspace definition: ${operation}`);
+}
 assert.doesNotMatch(
   runnerSource,
   /(?:sub sp, sp|sub r2, r4), # 0x400/,
@@ -291,11 +297,11 @@ assert.doesNotMatch(
 for (const type of [2, 3]) {
   const amdSource = source.slice(
     source.indexOf(`int program_flash_${type}`),
-    source.indexOf(`asm("program_flash_${type}_end:")`),
+    source.indexOf(`program_flash_${type}_end:`),
   );
   const targetWrite = amdSource.indexOf("_FLASH_WRITE(sa+i, value)");
   const poll = amdSource.indexOf("for (timeout = 0x4000", targetWrite);
-  const bankRestore = amdSource.lastIndexOf("sram_bank_select(bank)");
+  const bankRestore = amdSource.lastIndexOf("SRAM_BANK_RESELECT_AFTER_FLASH(bank)");
   assert.ok(
     amdSource.indexOf("if (value == 0xFFFF)") < targetWrite,
     `Type ${type} must skip erased words before their high-A24 target write`,

@@ -19,6 +19,7 @@
 #define RTC_PERSIST_DISABLED 0xFFFFFFFFu
 #define RTC_PERSIST_FLAG_MAPPER_CLEANUP 1u
 #define RTC_PERSIST_FLAG_SHARED_SAVE_AREA 2u
+#define RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP 4u
 #define RTC_PERSIST_MAGIC 0x31544352u /* "RCT1" */
 #define RTC_PERSIST_COMMIT 0x46525443u /* same bytes as volatile RTC sentinel */
 #define RTC_PERSIST_VERSION 1u
@@ -395,6 +396,46 @@ RAM_CODE uint32_t rtc_mapper_cleanup_driver_end(void)
     return 0;
 }
 
+/* Visoly/Flash2Advance protects its SRAM bank register with a one-shot
+ * halfword-write sequence. The entire function, including its literals, is
+ * copied to the current stack before entry. Refuse to begin the sequence when
+ * that stack is not IWRAM. Interrupts and DMA are already paused by flush. */
+RAM_CODE uint32_t rtc_visoly_mapper_cleanup_driver(void)
+{
+    volatile uint16_t *command = (volatile uint16_t *)0x0802468Au;
+    uintptr_t execution_address;
+    uint32_t repeat;
+
+    __asm volatile("mov %0, pc" : "=r"(execution_address));
+    if (execution_address < 0x03000000u || execution_address >= 0x03008000u)
+        return 0;
+
+    *(volatile uint16_t *)0x0930ECA8u = 0x5354u;
+    *command = 0x1234u;
+    for (repeat = 0; repeat < 2000u; ++repeat)
+        __asm volatile("nop");
+    *(volatile uint16_t *)0x0800ECA8u = 0x5354u;
+    *command = 0x5354u;
+    *command = 0x5678u;
+    for (repeat = 0; repeat < 2000u; ++repeat)
+        __asm volatile("nop");
+    *(volatile uint16_t *)0x0930ECA8u = 0x5354u;
+    *command = 0x5354u;
+    *(volatile uint16_t *)0x08ECA800u = 0x5678u;
+    *(volatile uint16_t *)0x080268A0u = 0x1234u;
+    *command = 0xABCDu;
+    for (repeat = 0; repeat < 2000u; ++repeat)
+        __asm volatile("nop");
+    *(volatile uint16_t *)0x0930ECA8u = 0x5354u;
+    *(volatile uint16_t *)0x0942468Au = 0u;
+    return 1;
+}
+
+RAM_CODE uint32_t rtc_visoly_mapper_cleanup_driver_end(void)
+{
+    return 0;
+}
+
 static void runtime_pause(RuntimeBackup *backup)
 {
     backup->soundcnt_l = REG_SOUNDCNT_L;
@@ -430,10 +471,15 @@ static void runtime_restore(const RuntimeBackup *backup)
 
 static void mapper_cleanup(void)
 {
-    /* Only SRAM/custom pipelines that guarantee the A24/D0 mapper set this
-     * flag. The selector itself must execute from RAM; a bare write here is
-     * both unreliable on that mapper and a ROM write on ordinary hardware. */
-    if (rtc_persist_flags_config & RTC_PERSIST_FLAG_MAPPER_CLEANUP) {
+    /* Only pipelines with a known mapper set one of these flags. Either
+     * selector must execute from RAM; bare writes here would execute from
+     * GamePak ROM and could target ordinary hardware. */
+    if (rtc_persist_flags_config & RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP) {
+        (void)rtc_persist_run_from_stack(
+            0, 0,
+            (const void *)rtc_visoly_mapper_cleanup_driver,
+            (const void *)rtc_visoly_mapper_cleanup_driver_end);
+    } else if (rtc_persist_flags_config & RTC_PERSIST_FLAG_MAPPER_CLEANUP) {
         (void)rtc_persist_run_from_stack(
             0, 0,
             (const void *)rtc_mapper_cleanup_driver,
@@ -455,6 +501,8 @@ static uint32_t select_flash_driver(FlashDriver *driver)
     uint32_t result;
 
     driver->type = 0;
+    if (rtc_persist_flags_config & RTC_PERSIST_FLAG_VISOLY_MAPPER_CLEANUP)
+        mapper_cleanup();
     result = run_driver(
         (rtc_persist_flags_config & RTC_PERSIST_FLAG_MAPPER_CLEANUP) != 0u,
         0,

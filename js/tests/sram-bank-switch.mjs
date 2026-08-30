@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 
 import { patchSramBytes } from "../patchers/sram.js";
 import {
+  BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX,
   FLASH1M_BANK_SWITCH_MODERN_PATCH_HEX,
   PATCH_BY_SAVE_TYPE,
+  SRAM_CONSTANTS,
+  VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX,
 } from "../patchers/sram-data.js";
 
 const modernPatch = Buffer.from(FLASH1M_BANK_SWITCH_MODERN_PATCH_HEX, "hex");
@@ -55,6 +58,160 @@ assert.deepEqual(
   Buffer.from(patched.bytes.slice(markerOffset, markerOffset + modernPatch.length)),
   modernPatch,
 );
+
+const visolyHelper = Buffer.from(VISOLY_SRAM_BANK_SWITCH_PAYLOAD_HEX, "hex");
+const visolyPatched = patchSramBytes(input, {
+  saveTypeOverride: "FLASH1M_V103",
+  flash1mBankSwitchStyle: "visoly",
+});
+const visolyPayloadOperation = visolyPatched.result.operations.find(
+  (operation) => operation.metadata?.codeName === "visoly_sram_bank_switch_payload",
+);
+assert.ok(visolyPayloadOperation, "regular SRAM mode must install the Visoly/F2A helper");
+assert.deepEqual(
+  Buffer.from(visolyPatched.bytes.slice(
+    visolyPayloadOperation.offset,
+    visolyPayloadOperation.offset + visolyHelper.length,
+  )),
+  visolyHelper,
+);
+const visolyThunk = Buffer.from(
+  visolyPatched.bytes.slice(markerOffset, markerOffset + modernPatch.length),
+);
+assert.equal(
+  visolyThunk.subarray(0, 4).toString("hex"),
+  BATTERYLESS_FLASH1M_BANK_SWITCH_THUNK_HEX,
+);
+assert.equal(
+  visolyThunk.readUInt32LE(4),
+  0x08000000 + visolyPayloadOperation.offset + 1,
+);
+for (let offset = 8; offset < visolyThunk.length; offset += 2) {
+  assert.equal(visolyThunk.readUInt16LE(offset), 0x46c0);
+}
+
+// Execute the generated 132-byte IWRAM tail with a small Thumb-1 interpreter.
+// This validates the protected write order and all three exact 2000-NOP delays
+// independently from the C/assembly source text.
+function executeVisolyIwramTail(tail, bank) {
+  const registers = new Uint32Array(16);
+  registers[0] = bank >>> 0;
+  registers[14] = 0xfffffff1; // selector return address outside the copied tail
+  const writes = [];
+  const semanticEvents = [];
+  let nopCount = 0;
+  let pc = 0;
+  let zero = false;
+  let steps = 0;
+  while (steps++ < 25000) {
+    const instructionAddress = pc;
+    const instruction = tail.readUInt16LE(pc);
+    pc += 2;
+    if ((instruction & 0xf800) === 0x4800) {
+      const register = (instruction >>> 8) & 7;
+      const literalOffset = ((instructionAddress + 4) & ~3) + ((instruction & 0xff) << 2);
+      registers[register] = tail.readUInt32LE(literalOffset);
+    } else if ((instruction & 0xf800) === 0x8000) {
+      const source = instruction & 7;
+      const base = (instruction >>> 3) & 7;
+      const displacement = ((instruction >>> 6) & 0x1f) << 1;
+      writes.push([
+        (registers[base] + displacement) >>> 0,
+        registers[source] & 0xffff,
+      ]);
+      semanticEvents.push([
+        "write",
+        (registers[base] + displacement) >>> 0,
+        registers[source] & 0xffff,
+      ]);
+    } else if ((instruction & 0xf800) === 0x2000) {
+      const register = (instruction >>> 8) & 7;
+      registers[register] = instruction & 0xff;
+      zero = registers[register] === 0;
+    } else if ((instruction & 0xf800) === 0x0000) {
+      const destination = instruction & 7;
+      const source = (instruction >>> 3) & 7;
+      const shift = (instruction >>> 6) & 0x1f;
+      registers[destination] = (registers[source] << shift) >>> 0;
+      zero = registers[destination] === 0;
+    } else if ((instruction & 0xf800) === 0x3800) {
+      const register = (instruction >>> 8) & 7;
+      registers[register] = (registers[register] - (instruction & 0xff)) >>> 0;
+      zero = registers[register] === 0;
+    } else if ((instruction & 0xff00) === 0xd100) {
+      if (!zero) {
+        let displacement = instruction & 0xff;
+        if (displacement & 0x80) displacement -= 0x100;
+        pc = instructionAddress + 4 + displacement * 2;
+      }
+    } else if ((instruction & 0xffc0) === 0x4000) {
+      const destination = instruction & 7;
+      const source = (instruction >>> 3) & 7;
+      registers[destination] &= registers[source];
+      zero = registers[destination] === 0;
+    } else if ((instruction & 0xf800) === 0xf000) {
+      const second = tail.readUInt16LE(pc);
+      assert.equal(second & 0xf800, 0xf800, "Visoly BL must have a valid suffix");
+      pc += 2;
+      let highDisplacement = instruction & 0x07ff;
+      if (highDisplacement & 0x0400) highDisplacement -= 0x0800;
+      registers[14] = (instructionAddress + 4) | 1;
+      pc = instructionAddress + 4
+        + highDisplacement * 0x1000
+        + ((second & 0x07ff) << 1);
+    } else if (instruction === 0x46c0) {
+      nopCount += 1;
+      const previous = semanticEvents.at(-1);
+      if (previous?.[0] === "nop") previous[1] += 1;
+      else semanticEvents.push(["nop", 1]);
+    } else if ((instruction & 0xff00) === 0x4600) {
+      const source = (instruction >>> 3) & 0x0f;
+      const destination = (instruction & 7) | ((instruction >>> 4) & 8);
+      registers[destination] = registers[source];
+    } else if ((instruction & 0xff87) === 0x4700) {
+      const source = (instruction >>> 3) & 0x0f;
+      const target = (registers[source] & ~1) >>> 0;
+      if (target >= tail.length) return { writes, semanticEvents, nopCount };
+      pc = target;
+    } else {
+      assert.fail(`unsupported Visoly Thumb instruction 0x${instruction.toString(16)}`);
+    }
+  }
+  assert.fail("Visoly IWRAM tail did not return");
+}
+
+assert.equal(SRAM_CONSTANTS.VISOLY_SRAM_BANK_SWITCH_RAM_OFFSET, 0x54);
+assert.equal(SRAM_CONSTANTS.VISOLY_SRAM_BANK_SWITCH_RAM_SIZE, 0x84);
+assert.equal(visolyHelper.readUInt16LE(0), 0xb438); // preserve r3-r5
+assert.equal(visolyHelper.readUInt16LE(2), 0xb500); // preserve LR
+assert.equal(visolyHelper.readUInt16LE(0x12), 0xb0a1); // reserve 132 IWRAM bytes
+assert.equal(visolyHelper.readUInt16LE(0x36) & 0xff00, 0x4c00); // reload IME into r4
+assert.equal(visolyHelper.readUInt16LE(0x38), 0x8025); // restore prior IME from r5
+const visolyTail = visolyHelper.subarray(
+  SRAM_CONSTANTS.VISOLY_SRAM_BANK_SWITCH_RAM_OFFSET,
+  SRAM_CONSTANTS.VISOLY_SRAM_BANK_SWITCH_RAM_OFFSET
+    + SRAM_CONSTANTS.VISOLY_SRAM_BANK_SWITCH_RAM_SIZE,
+);
+const visolyExecution = executeVisolyIwramTail(visolyTail, 5);
+assert.equal(visolyExecution.writes.length, 12);
+assert.equal(visolyExecution.nopCount, 6000);
+assert.deepEqual(visolyExecution.semanticEvents, [
+  ["write", 0x0930eca8, 0x5354],
+  ["write", 0x0802468a, 0x1234],
+  ["nop", 2000],
+  ["write", 0x0800eca8, 0x5354],
+  ["write", 0x0802468a, 0x5354],
+  ["write", 0x0802468a, 0x5678],
+  ["nop", 2000],
+  ["write", 0x0930eca8, 0x5354],
+  ["write", 0x0802468a, 0x5354],
+  ["write", 0x08eca800, 0x5678],
+  ["write", 0x080268a0, 0x1234],
+  ["write", 0x0802468a, 0xabcd],
+  ["nop", 2000],
+  ["write", 0x0930eca8, 0x5354],
+  ["write", 0x0942468a, 1],
+]);
 
 function installIdentifier(bytes, identifier, base) {
   if (identifier.marker) {

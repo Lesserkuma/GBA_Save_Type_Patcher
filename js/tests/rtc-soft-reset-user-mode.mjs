@@ -43,6 +43,7 @@ const probe = offsetOf("payload_probe");
 const userSnapshot = offsetOf("rtc_user_snapshot");
 const irqSnapshot = offsetOf("rtc_user_snapshot_irq");
 const privilegedSnapshot = offsetOf("rtc_snapshot_privileged");
+const menuOnBootConfig = offsetOf("rtc_menu_on_boot_config");
 const zodiacProbe = offsetOf("payload_zodiac_probe");
 const zodiacGetTimeDate = offsetOf("payload_zodiac_gettimedate");
 const zodiacAvailableConfig = offsetOf("payload_zodiac_available_address_config");
@@ -50,6 +51,9 @@ const zodiacStatusConfig = offsetOf("payload_zodiac_status_address_config");
 const runtimeMenu = offsetOf("fake_rtc_menu_run_runtime");
 const backupScratch = offsetOf("select_runtime_backup_scratch");
 const backupVisualState = offsetOf("runtime_backup_visual_state");
+
+assert.equal(menuOnBootConfig, RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_CONFIG_OFFSET);
+assert.equal(readU32(bytes, menuOnBootConfig), RTC_PAYLOAD_CONSTANTS.RTC_MENU_ON_BOOT_SHOW);
 
 // Probe must identify User mode before attempting any banked-register access.
 assert.equal(readU32(bytes, probe + 4), 0xe10f3000); // mrs r3, cpsr
